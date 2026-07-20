@@ -47,7 +47,7 @@ packages/
 - **RoomType** 房型模板:id, name, description, defaultRent, defaultDeposit, defaultPayCycle, defaultFeeItems(JSON: [{name, amount}]), furnitureList(JSON)
 - **Room** 房间:id, buildingId, roomNo, floor, roomTypeId, status(VACANT/RENTED/MAINTENANCE), rentOverride?, photos(JSON), remark;唯一约束(buildingId, roomNo)
 - **Tenant** 租客:id, openid?(绑定后填), name, phone, idCard?
-- **Lease** 租约:id, roomId, tenantId, startDate, endDate, rent, deposit, payCycle(MONTHLY/QUARTERLY/YEARLY), feeItems(JSON, 固定附加费), status(ACTIVE/ENDED), inviteCode(唯一), endedAt?, endReason?
+- **Lease** 租约:id, roomId, tenantId, startDate, endDate, rent, deposit, payCycle(MONTHLY/QUARTERLY/YEARLY), feeItems(JSON, 固定附加费如清洁费/停车费), carPlate?, commission?(佣金/中介费), status(ACTIVE/ENDED), inviteCode(唯一), endedAt?, endReason?
 - **Bill** 账单:id, leaseId, periodStart, periodEnd, dueDate, status(PENDING/PAID/OVERDUE/CANCELED), totalAmount(冗余=items合计)
 - **BillItem** 账单费用项:id, billId, type(RENT/FEE/LATE_FEE/OTHER), name, amount
 - **Payment** 支付记录:id, billId, channel(QRCODE/WECHATPAY/CASH/TRANSFER), amount, status(PENDING_CONFIRM/CONFIRMED/REJECTED), proofUrl?, paidAt, confirmedBy?(landlordId), confirmedAt?
@@ -55,6 +55,7 @@ packages/
 - **HandoverRecord** 交接:id, leaseId, type(CHECKIN/CHECKOUT), checklist(JSON), remark
 - **MaintenanceRecord** 维修:id, roomId, date, content, cost, operatorId
 - **ReminderLog** 提醒记录:id, billId, tenantId, type(PRE/DUE/OVERDUE), sentAt, channel, success
+- **Expense** 支出:id, date, category(自由文本或字典), name, amount, remark?, buildingId?, roomId?, operatorId
 - **AuditLog** 操作日志:id, operatorId, action, entityType, entityId, detail(JSON), createdAt
 
 关系要点:Room 1-N Lease(历史);Lease 1-N Bill;Bill 1-N Payment;Tenant 1-N Lease(可回头再租)。房间详情页聚合 = 按 roomId 串起以上所有表。
@@ -88,5 +89,6 @@ REST,前缀 /api/v1,统一响应 `{code, message, data}`。分组:auth、buildin
 
 - 提交信息:`feat|fix|docs|chore: 描述`,每完成一个 task 至少一次提交并 push
 - 后端核心业务(账单引擎、滞纳金、收款状态机)必须有单元测试;账期滚动的边界(月末、跨年)必须覆盖
+- CSV 导入命令 `pnpm import:init -- <dir>`:从 data/import/ 下的标准 CSV(buildings/room_types/rooms/leases,格式见 CSV 表头,由 Claude 提供)一次性导入初始数据,幂等可重跑
 - 种子脚本 `pnpm seed`:生成 4 栋楼、3 种房型、300 间房、若干租约与账单,供自测和演示
 - docker-compose 一键起 MySQL;README 写清本地启动步骤
