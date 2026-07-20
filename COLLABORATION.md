@@ -17,3 +17,6 @@
 1. 与用户讨论后更新 specs/
 2. Kiro 提交代码后,对照 spec 审查,意见写入 `review/review-notes.md`
 3. 回复 `questions.md` 中的问题(在问题下方以 **答:** 开头)
+
+## Kiro 开工指令
+用户说「开工」即执行:读完 specs/ 三份文档后,从 tasks.md 第一个未勾选任务开始,按顺序开发。所有对外部服务(微信、短信等)的依赖已在 design.md 中约定 mock 方案,没有任何凭证也能开发和自测。完成即勾选、提交、push,遇到决策疑问写 questions.md,不要自行假设。
