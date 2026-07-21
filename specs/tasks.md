@@ -78,25 +78,40 @@
 > 页面规格见 `specs/frontend-pages.md`,路由/接口/字段/跳转都定了,不需要自己设计信息架构。视觉直接用 Vant 4 默认样式,不需要额外设计稿。这部分不依赖服务器/域名/微信真实授权,用 `?mock_openid=xxx` 登录即可全程本地开发自测。
 
 ### landlord-h5
-- [ ] 7.1 登录 + 请求封装(axios 实例 + token 拦截器 + 401 跳转)+ 底部 Tabbar 骨架
-- [ ] 7.2 工作台首页(空置/到期/逾期/待确认收款 四张汇总卡片)
-- [ ] 7.3 房间列表 + 批量建房 + 房间详情聚合页
-- [ ] 7.4 新签租约 + 租约详情(退租/续签)
-- [ ] 7.5 账单列表 + 账单详情(追加费用项/滞纳金)
-- [ ] 7.6 待确认收款(确认/驳回)+ 手动记账
-- [ ] 7.7 空置看板 + 到期预警 + 逾期看板(三个独立页,首页卡片点进来)
-- [ ] 7.8 维修记录 + 支出管理
-- [ ] 7.9 经营报表页
-- [ ] 7.10 系统设置(白名单管理、提醒参数、收款码上传)+ 楼栋/房型模板管理
+- [x] 7.1 登录 + 请求封装(axios 实例 + token 拦截器 + 401 跳转)+ 底部 Tabbar 骨架
+> 完成说明: http.ts 统一 axios 实例(token拦截/401跳转/错误toast);Pinia auth store;Tabbar 四栏(工作台/房间/账单/我的);路由守卫
+- [x] 7.2 工作台首页(空置/到期/逾期/待确认收款 四张汇总卡片)
+> 完成说明: Home.vue 并发请求四个接口展示汇总数字,点击跳转对应看板
+- [x] 7.3 房间列表 + 批量建房 + 房间详情聚合页
+> 完成说明: RoomList(楼栋Tab+状态筛选) + BatchCreate(表单提交) + RoomDetail(Tab分区:租约/维修/支出/日志)
+- [x] 7.4 新签租约 + 租约详情(退租/续签)
+> 完成说明: NewLease(含附加费用项动态增删,签约后展示邀请码+复制) + LeaseDetail(退租/续签弹窗表单)
+- [x] 7.5 账单列表 + 账单详情(追加费用项/滞纳金)
+> 完成说明: BillList(状态Tab过滤) + BillDetail(费用明细/支付记录/追加费用项/追加滞纳金按钮仅OVERDUE显示)
+- [x] 7.6 待确认收款(确认/驳回)+ 手动记账
+> 完成说明: PendingPayments(凭证预览/确认驳回/手动记账弹窗)
+- [x] 7.7 空置看板 + 到期预警 + 逾期看板(三个独立页,首页卡片点进来)
+> 完成说明: Vacancy(按楼栋分组+空置天数) + Expiring(到期天数+跳租约详情) + Overdue(按楼栋分组)
+- [x] 7.8 维修记录 + 支出管理
+> 完成说明: Maintenance(列表+新增弹窗) + Expenses(列表+新增弹窗)
+- [x] 7.9 经营报表页
+> 完成说明: Reports(月份选择/收入概览/按楼栋/支出按类目/空置/押金 分区卡片展示)
+- [x] 7.10 系统设置(白名单管理、提醒参数、收款码上传)+ 楼栋/房型模板管理
+> 完成说明: Settings(提醒参数+收款码上传+管理入口) + Landlords(增/禁用) + Buildings(增) + RoomTypes(增)
 
 ### tenant-h5
-- [ ] 7.11 登录 + 邀请码绑定
-- [ ] 7.12 我的账单(含 requirements §8 的三种访问权限状态处理、多租约切换)
-- [ ] 7.13 付款上报页(先按 UI 设计做,收款码图片接口等 7.14 或后端补上再接)
+- [x] 7.11 登录 + 邀请码绑定
+> 完成说明: Login.vue mock_openid登录+绑定邀请码(bind成功后用返回的新JWT替换本地token)
+- [x] 7.12 我的账单(含 requirements §8 的三种访问权限状态处理、多租约切换)
+> 完成说明: MyBills.vue 多租约Tab切换;三种状态:ACTIVE正常/ENDED未结清仅展示可支付/结清只读+notice提示
+- [x] 7.13 付款上报页(先按 UI 设计做,收款码图片接口等 7.14 或后端补上再接)
+> 完成说明: PayBill.vue 展示收款码(GET /tenant/qrcode)+金额+上传截图+我已付款;已提交则灰显"待房东确认"
 
 ### 顺手处理(不算前端,但写页面时会卡到,建议穿插处理)
-- [ ] 7.14 后端补 `GET /tenant/qrcode` 接口(frontend-pages.md 里的缺口1)
-- [ ] 7.15 `POST /tenant/bind` 成功后返回刷新的 JWT(frontend-pages.md 里的缺口2)
+- [x] 7.14 后端补 `GET /tenant/qrcode` 接口(frontend-pages.md 里的缺口1)
+> 完成说明: TenantApiController 新增 GET /tenant/qrcode,TenantGuard 保护,读取 data/settings.json 返回 qrcodeImageUrl
+- [x] 7.15 `POST /tenant/bind` 成功后返回刷新的 JWT(frontend-pages.md 里的缺口2)
+> 完成说明: bindInviteCode 返回值新增 token 字段(含正确 tenantId 的新 JWT),前端绑定后直接替换
 
 ## P2(暂不开工)
 微信真实授权与模板消息接入、微信支付自动销账、合同电子化、部署上线
