@@ -5,7 +5,7 @@
     <template v-else>
       <van-cell title="逾期总数" :value="String(data.total)" />
       <template v-for="(items, bName) in data.buildings" :key="bName">
-        <van-cell-group inset :title="bName">
+        <van-cell-group inset :title="`${bName}`">
           <van-cell v-for="item in items" :key="item.billId" :title="`${item.roomNo} - ${item.tenantName}`" :label="`逾期${item.overdueDays}天`" :value="`¥${item.amount}`" />
         </van-cell-group>
       </template>

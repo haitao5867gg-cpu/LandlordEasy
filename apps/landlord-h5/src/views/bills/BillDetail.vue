@@ -32,11 +32,27 @@
       <div v-else-if="['PENDING','OVERDUE'].includes(bill.status)" style="padding:16px;">
         <van-button block @click="showAddItem = true">追加费用项</van-button>
       </div>
+      <div v-if="['PENDING','OVERDUE'].includes(bill.status)" style="padding:0 16px 16px;">
+        <van-button block plain type="success" @click="showManualPay = true">手动记账(现金/转账)</van-button>
+      </div>
     </template>
 
     <van-dialog v-model:show="showAddItem" title="追加费用项" show-cancel-button @confirm="handleAddItem">
       <van-field v-model="newItem.name" label="名称" placeholder="费用项名称" />
       <van-field v-model.number="newItem.amount" label="金额" type="number" />
+    </van-dialog>
+
+    <van-dialog v-model:show="showManualPay" title="手动记账" show-cancel-button @confirm="handleManualPay">
+      <van-field name="channel" label="渠道">
+        <template #input>
+          <van-radio-group v-model="manualForm.channel" direction="horizontal">
+            <van-radio name="CASH">现金</van-radio>
+            <van-radio name="TRANSFER">转账</van-radio>
+          </van-radio-group>
+        </template>
+      </van-field>
+      <van-field v-model.number="manualForm.amount" label="金额" type="number" :placeholder="`${bill?.totalAmount}`" />
+      <van-field v-model="manualForm.paidAt" label="付款日期" placeholder="YYYY-MM-DD" />
     </van-dialog>
   </div>
 </template>
@@ -52,7 +68,9 @@ const route = useRoute();
 const bill = ref<any>(null);
 const loading = ref(true);
 const showAddItem = ref(false);
+const showManualPay = ref(false);
 const newItem = reactive({ name: '', amount: 0 });
+const manualForm = reactive({ channel: 'CASH', amount: 0, paidAt: new Date().toISOString().slice(0, 10) });
 
 function d(s: string) { return s?.split('T')[0] || ''; }
 function statusLabel(s: string) { return billStatusMap[s] || s; }
@@ -84,6 +102,19 @@ async function handleAddItem() {
 async function handleLateFee() {
   await http.post(`/bills/${route.params.id}/late-fee`, {});
   showToast('滞纳金已追加');
+  await fetchBill();
+}
+
+async function handleManualPay() {
+  const data = {
+    billId: Number(route.params.id),
+    channel: manualForm.channel,
+    amount: manualForm.amount || Number(bill.value?.totalAmount),
+    paidAt: manualForm.paidAt,
+  };
+  await http.post('/payments/manual', data);
+  showToast('记账成功');
+  manualForm.amount = 0;
   await fetchBill();
 }
 </script>

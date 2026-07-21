@@ -50,11 +50,17 @@ const form = reactive({ amount: 0, paidAt: new Date().toISOString().slice(0, 10)
 
 onMounted(async () => {
   try {
-    const [billData, qrRes] = await Promise.all([
-      http.get(`/bills/${route.params.id}`),
+    const [leasesData, qrRes] = await Promise.all([
+      http.get('/tenant/bills'),
       http.get('/tenant/qrcode'),
     ]);
-    bill.value = billData;
+    // 从租客账单数据中查找对应 billId
+    const billId = Number(route.params.id);
+    const allLeases = leasesData as any[];
+    for (const lease of allLeases) {
+      const found = lease.bills?.find((b: any) => b.id === billId);
+      if (found) { bill.value = found; break; }
+    }
     qrcodeUrl.value = (qrRes as any).qrcodeImageUrl || '';
     form.amount = Number(bill.value?.totalAmount) || 0;
 

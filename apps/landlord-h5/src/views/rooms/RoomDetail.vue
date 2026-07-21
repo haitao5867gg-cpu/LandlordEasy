@@ -17,6 +17,7 @@
             <van-tag :type="room.status === 'RENTED' ? 'success' : 'default'">{{ statusMap[room.status] || room.status }}</van-tag>
           </template>
         </van-cell>
+        <van-cell v-if="currentDebt > 0" title="当前欠费" :value="`¥${currentDebt.toFixed(2)}`" value-class="debt-value" />
       </van-cell-group>
 
       <van-tabs v-model:active="activeTab">
@@ -61,7 +62,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import http from '../../utils/http';
 import { roomStatusMap } from '../../utils/status';
@@ -71,6 +72,20 @@ const room = ref<any>(null);
 const loading = ref(true);
 const activeTab = ref(0);
 const statusMap = roomStatusMap;
+
+const currentDebt = computed(() => {
+  if (!room.value?.leases) return 0;
+  let debt = 0;
+  for (const lease of room.value.leases) {
+    if (lease.status !== 'ACTIVE') continue;
+    for (const bill of lease.bills || []) {
+      if (['PENDING', 'OVERDUE'].includes(bill.status)) {
+        debt += Number(bill.totalAmount);
+      }
+    }
+  }
+  return debt;
+});
 
 onMounted(async () => {
   try {
