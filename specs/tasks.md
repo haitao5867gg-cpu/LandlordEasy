@@ -113,5 +113,27 @@
 - [x] 7.15 `POST /tenant/bind` 成功后返回刷新的 JWT(frontend-pages.md 里的缺口2)
 > 完成说明: bindInviteCode 返回值新增 token 字段(含正确 tenantId 的新 JWT),前端绑定后直接替换
 
+## M8 部署预演 + 微信真实接入
+
+> 进度:服务器(腾讯云轻量应用)已申请到手;域名已购买,注册审核中,审核通过后还要走 ICP 备案(通常1~3周)。这个等待期不是空档——本节任务全部不依赖域名/备案,先做完;真实微信登录的端到端联调和正式部署,等备案下来再收尾(见8.10)。
+
+### Review 3 遗留问题(优先处理,见 review-notes.md)
+- [ ] 8.1 修复 tenant-h5 编译错误:`PayBill.vue` 第59行 `leasesData as any[]` 类型转换报错(TS2352),改成 `as unknown as any[]` 或改写整个 Promise.all 的类型标注
+- [ ] 8.2 删除 `PendingPayments.vue` 里手输账单ID的旧手动记账弹窗,统一走 `BillDetail.vue` 里新加的手动记账入口(带 billId,不用手输)
+- [ ] 8.3 清理误提交的构建产物:`git rm --cached` 掉 `apps/server/tsconfig.tsbuildinfo`、两个前端的 `tsconfig.node.tsbuildinfo`、`vite.config.js`/`.d.ts`(+`.map`),并在 `.gitignore` 里补上 `*.tsbuildinfo` 和 `vite.config.js`/`vite.config.d.ts*` 规则
+
+### 部署预演(用服务器公网IP+端口测试,不需要域名)
+- [ ] 8.4 服务器基础环境搭建:装 Docker + docker-compose,把仓库里现成的 `docker-compose.yml` 跑起来,确认能用「服务器IP:端口」访问通
+- [ ] 8.5 服务器安全基础项:SSH 改密钥登录、禁用密码登录,防火墙/安全组只放行必要端口(22/80/443)。**需要服务器登录方式,主动找 GasCan 要,不要等他主动给。**
+- [ ] 8.6 预先写好 Nginx 反代配置 + Let's Encrypt 申请命令(先不跑证书申请,域名备案下来后跑一次就行)
+
+### 微信真实接入(服务号已认证,不需要域名)
+- [ ] 8.7 实现 `RealWechatAuthService.getOpenidByCode`(调微信 OAuth2.0 接口换 openid)。**需要 AppID + AppSecret,主动找 GasCan 要,他会去服务号后台「开发-基本配置」里拿。**
+- [ ] 8.8 实现 `RealWechatNotifyService.sendTemplateMessage`(调模板消息 API)。**需要模板消息 template_id,主动找 GasCan 要,他会去服务号后台申请"催租提醒"模板。**
+- [ ] 8.9 前端登录页适配真实微信授权跳转(`WECHAT_MODE=real` 时走真实 code 换取流程;`mock` 模式保持不变,不要破坏现有本地开发流程)
+
+### 域名备案下来之后再做(暂不开工)
+- [ ] 8.10 正式部署上线:域名 + HTTPS + 真实微信登录端到端联调
+
 ## P2(暂不开工)
-微信真实授权与模板消息接入、微信支付自动销账、合同电子化、部署上线
+微信支付自动销账、合同电子化

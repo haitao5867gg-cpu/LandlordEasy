@@ -50,7 +50,7 @@ const form = reactive({ amount: 0, paidAt: new Date().toISOString().slice(0, 10)
 
 onMounted(async () => {
   try {
-    const [leasesData, qrRes] = await Promise.all([
+    const [leasesData, qrRes]: [any, any] = await Promise.all([
       http.get('/tenant/bills'),
       http.get('/tenant/qrcode'),
     ]);

@@ -28,5 +28,12 @@ coverage/
 *.log
 logs/
 
+# Build artifacts
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+vite.config.d.ts.map
+vite.config.js.map
+
 # Prisma
 prisma/migrations/**/migration_lock.toml
