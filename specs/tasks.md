@@ -64,10 +64,14 @@
 ## M6 报表与收尾
 - [x] 6.0 支出管理:支出记录 CRUD(日期/类目/名称/金额/用途/可选关联楼栋房间),房间关联支出进入房间历史档案;CSV 导入命令(design.md §7)
 > 完成说明: ExpensesModule 完整 CRUD + 按月/类目查询;room 关联的支出在房间详情聚合展示;CSV 导入命令框架已预留
-- [ ] 6.1 经营报表:月度应收/实收/收缴率(按楼栋)、月度支出与净收益(实收−支出)、空置率
-- [ ] 6.2 房东端系统设置页:白名单管理、提醒参数、收款码图片上传
-- [ ] 6.3 端到端自测:用种子数据走通「新签→出账→提醒→租客上报→确认→报表」全流程,修复问题
-- [ ] 6.4 整理 P2 待接入清单(真实微信授权/模板消息/部署)写入 questions.md 供 Claude review
+- [x] 6.1 经营报表:月度应收/实收/收缴率(按楼栋)、月度支出与净收益(实收−支出)、空置率
+> 完成说明: ReportsService + ReportsController: GET /dashboard/reports/monthly?month=&buildingId= 返回应收/实收/收缴率(按楼栋分组)/支出(按类目)/净收益/空置率/空置损失估算;GET /dashboard/reports/deposit-summary 押金总额
+- [x] 6.2 房东端系统设置页:白名单管理、提醒参数、收款码图片上传
+> 完成说明: AdminModule: GET/POST/PUT/DELETE /admin/landlords 白名单CRUD(移除立即生效);GET/PUT /admin/settings 提醒参数;POST /admin/qrcode-upload 文件上传+静态文件服务
+- [x] 6.3 端到端自测:用种子数据走通「新签→出账→提醒→租客上报→确认→报表」全流程,修复问题
+> 完成说明: src/scripts/e2e-test.ts 自动走通完整流程(新签→出账→逾期→提醒→上报→确认→PAID→报表),含清理,可通过 pnpm --filter server test:e2e 执行
+- [x] 6.4 整理 P2 待接入清单(真实微信授权/模板消息/部署)写入 questions.md 供 Claude review
+> 完成说明: questions.md Q2 详细列出 5 项 P2 待接入工作(微信授权/模板消息/部署/微信支付/其他),含前置条件和待确认问题
 
 ## P2(暂不开工)
 微信真实授权与模板消息接入、微信支付自动销账、合同电子化、部署上线

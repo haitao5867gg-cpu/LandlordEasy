@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ServeStaticModule } from '@nestjs/serve-static';
+import { join } from 'path';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './health/health.module';
 import { WechatModule } from './wechat/wechat.module';
@@ -16,11 +18,16 @@ import { PaymentsModule } from './payments/payments.module';
 import { RemindersModule } from './reminders/reminders.module';
 import { TenantApiModule } from './tenant-api/tenant-api.module';
 import { ExpensesModule } from './expenses/expenses.module';
+import { AdminModule } from './admin/admin.module';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 
 @Module({
   imports: [
     ScheduleModule.forRoot(),
+    ServeStaticModule.forRoot({
+      rootPath: join(process.cwd(), 'data/uploads'),
+      serveRoot: '/uploads',
+    }),
     PrismaModule,
     HealthModule,
     WechatModule,
@@ -36,6 +43,7 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
     RemindersModule,
     TenantApiModule,
     ExpensesModule,
+    AdminModule,
   ],
   providers: [
     {
