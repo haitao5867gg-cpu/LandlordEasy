@@ -85,11 +85,11 @@ async function main() {
   ]);
   console.log(`✅ 创建 ${roomTypes.length} 种房型`);
 
-  // 300间房(每栋75间,6层,每层12-13间)
+  // 300间房(每栋75间,5层,每层15间)
   const rooms: { id: number; buildingId: number }[] = [];
   for (const building of buildings) {
-    for (let floor = 1; floor <= 6; floor++) {
-      const roomsPerFloor = floor <= 5 ? 13 : 12; // 最高层少1间 = 75间/栋
+    for (let floor = 1; floor <= 5; floor++) {
+      const roomsPerFloor = 15; // 5层×15间 = 75间/栋, 4栋 = 300间
       for (let num = 1; num <= roomsPerFloor; num++) {
         const roomNo = `${floor}${num.toString().padStart(2, '0')}`;
         // 按比例分配房型: 60%标准单间, 30%大单间, 10%一室一厅

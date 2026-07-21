@@ -16,6 +16,12 @@ export class TenantApiService {
       throw new BadRequestException('该租约已结束');
     }
 
+    // 检查 openid 是否已绑定其他租客
+    const existingTenant = await this.prisma.tenant.findUnique({ where: { openid } });
+    if (existingTenant && existingTenant.id !== lease.tenantId) {
+      throw new BadRequestException('该微信号已绑定其他租客,请联系房东合并');
+    }
+
     // 将 openid 绑定到租客
     const tenant = await this.prisma.tenant.update({
       where: { id: lease.tenantId },
