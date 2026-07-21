@@ -1,0 +1,20 @@
+{
+  "name": "landlord-easy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "房屋收租管理系统",
+  "scripts": {
+    "dev:server": "pnpm --filter server dev",
+    "dev:landlord": "pnpm --filter landlord-h5 dev",
+    "dev:tenant": "pnpm --filter tenant-h5 dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "format": "prettier --write \"**/*.{ts,tsx,vue,json,md}\"",
+    "seed": "pnpm --filter server seed",
+    "import:init": "pnpm --filter server import:init"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

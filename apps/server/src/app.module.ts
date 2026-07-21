@@ -1,0 +1,39 @@
+import { Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
+import { PrismaModule } from './prisma/prisma.module';
+import { HealthModule } from './health/health.module';
+import { WechatModule } from './wechat/wechat.module';
+import { AuthModule } from './auth/auth.module';
+import { BuildingsModule } from './buildings/buildings.module';
+import { RoomTypesModule } from './room-types/room-types.module';
+import { RoomsModule } from './rooms/rooms.module';
+import { DashboardModule } from './dashboard/dashboard.module';
+import { MaintenanceModule } from './maintenance/maintenance.module';
+import { LeasesModule } from './leases/leases.module';
+import { BillsModule } from './bills/bills.module';
+import { PaymentsModule } from './payments/payments.module';
+import { RemindersModule } from './reminders/reminders.module';
+import { TenantApiModule } from './tenant-api/tenant-api.module';
+import { ExpensesModule } from './expenses/expenses.module';
+
+@Module({
+  imports: [
+    ScheduleModule.forRoot(),
+    PrismaModule,
+    HealthModule,
+    WechatModule,
+    AuthModule,
+    BuildingsModule,
+    RoomTypesModule,
+    RoomsModule,
+    DashboardModule,
+    MaintenanceModule,
+    LeasesModule,
+    BillsModule,
+    PaymentsModule,
+    RemindersModule,
+    TenantApiModule,
+    ExpensesModule,
+  ],
+})
+export class AppModule {}

@@ -1,0 +1,283 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ========== 房东 ==========
+model Landlord {
+  id        Int      @id @default(autoincrement())
+  openid    String   @unique
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  auditLogs      AuditLog[]
+  depositRecords DepositRecord[]
+  payments       Payment[]       @relation("ConfirmedBy")
+  expenses       Expense[]
+
+  @@map("landlords")
+}
+
+// ========== 楼栋 ==========
+model Building {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  sort      Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rooms    Room[]
+  expenses Expense[] @relation("BuildingExpense")
+
+  @@map("buildings")
+}
+
+// ========== 房型模板 ==========
+model RoomType {
+  id              Int      @id @default(autoincrement())
+  name            String   @unique
+  description     String?  @db.Text
+  defaultRent     Decimal  @db.Decimal(10, 2)
+  defaultDeposit  Decimal  @db.Decimal(10, 2)
+  defaultPayCycle String   @default("MONTHLY")
+  defaultFeeItems Json?    // [{name, amount}]
+  furnitureList   Json?    // [string]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  rooms Room[]
+
+  @@map("room_types")
+}
+
+// ========== 房间 ==========
+model Room {
+  id           Int      @id @default(autoincrement())
+  buildingId   Int
+  roomNo       String
+  floor        Int
+  roomTypeId   Int?
+  status       String   @default("VACANT") // VACANT / RENTED / MAINTENANCE
+  rentOverride Decimal? @db.Decimal(10, 2)
+  photos       Json?    // [string] URLs
+  remark       String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  building           Building            @relation(fields: [buildingId], references: [id])
+  roomType           RoomType?           @relation(fields: [roomTypeId], references: [id])
+  leases             Lease[]
+  maintenanceRecords MaintenanceRecord[]
+  expenses           Expense[]           @relation("RoomExpense")
+
+  @@unique([buildingId, roomNo])
+  @@map("rooms")
+}
+
+// ========== 租客 ==========
+model Tenant {
+  id        Int      @id @default(autoincrement())
+  openid    String?  @unique
+  name      String
+  phone     String
+  idCard    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  leases       Lease[]
+  reminderLogs ReminderLog[]
+
+  @@map("tenants")
+}
+
+// ========== 租约 ==========
+model Lease {
+  id         Int       @id @default(autoincrement())
+  roomId     Int
+  tenantId   Int
+  startDate  DateTime  @db.Date
+  endDate    DateTime  @db.Date
+  rent       Decimal   @db.Decimal(10, 2)
+  deposit    Decimal   @db.Decimal(10, 2)
+  payCycle   String    @default("MONTHLY") // MONTHLY / QUARTERLY / YEARLY
+  feeItems   Json?     // [{name, amount}]
+  carPlate   String?
+  commission Decimal?  @db.Decimal(10, 2)
+  status     String    @default("ACTIVE") // ACTIVE / ENDED
+  inviteCode String    @unique
+  endedAt    DateTime?
+  endReason  String?   @db.Text
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  room            Room              @relation(fields: [roomId], references: [id])
+  tenant          Tenant            @relation(fields: [tenantId], references: [id])
+  bills           Bill[]
+  depositRecords  DepositRecord[]
+  handoverRecords HandoverRecord[]
+
+  @@map("leases")
+}
+
+// ========== 账单 ==========
+model Bill {
+  id          Int      @id @default(autoincrement())
+  leaseId     Int
+  periodStart DateTime @db.Date
+  periodEnd   DateTime @db.Date
+  dueDate     DateTime @db.Date
+  status      String   @default("PENDING") // PENDING / PAID / OVERDUE / CANCELED
+  totalAmount Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  lease        Lease         @relation(fields: [leaseId], references: [id])
+  items        BillItem[]
+  payments     Payment[]
+  reminderLogs ReminderLog[]
+
+  @@unique([leaseId, periodStart])
+  @@map("bills")
+}
+
+// ========== 账单费用项 ==========
+model BillItem {
+  id        Int      @id @default(autoincrement())
+  billId    Int
+  type      String   // RENT / FEE / LATE_FEE / OTHER
+  name      String
+  amount    Decimal  @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bill Bill @relation(fields: [billId], references: [id])
+
+  @@map("bill_items")
+}
+
+// ========== 支付记录 ==========
+model Payment {
+  id          Int       @id @default(autoincrement())
+  billId      Int
+  channel     String    // QRCODE / WECHATPAY / CASH / TRANSFER
+  amount      Decimal   @db.Decimal(10, 2)
+  status      String    @default("PENDING_CONFIRM") // PENDING_CONFIRM / CONFIRMED / REJECTED
+  proofUrl    String?   @db.Text
+  paidAt      DateTime
+  confirmedBy Int?
+  confirmedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  bill     Bill      @relation(fields: [billId], references: [id])
+  landlord Landlord? @relation("ConfirmedBy", fields: [confirmedBy], references: [id])
+
+  @@map("payments")
+}
+
+// ========== 押金台账 ==========
+model DepositRecord {
+  id         Int      @id @default(autoincrement())
+  leaseId    Int
+  type       String   // RECEIVE / REFUND / DEDUCT
+  amount     Decimal  @db.Decimal(10, 2)
+  reason     String?  @db.Text
+  operatorId Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  lease    Lease    @relation(fields: [leaseId], references: [id])
+  operator Landlord @relation(fields: [operatorId], references: [id])
+
+  @@map("deposit_records")
+}
+
+// ========== 交接记录 ==========
+model HandoverRecord {
+  id        Int      @id @default(autoincrement())
+  leaseId   Int
+  type      String   // CHECKIN / CHECKOUT
+  checklist Json?    // [{item, condition}]
+  remark    String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lease Lease @relation(fields: [leaseId], references: [id])
+
+  @@map("handover_records")
+}
+
+// ========== 维修记录 ==========
+model MaintenanceRecord {
+  id         Int      @id @default(autoincrement())
+  roomId     Int
+  date       DateTime @db.Date
+  content    String   @db.Text
+  cost       Decimal  @db.Decimal(10, 2)
+  operatorId Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  room Room @relation(fields: [roomId], references: [id])
+
+  @@map("maintenance_records")
+}
+
+// ========== 提醒记录 ==========
+model ReminderLog {
+  id        Int      @id @default(autoincrement())
+  billId    Int
+  tenantId  Int
+  type      String   // PRE / DUE / OVERDUE
+  sentAt    DateTime @default(now())
+  channel   String   @default("WECHAT")
+  success   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  bill   Bill   @relation(fields: [billId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("reminder_logs")
+}
+
+// ========== 支出记录 ==========
+model Expense {
+  id         Int      @id @default(autoincrement())
+  date       DateTime @db.Date
+  category   String
+  name       String
+  amount     Decimal  @db.Decimal(10, 2)
+  remark     String?  @db.Text
+  buildingId Int?
+  roomId     Int?
+  operatorId Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  building Building? @relation("BuildingExpense", fields: [buildingId], references: [id])
+  room     Room?     @relation("RoomExpense", fields: [roomId], references: [id])
+  operator Landlord  @relation(fields: [operatorId], references: [id])
+
+  @@map("expenses")
+}
+
+// ========== 操作日志 ==========
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  operatorId Int
+  action     String
+  entityType String
+  entityId   Int
+  detail     Json?
+  createdAt  DateTime @default(now())
+
+  operator Landlord @relation(fields: [operatorId], references: [id])
+
+  @@map("audit_logs")
+}
