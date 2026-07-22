@@ -19,7 +19,7 @@ export class RealWechatNotifyService implements IWechatNotifyService {
     this.appSecret = process.env.WECHAT_SECRET || '';
   }
 
-  async sendTemplateMessage(payload: NotifyPayload): Promise<boolean> {
+  async sendTemplateMessage(payload: NotifyPayload, retried = false): Promise<boolean> {
     this.logger.log(`[REAL] 发送模板消息 -> openid=${payload.openid}, template=${payload.templateId}`);
 
     try {
@@ -44,11 +44,11 @@ export class RealWechatNotifyService implements IWechatNotifyService {
         return true;
       } else {
         this.logger.error(`[REAL] 模板消息发送失败: errcode=${result.errcode}, errmsg=${result.errmsg}`);
-        // access_token 过期重试一次
-        if (result.errcode === 40001 || result.errcode === 42001) {
+        // access_token 过期重试一次(最多一次)
+        if (!retried && (result.errcode === 40001 || result.errcode === 42001)) {
           this.accessToken = '';
           this.tokenExpireAt = 0;
-          return this.sendTemplateMessage(payload);
+          return this.sendTemplateMessage(payload, true);
         }
         return false;
       }

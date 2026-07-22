@@ -196,3 +196,17 @@ GasCan 自己用浏览器打开 `http://111.229.167.29/tenant/` 显示是对的(
 不过这个也顺带暴露一个真实的、优先级不高的小问题:nginx 的 `location /tenant/` 只精确匹配带斜杠的路径,`/tenant`(不带斜杠)这个请求会落到 `location /` 上,显示成房东端而不是 404 或自动跳转。真实场景里如果有人手动敲网址漏了斜杠、或者以后菜单链接配置里少打一个 `/`,会看到不该看到的页面。建议顺手在 nginx 里加一条 `location = /tenant { return 301 /tenant/; }` 之类的规则堵上,不紧急,有空处理就行。
 
 **MySQL 生产密码是否已经从仓库默认值换掉这条,仍然待确认**,这个我没法自己验证,还是需要 Kiro 登录确认一下。
+
+---
+
+## Review 5(2026-07-22,对照 commit ce94ff5 + 80f7c5c + 3acb97c)
+
+状态: 待处理(1个小问题,不紧急)
+
+MySQL 密码那条这次确认了(commit message:已从默认 `landlord123` 换成强密码),`/tenant` 301 跳转也补上了,上一轮两条都处理完了。
+
+`tsc --noEmit` 0 错误,`jest` 15/15 通过,无回归。`RealWechatAuthService`/`RealWechatNotifyService`(8.7/8.8)代码读下来逻辑正确:OAuth2.0 换 openid 的错误处理对,access_token 缓存+提前5分钟过期的处理对,`.env.example` 只放占位符没有真实密钥泄露。
+
+一个小问题不紧急,建议顺手改:`RealWechatNotifyService.sendTemplateMessage` 里 access_token 过期(errcode 40001/42001)会清空缓存后**递归调用自己重试**,但没有限制重试次数——如果是 AppSecret 配置错了这种持续性失败(不是单纯 token 过期),会一直递归重试下去,一条提醒消息可能长时间挂着不返回,拖慢当天的催租提醒任务整体进度。建议加个参数(比如 `retried: boolean = false`)限制最多重试一次,重试还失败就直接返回 false。
+
+M8 到这里基本收尾了,只剩 8.10(正式上线)卡在 ICP 备案,不是代码问题。

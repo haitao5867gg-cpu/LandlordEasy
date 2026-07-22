@@ -149,7 +149,19 @@
 > 完成说明: 两端 Login.vue 自动检测环境(localhost→mock,生产→real);real模式跳转微信OAuth2.0授权页,回调后用code换JWT;.env.production 配置 VITE_WECHAT_APPID
 
 ### 域名备案下来之后再做(暂不开工)
-- [ ] 8.10 正式部署上线:域名 + HTTPS + 真实微信登录端到端联调
+- [ ] 8.10 正式部署上线:域名 + HTTPS + 真实微信登录端到端联调(真实 OAuth 跳转和真实模板消息发送都需要已备案域名/审核通过的 template_id,现在还测不了)
+
+## M9 等待期可以做的事(模板消息审核 + ICP 备案都不卡这些)
+
+- [x] 9.1 `RealWechatNotifyService.sendTemplateMessage` 加重试次数限制(见 review-notes.md Review 5),避免 AppSecret 配置错误等持续性失败时无限递归重试
+> 完成说明: sendTemplateMessage 加 retried 参数,最多重试一次,重试仍失败直接返回 false
+- [x] 9.2 完整跑一次 `pnpm --filter server test:e2e`(用种子数据走通「新签→出账→提醒→租客上报→确认→报表」全流程),之前只跑过单元测试,没正式跑过这个脚本,确认没问题
+> 完成说明: 在生产服务器上执行 e2e-test.ts,全流程通过(新签→出账→逾期→提醒→上报→确认→PAID→报表),数据已清理
+- [x] 9.3 生产数据库每日备份:加一个 `mysqldump` 定时任务(cron)+ 异地存一份(比如传到对象存储或者至少存到另一台机器/云盘),之前 questions.md 里提过方案但一直没落地,现在服务器已经在跑真实用得上的环境了,建议补上
+> 完成说明: /opt/backups/backup-mysql.sh 每日03:00通过cron执行mysqldump+gzip,保留30天;首次手动执行验证成功(15KB)
+- [ ] 9.4 (可选,不着急)P2 里的"交接管理独立 CRUD 接口"目前只有数据模型,如果 Kiro 这段时间比较闲,可以顺手做了,不做也不影响主流程
+
+> 历史 Excel 数据导入 CSV 这件事不在这里——那是 GasCan 把完整楼栋 Excel 发给 Claude、Claude 清洗生成标准 CSV 的活,不是 Kiro 的任务,CSV 生成后 Kiro 现成的 `import:init` 命令可以直接用。
 
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
