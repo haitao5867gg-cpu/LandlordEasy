@@ -122,3 +122,42 @@ git rm --cached apps/server/tsconfig.tsbuildinfo apps/*/tsconfig.node.tsbuildinf
 ### 确认没问题的部分
 
 - 后端 `tsc --noEmit` 0 错误,`jest` 15/15 通过,无回归
+
+---
+
+## Review 4(2026-07-22,对照 commit 90cc0e7 + ed07a4e,M8 的 8.4~8.6 + 8.9)
+
+状态: 待处理
+
+审查方式:这次服务器是真实公网机器了,我直接对 `http://111.229.167.29` 发了几个真实请求验证(不是只看代码),另外读了 `deploy/` 下的脚本和 `docker-compose.yml`。
+
+### 【高优先级,已用真实请求验证】租客端 H5 实际上没有部署成功
+
+`curl http://111.229.167.29/tenant/` 返回的页面标题是"房东管理",内容是 landlord-h5 的登录页,不是 tenant-h5。也就是说租客现在打开这个地址,看到的是房东端的登录页。
+
+原因:`apps/tenant-h5/vite.config.ts` 没有配 `base: '/tenant/'`,`apps/tenant-h5/src/router/index.ts` 的 `createWebHistory()` 也没传 base path。tenant-h5 打包出来的 `index.html` 里资源路径都是按部署在根路径 `/` 算的,但 `deploy/nginx.conf` 把它挂在 `/tenant/` 子路径下(`alias` + `try_files ... /tenant/index.html`)。两边路径约定对不上,`alias`+`try_files` 这种写法在 nginx 里正确的 fallback 应该是相对路径,现在很可能是请求落回了 `location /` 从而拿到了 landlord-h5 的页面。
+
+建议修复(两种选一种):
+1. **推荐**:给 tenant-h5 配 `base: '/tenant/'`(vite.config.ts)+ `createWebHistory('/tenant/')`(router),重新 build,nginx 的 `try_files` fallback 也顺手确认一下写法(用 `alias` 时 `try_files` 里的路径不应该带 location 的前缀,建议改成 `try_files $uri $uri/ /tenant/index.html =404;` 之外,更保险的做法是 `location /tenant/ { alias .../dist/; try_files $uri $uri/ @tenant_fallback; } location @tenant_fallback { rewrite ^ /tenant/index.html break; root ...; }` 这种,或者干脆两个前端各用一个独立的 server_name / 端口,子路径这种做法对 SPA 来说坑比较多。
+2. **更省事**:两个 H5 各自用一个二级域名(比如 `landlord.你的域名.com` / `tenant.你的域名.com`),都跑在根路径 `/`,不用改 base path,nginx 配置也更简单,以后调试也不容易搞混。域名还在备案,现在改这个方案完全来得及。
+
+不管选哪种,现在这套部署配置线上验证下来是有问题的,租客端等于没上线。
+
+### 【安全,请找用户确认】SSH 保留了密码登录,而且明文密码目前在本地文件里
+
+8.5 的完成说明写"SSH密码登录保留(用户要求)"——如果这真的是 GasCan 主动要求保留密码登录,那是他的选择,但既然服务器现在暴露在公网,建议至少确认装了 fail2ban 之类的东西防暴力破解,单纯密码认证挂在公网 22 端口风险不低。如果这不是 GasCan 本人的要求(比如理解有误),应该按 8.5 原计划改成密钥登录 + 禁用密码。
+
+另外,本地仓库根目录有个 `.ssh-helper.sh`(已正确 `.gitignore`,没有进 git,这点做得对),里面是一个 expect 脚本,**明文写了服务器的 SSH 密码**。这个文件我这次 review 读到了内容,也就是说这个密码已经出现在这次会话记录里——不管密码本身强度如何,只要密码在任何聊天记录/日志里出现过,都建议当作已泄露处理,尽快去服务器上换一个新密码。
+
+### 【建议关注,我这边网络环境验证不了,请 Kiro 登录确认】docker-compose.yml 里的默认密码
+
+`docker-compose.yml` 里 MySQL 是硬编码的示例密码(`root123` / `landlord123`),这份文件在公开仓库里,任何能看到仓库的人都知道这两个默认密码。8.4 的完成说明说生产环境的 MySQL 容器已经跑起来了——如果直接复用了这份 `docker-compose.yml` 没改密码,生产库的密码实际上是公开的。
+请 Kiro 登录服务器确认两件事:①生产环境的 MySQL 密码是不是已经换成了跟仓库里不一样的强密码(建议通过服务器上单独的 `.env` 或 docker-compose 的环境变量覆盖,不要动仓库里这份当"生产配置");②`ufw status` 确认 3306 端口确实没有被放行到公网(`setup.sh` 里只放了 22/80/443,理论上应该没问题,但建议登录进去亲眼确认一下,不要只靠"应该没问题"）。
+
+### 确认没问题的部分
+
+- `http://111.229.167.29/api/v1/health` 真实请求验证通过,返回 `{"status":"ok","database":"connected"}`,后端+数据库确实是通的
+- landlord-h5 的 Login.vue 真实微信授权适配写得对:`localhost`/带 `mock_openid` 自动走 mock,其他情况跳转 `https://open.weixin.qq.com/connect/oauth2/authorize`,`scope=snsapi_base` 静默授权选得对(不需要用户点确认),回调后正确处理 `code` 换 token;tenant-h5 逻辑一致
+- `.env.production` 里只放了 `VITE_WECHAT_APPID` 占位符(`YOUR_APPID_HERE`),AppID 本身不算敏感信息(公开可见也没关系),没有把 AppSecret 之类真正敏感的东西塞进前端 env,这点是对的
+- `deploy/setup.sh`/`deploy.sh`/`certbot.sh` 脚本逻辑合理,UFW 只放行 22/80/443
+- `.ssh-helper.sh` 正确进了 `.gitignore`,没有提交到 git(密码本身要不要紧是另一回事,见上面)

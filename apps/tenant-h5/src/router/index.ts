@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory('/tenant/'),
   routes: [
     { path: '/login', name: 'login', component: () => import('../views/Login.vue') },
     { path: '/', name: 'home', component: () => import('../views/MyBills.vue') },
