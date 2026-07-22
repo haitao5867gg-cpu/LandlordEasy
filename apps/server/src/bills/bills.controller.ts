@@ -11,14 +11,24 @@ import {
 import { BillsService } from './bills.service';
 import { BillEngineService } from './bill-engine.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
+import { IsString, IsNumber, IsOptional, Min } from 'class-validator';
 
 class AddBillItemDto {
+  @IsString()
   type!: string;
+
+  @IsString()
   name!: string;
+
+  @IsNumber()
+  @Min(0)
   amount!: number;
 }
 
 class AddLateFeeDto {
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
   amount?: number;
 }
 
