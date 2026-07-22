@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateRoomTypeDto, UpdateRoomTypeDto } from './room-types.dto';
 
@@ -54,7 +54,7 @@ export class RoomTypesService {
     await this.findOne(id);
     const roomCount = await this.prisma.room.count({ where: { roomTypeId: id } });
     if (roomCount > 0) {
-      throw new Error('有房间使用该房型,无法删除');
+      throw new BadRequestException('有房间使用该房型,无法删除');
     }
     return this.prisma.roomType.delete({ where: { id } });
   }

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -26,10 +26,9 @@ export class BuildingsService {
 
   async remove(id: number) {
     await this.findOne(id);
-    // 检查是否有关联房间
     const roomCount = await this.prisma.room.count({ where: { buildingId: id } });
     if (roomCount > 0) {
-      throw new Error('该楼栋下有房间,无法删除');
+      throw new BadRequestException('该楼栋下有房间,无法删除');
     }
     return this.prisma.building.delete({ where: { id } });
   }
