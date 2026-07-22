@@ -47,9 +47,10 @@ export class RemindersService {
       if (alreadySent) continue;
 
       // 发送提醒
+      const templateId = process.env.WECHAT_TEMPLATE_RENT_REMINDER || 'RENT_REMINDER';
       const success = await this.wechatNotify.sendTemplateMessage({
         openid: tenant.openid,
-        templateId: 'RENT_REMINDER',
+        templateId,
         data: {
           keyword1: { value: `${bill.totalAmount}元` },
           keyword2: { value: bill.dueDate.toISOString().split('T')[0] },
