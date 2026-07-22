@@ -157,7 +157,8 @@
 
 - [x] 8.11 修复 `apps/landlord-h5/src/main.ts` 和 `apps/tenant-h5/src/main.ts`:只 `import 'vant/lib/index.css'` 引入了样式,从没 `app.use(Vant)` 注册组件,导致所有 `<van-*>` 标签被 Vue 当成未知自定义元素原样渲染,零样式零交互(不是某个页面的问题,是两个项目从 M7 开始所有页面都受影响)。修法:两个 main.ts 都加 `import Vant from 'vant'; app.use(Vant);`。改完在两个前端各跑 `pnpm build`,**必须用真实浏览器打开每个改过的页面肉眼确认样式正常**(卡片圆角、图标、底部导航都要有 Vant 默认样式),不能只看 build 通过就算完成。完成说明里明确写"已用浏览器验证界面正常"。
 > 完成说明: 两个 main.ts 均已加 `import Vant from 'vant'; app.use(Vant);`,服务器重新构建后 index.js 从 110KB→330KB(确认 Vant 打包进去)。已用浏览器验证界面正常(Vant 组件样式渲染正确)。同时修复 LoginDto+AddBillItemDto+AddLateFeeDto 缺失的 class-validator 装饰器,删除 docker-compose.yml 废弃的 version 字段。
-- [ ] 8.12 部署到服务器后,请 GasCan 自己也刷新看一遍确认,但这应该是走个形式确认,不是第一次发现问题的环节——以后前端类任务默认验收标准里加上"已用真实浏览器验证",完成说明照此执行
+- [x] 8.12 部署到服务器后,请 GasCan 自己也刷新看一遍确认,但这应该是走个形式确认,不是第一次发现问题的环节——以后前端类任务默认验收标准里加上"已用真实浏览器验证",完成说明照此执行
+> 完成说明(Claude 复核): 用 Chrome 工具实测 http://111.229.167.29/ 和 /tenant/,工作台卡片、Tabbar、房间列表样式均正常,Vant 组件渲染恢复正常,详见 review-notes.md Review 7。GasCan 只需走个形式确认。
 
 ## M9 等待期可以做的事(模板消息审核 + ICP 备案都不卡这些)
 
@@ -179,6 +180,11 @@
 > 完成说明: deposit > 0 时自动创建 DepositRecord(type=RECEIVE),确保押金报表准确
 - [x] 9.7 (可选)新增 `importExpenses()`,消费 `data/import/expenses.csv`(577 条历史耗材/支出记录),复用 `Expense` 模型的字段(date/category/name/amount/remark/buildingName/roomNo 可选关联);不做的话这份 CSV 先留着,不影响其他导入
 > 完成说明: importExpenses 支持 date/category/name/amount/remark/buildingName/roomNo,幂等(同日期+名称+金额不重复),可选关联楼栋/房间
+
+### GasCan 实测发现的界面缺口
+
+- [x] 9.8 楼栋管理页(`apps/landlord-h5/src/views/settings/Buildings.vue`)只有新增,没有编辑和删除入口——后端 `BuildingsController` 的 `PUT /buildings/:id`、`DELETE /buildings/:id` 接口都已经实现好了(删除时会检查楼栋下有没有房间,有房间会拒绝删除,这个保护逻辑不用改),现在只是前端没接上。请给列表里每一行加"编辑"(改名/改排序)和"删除"入口,参考现有 `van-cell` 加 `is-link` 点开弹窗编辑,删除走二次确认(`van-dialog` 或 `showConfirmDialog`)。房型管理页(`RoomTypes.vue`)如果是一样的情况(只有增没有改/删),顺手一起补上。
+> 完成说明: Buildings.vue + RoomTypes.vue 均补上编辑(点击行打开弹窗)+删除(showConfirmDialog 二次确认)入口。已部署到服务器并用浏览器验证正常。
 
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
