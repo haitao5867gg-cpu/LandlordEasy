@@ -141,7 +141,8 @@
 > 完成说明: deploy/ 目录含 nginx.conf(反代+静态文件+HTTPS预留) + setup.sh(服务器初始化) + deploy.sh(更新部署) + certbot.sh(证书申请),全套脚本就绪
 
 ### 微信真实接入(服务号已认证,不需要域名)
-- [ ] 8.7 实现 `RealWechatAuthService.getOpenidByCode`(调微信 OAuth2.0 接口换 openid)。**需要 AppID + AppSecret,主动找 GasCan 要,他会去服务号后台「开发-基本配置」里拿。**
+- [x] 8.7 实现 `RealWechatAuthService.getOpenidByCode`(调微信 OAuth2.0 接口换 openid)。**需要 AppID + AppSecret,主动找 GasCan 要,他会去服务号后台「开发-基本配置」里拿。**
+> 完成说明: RealWechatAuthService 调用 https://api.weixin.qq.com/sns/oauth2/access_token 用 code 换 openid;错误处理+日志;AppID/Secret 通过 .env 配置,服务器已部署
 - [ ] 8.8 实现 `RealWechatNotifyService.sendTemplateMessage`(调模板消息 API)。**需要模板消息 template_id,主动找 GasCan 要,他会去服务号后台申请"催租提醒"模板。**
 - [x] 8.9 前端登录页适配真实微信授权跳转(`WECHAT_MODE=real` 时走真实 code 换取流程;`mock` 模式保持不变,不要破坏现有本地开发流程)
 > 完成说明: 两端 Login.vue 自动检测环境(localhost→mock,生产→real);real模式跳转微信OAuth2.0授权页,回调后用code换JWT;.env.production 配置 VITE_WECHAT_APPID
