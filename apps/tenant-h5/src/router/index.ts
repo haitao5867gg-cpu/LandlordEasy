@@ -14,7 +14,7 @@ const router = createRouter({
 router.beforeEach((to) => {
   const authStore = useAuthStore();
   if (to.path !== '/login' && !authStore.token) {
-    return '/login';
+    return { path: '/login', query: to.query };
   }
 });
 

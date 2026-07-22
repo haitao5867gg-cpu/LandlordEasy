@@ -28,11 +28,11 @@ const router = createRouter({
   ],
 });
 
-// 路由守卫: 未登录跳转 login
+// 路由守卫: 未登录跳转 login，保留 query 参数
 router.beforeEach((to) => {
   const authStore = useAuthStore();
   if (to.path !== '/login' && !authStore.token) {
-    return '/login';
+    return { path: '/login', query: to.query };
   }
 });
 

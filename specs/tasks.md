@@ -163,5 +163,11 @@
 
 > 历史 Excel 数据导入 CSV 这件事不在这里——那是 GasCan 把完整楼栋 Excel 发给 Claude、Claude 清洗生成标准 CSV 的活,不是 Kiro 的任务,CSV 生成后 Kiro 现成的 `import:init` 命令可以直接用。
 
+### 历史数据导入:import.ts 需要补的缺口(Claude 已把 CSV 清洗好放在 `data/import/`,见 `data/import/填写说明.md`)
+
+- [ ] 9.5 `importLeases()` 扩展:目前 `leases.csv` 里的 `carPlate`、`parkingFee` 两列被静默忽略(`parseCsv` 动态取列,脚本没读),需要在导入时把这两个字段实际写进对应的 Lease/费用记录里
+- [ ] 9.6 `importLeases()` 导入的每条租约押金,目前只写进了 `Lease.deposit` 字段,没有同步创建 `DepositRecord`,导致 `getDepositSummary()`(押金总额报表)会漏算这批历史导入数据的押金——需要扩展 `importLeases()`,给每条租约顺带创建一条 `DepositRecord`
+- [ ] 9.7 (可选)新增 `importExpenses()`,消费 `data/import/expenses.csv`(577 条历史耗材/支出记录),复用 `Expense` 模型的字段(date/category/name/amount/remark/buildingName/roomNo 可选关联);不做的话这份 CSV 先留着,不影响其他导入
+
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
