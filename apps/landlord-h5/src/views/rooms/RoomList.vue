@@ -5,12 +5,12 @@
         <van-icon name="plus" size="20" @click="$router.push('/rooms/batch-create')" />
       </template>
     </van-nav-bar>
-    <van-tabs v-model:active="activeBuilding" @change="fetchRooms">
+    <van-tabs v-model:active="activeBuilding" @change="onFilterChange">
       <van-tab title="全部" :name="0" />
       <van-tab v-for="b in buildings" :key="b.id" :title="b.name" :name="b.id" />
     </van-tabs>
     <van-dropdown-menu>
-      <van-dropdown-item v-model="statusFilter" :options="statusOptions" @change="fetchRooms" />
+      <van-dropdown-item v-model="statusFilter" :options="statusOptions" @change="onFilterChange" />
     </van-dropdown-menu>
     <van-loading v-if="loading" class="page-loading" />
     <van-empty v-else-if="rooms.length === 0" description="暂无房间" />
@@ -21,7 +21,7 @@
         :title="`${room.roomNo}`"
         :label="room.roomType?.name || ''"
         is-link
-        @click="$router.push(`/rooms/${room.id}`)"
+        @click="goDetail(room.id)"
       >
         <template #value>
           <van-tag :type="statusTagType(room.status)">{{ statusLabel(room.status) }}</van-tag>
@@ -33,13 +33,16 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import http from '../../utils/http';
 import { roomStatusMap } from '../../utils/status';
 
+const route = useRoute();
+const router = useRouter();
 const buildings = ref<any[]>([]);
 const rooms = ref<any[]>([]);
-const activeBuilding = ref(0);
-const statusFilter = ref('');
+const activeBuilding = ref(Number(route.query.buildingId) || 0);
+const statusFilter = ref((route.query.status as string) || '');
 const loading = ref(true);
 
 const statusOptions = [
@@ -54,6 +57,20 @@ function statusTagType(s: string) {
   if (s === 'VACANT') return 'default';
   if (s === 'RENTED') return 'success';
   return 'warning';
+}
+
+/** 筛选变化时更新 URL query 并重新请求 */
+function onFilterChange() {
+  const query: Record<string, string> = {};
+  if (activeBuilding.value) query.buildingId = String(activeBuilding.value);
+  if (statusFilter.value) query.status = statusFilter.value;
+  router.replace({ query });
+  fetchRooms();
+}
+
+/** 跳转详情时保持当前筛选状态(通过 URL query 已持久化,返回时自动恢复) */
+function goDetail(roomId: number) {
+  router.push(`/rooms/${roomId}`);
 }
 
 async function fetchRooms() {
