@@ -37,4 +37,6 @@ vite.config.js.map
 
 # Prisma
 prisma/migrations/**/migration_lock.toml
+# SSH keys and helper scripts
 .ssh-helper.sh
+*.pem

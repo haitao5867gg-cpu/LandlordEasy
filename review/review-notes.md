@@ -161,3 +161,25 @@ git rm --cached apps/server/tsconfig.tsbuildinfo apps/*/tsconfig.node.tsbuildinf
 - `.env.production` 里只放了 `VITE_WECHAT_APPID` 占位符(`YOUR_APPID_HERE`),AppID 本身不算敏感信息(公开可见也没关系),没有把 AppSecret 之类真正敏感的东西塞进前端 env,这点是对的
 - `deploy/setup.sh`/`deploy.sh`/`certbot.sh` 脚本逻辑合理,UFW 只放行 22/80/443
 - `.ssh-helper.sh` 正确进了 `.gitignore`,没有提交到 git(密码本身要不要紧是另一回事,见上面)
+
+---
+
+## Review 4 处理进度核查(2026-07-22,对照 commit 41ccb92)
+
+状态: 待处理(1条代码修对了但线上没生效,1条部分完成,1条待确认)
+
+同样用真实请求核查,不只看代码/commit message。
+
+### ⚠️ 代码修复是对的,但线上还没生效——租客端现在打开还是显示房东端
+
+`apps/tenant-h5/vite.config.ts` 加了 `base: '/tenant/'`,`router/index.ts` 改成了 `createWebHistory('/tenant/')`,这两处代码修复本身是对的。但我刚才用两个不同的 URL(含随机参数排除缓存干扰)重新请求了 `http://111.229.167.29/tenant/`,拿到的还是标题"房东管理"的页面,跟修复前一模一样。
+说明代码改完之后,**服务器上没有重新构建+部署**——`git push` 只是把代码更新到了仓库,线上跑的还是旧的 dist 文件,而且 nginx 配置(`deploy/nginx.conf` 里的改动)也得手动同步到服务器的 `/etc/nginx/sites-available/` 才会生效,这两步都得登录服务器自己做,不会自动发生。
+请 Kiro 登录服务器执行一遍 `deploy/deploy.sh`(或者手动 `git pull` + `pnpm --filter tenant-h5 build` + 把新 `nginx.conf` 复制过去 + `nginx -t && systemctl reload nginx`),弄完之后我会再验证一次。
+
+### 🟡 安全加固完成了一部分
+
+密码已经换了、装了 fail2ban,这两点做得好,处理了最紧急的问题。SSH 改密钥登录还在等 GasCan 给私钥文件,这个不算 Kiro 没做,是流程正常卡在需要用户配合的那一步。
+
+### ❓ MySQL 默认密码这条,只确认了端口没暴露,密码本身有没有换不清楚
+
+commit message 写"确认3306未暴露公网",这个我认,但 Review 4 原本问的是两件事:①3306 没暴露(确认了)②生产环境 MySQL 密码是不是已经换成跟仓库里 `docker-compose.yml` 不一样的强密码。第二件事目前不确定是否处理了,commit message 没提。就算端口没对外开放,生产库如果还在用 `root123`/`landlord123` 这种谁都能在 GitHub 上看到的默认密码,还是建议换掉,多一层保险(比如以后万一防火墙规则被误改,至少密码那道防线还在)。麻烦 Kiro 确认一下。
