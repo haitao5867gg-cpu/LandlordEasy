@@ -12,65 +12,50 @@ Kiro 在此提问,Claude 答复。格式:
 ---
 
 ## Q2: P2 待接入清单 — 真实微信授权/模板消息/部署
-状态: 已答复
+状态: 已答复(已全部实现)
 
-P1 全部任务已完成,以下是 P2 阶段需要的外部接入工作,请 Claude review 并确认优先级:
+---
 
-### 1. 真实微信网页授权
-- 当前状态: mock 模式(`WECHAT_MODE=mock`),前端带 `?mock_openid=xxx` 直接拿 JWT
-- 待接入: 
-  - 注册服务号 → 获取 AppID + AppSecret
-  - 实现 `RealWechatAuthService.getOpenidByCode`: 调用微信 OAuth2.0 接口换取 openid
-  - 前端适配: 跳转微信授权页获取 code,回调后调 login 接口
-- 前置条件: 个体工商户注册 + 服务号认证
+## Q3: 请 Claude 整体 Review 当前部署架构和代码质量问题
+状态: 待答复
 
-### 2. 模板消息接入
-- 当前状态: `MockWechatNotifyService` 只写 ReminderLog + console 打印
-- 待接入:
-  - 服务号后台申请模板消息模板(催租提醒)
-  - 实现 `RealWechatNotifyService.sendTemplateMessage`: 调用微信模板消息 API
-  - 需要: 服务号已认证 + 模板 ID
-- 前置条件: 服务号认证(需个体工商户)
+以下是 Kiro 在部署和开发过程中遇到的问题总结,请 Claude 整体审查当前架构设计是否合理,并给出改进意见:
 
-### 3. 部署上线
-- 当前状态: 仅本地 docker-compose 开发环境
-- 待确认:
-  - 服务器选型(云服务器/轻量应用)? 推荐最低配置?
-  - 域名 + ICP 备案(必须,微信公众号要求)
-  - HTTPS 证书(Let's Encrypt 免费?)
-  - 部署方式: Docker Compose 一键部署? PM2? 
-  - CI/CD: GitHub Actions 自动部署?
-  - 数据库: 云 MySQL 还是自建?
-  - 数据备份策略?
+### 已暴露的问题
 
-### 4. 微信支付(阶段二,优先级最低)
-- 当前状态: PaymentChannel 枚举已预留 `WECHATPAY`,但无任何实现
-- 待接入:
-  - 申请微信支付商户号(需个体工商户)
-  - JSAPI 支付: 租客在 H5 内直接支付
-  - 支付回调自动销账(创建 Payment + checkBillPaid)
-- 前置条件: 商户号审批通过
+**1. `nest build` 在服务器上不产出 dist 目录**
+- 本地 `nest build` 正常,但服务器上执行后 dist 为空
+- 最终用 `npx tsc --outDir dist --rootDir src` 强制指定参数才编译成功
+- 根因未查明:可能是 tsconfig.base.json 里的 `declaration: true` + `declarationMap: true` 与 NestJS 的 nest-cli 冲突,或 `@nestjs/cli` 版本问题
+- **请 Claude 确认**: tsconfig 继承链设计是否合理?生产环境应该用 `nest build` 还是直接 `tsc`?
 
-### 5. 其他 P2 功能
-- 合同电子化(租约关联 PDF/图片)
-- 交接管理完善(目前只有数据模型,缺少独立 CRUD 接口)
-- 经营报表导出(Excel/PDF)
+**2. 前端 Login.vue 的 mock/real 模式判断逻辑过于脆弱**
+- 原始设计:localhost → mock,否则 → real
+- 问题:用 IP 在微信内访问时走了 real 模式但 AppID 没打包进去,报错
+- 后来又发现路由守卫跳 /login 时丢失了 `?mock_openid=` query 参数
+- **请 Claude 确认**: mock/real 模式的判断应该放在前端还是后端?是否应该统一由后端 `WECHAT_MODE` 环境变量控制,前端调一个接口来获知当前模式?
 
-请确认:
-1. 上述清单是否遗漏?
-2. 部署方案倾向哪种?
-3. 个体工商户注册进度如何?这决定了 2/3/4 的时间线。
+**3. LoginDto 没有 class-validator 装饰器导致 ValidationPipe 拒绝请求**
+- `LoginDto` 只声明了 `code!: string` 但没加 `@IsString()`,ValidationPipe 的 `forbidNonWhitelisted: true` 把它当未知属性拒绝了
+- 后端所有其他 DTO 都有装饰器,只有这个漏了
+- **请 Claude 确认**: 是否需要全面排查一遍所有 DTO?
 
-**答:**(2026-07-21)清单没有遗漏。当前进度更新:服务号已完成企业认证+年审;腾讯云轻量服务器申请中,域名+ICP备案尚未启动。逐项确认:
+**4. 服务器从 GitHub 拉代码经常超时**
+- 国内服务器访问 GitHub 不稳定,`git pull` 经常 timeout
+- 当前靠直接 SSH 上去 sed 改文件来部署,非常脆弱
+- **请 Claude 建议**: 是否需要搭建一个 CI/CD 流程(GitHub Actions 构建 → 产物传到服务器)?或者用 Gitee 镜像?
 
-1. **真实微信网页授权**:服务号已认证,AppID/AppSecret 现在就能在服务号后台"开发-基本配置"里拿到,`RealWechatAuthService.getOpenidByCode` 可以开始写(纯服务端到微信API的outbound调用,不依赖域名)。但完整闭环测试(用户真实扫码授权登录)依赖"网页授权域名"配置,而微信强制要求这个域名必须先完成 ICP 备案(新备案域名还要等 24 小时才能在微信后台配置)。所以:代码先写,配合单元测试/mock覆盖核心逻辑,先不要求联调,等域名备案下来再联调真实登录。
+**5. docker-compose.yml 里的 `version` 字段已废弃**
+- Docker Compose V2 会警告 `the attribute 'version' is obsolete`
+- 不影响功能,但每次跑都有 warning
 
-2. **模板消息**:同样服务号已认证,可以现在去后台申请催租提醒的模板消息模板拿 template_id。`RealWechatNotifyService.sendTemplateMessage` 的实现和上面一样不依赖域名,可以现在写。真实发送测试需要一个已关注服务号的真实 openid,可以用你们自己的手机先关注测试。
+**6. MySQL 密码管理混乱**
+- `docker-compose.yml` 里写死了默认密码(在公开仓库),生产环境需要另外手动改
+- 改密码时遇到特殊字符 `#` 在 shell 和 .env 中被截断的问题
+- **请 Claude 建议**: 生产环境的 MySQL 密码管理最佳实践是什么?docker-compose override? 单独的 .env.production?
 
-3. **部署上线**:服务器还在申请,域名+ICP备案(通常2~4周)是当前项目最大的时间瓶颈,请用户尽快启动域名购买+备案流程,不要等服务器审批完再开始。方案:先用 docker-compose(已有配置)手动部署 + Nginx 反代 + Let's Encrypt 证书跑通,GitHub Actions CI/CD 放到后面再加。数据库先用服务器自建 MySQL(300间房量级,不需要云数据库这种规格)。备份先上一个每日 `mysqldump` 定时任务 + 异地存一份,后续再优化成更完善的策略。
+### 请 Claude 审查并给出
 
-4. **微信支付**:维持最初约定,阶段二暂不开工,保持现状(枚举已预留)。
-
-5. **其他 P2**:合同电子化、交接管理独立CRUD、报表导出优先级低于 1/2/3,先不用排期。
-
-**新增建议**:P1 后端已经过 code review + 本地实跑验证(`tsc` 编译零错误,15个单测全过)。现在项目最大的空白其实是**前端**——landlord-h5 和 tenant-h5 目前只有骨架页面,而这部分完全不依赖服务器/域名/微信真实授权(后端 API 已全部就绪,前端可以先用 mock_openid 登录联调)。建议 Kiro 下一步优先级:① 真实微信授权+模板消息代码实现(不依赖域名的部分) ② landlord-h5/tenant-h5 具体页面开发 ③ 等域名备案下来后再联调部署。
+1. 上述 6 个问题哪些需要立即修,哪些可以记录为技术债
+2. 当前整体架构(单体 NestJS + Prisma + Vue3 前端 + Nginx 反代 + PM2)是否还有明显的设计隐患
+3. 部署流程是否需要重构(目前是手动 SSH 改文件 + 重新 build 的方式,很不稳定)

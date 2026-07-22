@@ -1,7 +1,9 @@
 import { Controller, Post, Body } from '@nestjs/common';
+import { IsString } from 'class-validator';
 import { AuthService } from './auth.service';
 
 class LoginDto {
+  @IsString()
   code!: string;
 }
 
