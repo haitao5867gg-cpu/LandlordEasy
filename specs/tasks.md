@@ -151,6 +151,13 @@
 ### 域名备案下来之后再做(暂不开工)
 - [ ] 8.10 正式部署上线:域名 + HTTPS + 真实微信登录端到端联调(真实 OAuth 跳转和真实模板消息发送都需要已备案域名/审核通过的 template_id,现在还测不了)
 
+## M8.5 【最高优先级,立即处理】线上前端全站无样式
+
+> GasCan 用真实手机/浏览器打开网站反馈"效果非常差",Claude 用 Chrome 工具实测复现,见 review-notes.md Review 6。这个优先级高于 M9 所有任务,先修完这个再往下做。
+
+- [ ] 8.11 修复 `apps/landlord-h5/src/main.ts` 和 `apps/tenant-h5/src/main.ts`:只 `import 'vant/lib/index.css'` 引入了样式,从没 `app.use(Vant)` 注册组件,导致所有 `<van-*>` 标签被 Vue 当成未知自定义元素原样渲染,零样式零交互(不是某个页面的问题,是两个项目从 M7 开始所有页面都受影响)。修法:两个 main.ts 都加 `import Vant from 'vant'; app.use(Vant);`。改完在两个前端各跑 `pnpm build`,**必须用真实浏览器打开每个改过的页面肉眼确认样式正常**(卡片圆角、图标、底部导航都要有 Vant 默认样式),不能只看 build 通过就算完成。完成说明里明确写"已用浏览器验证界面正常"。
+- [ ] 8.12 部署到服务器后,请 GasCan 自己也刷新看一遍确认,但这应该是走个形式确认,不是第一次发现问题的环节——以后前端类任务默认验收标准里加上"已用真实浏览器验证",完成说明照此执行
+
 ## M9 等待期可以做的事(模板消息审核 + ICP 备案都不卡这些)
 
 - [x] 9.1 `RealWechatNotifyService.sendTemplateMessage` 加重试次数限制(见 review-notes.md Review 5),避免 AppSecret 配置错误等持续性失败时无限递归重试
