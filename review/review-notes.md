@@ -183,3 +183,16 @@ git rm --cached apps/server/tsconfig.tsbuildinfo apps/*/tsconfig.node.tsbuildinf
 ### ❓ MySQL 默认密码这条,只确认了端口没暴露,密码本身有没有换不清楚
 
 commit message 写"确认3306未暴露公网",这个我认,但 Review 4 原本问的是两件事:①3306 没暴露(确认了)②生产环境 MySQL 密码是不是已经换成跟仓库里 `docker-compose.yml` 不一样的强密码。第二件事目前不确定是否处理了,commit message 没提。就算端口没对外开放,生产库如果还在用 `root123`/`landlord123` 这种谁都能在 GitHub 上看到的默认密码,还是建议换掉,多一层保险(比如以后万一防火墙规则被误改,至少密码那道防线还在)。麻烦 Kiro 确认一下。
+
+---
+
+## 复核(2026-07-22,对照 commit 2f217fc)
+
+**8.5 SSH 密钥登录:确认完成,做得很仔细。** 密钥验证通过、`sshd_config` 和 `cloud-init` 都设了 `PasswordAuthentication no`(连 cloud-init 重启会覆盖 sshd_config 这个坑都想到了,细节到位)、`.ssh-helper.sh` 删了、`.gitignore` 加了 `*.pem`。这条可以放心关掉了。
+
+**上一轮说的"租客端部署没生效"是我搞错了,更正一下:**
+GasCan 自己用浏览器打开 `http://111.229.167.29/tenant/` 显示是对的(租客端),但我这边用工具重复测同一个地址却一直显示房东端,一度以为是没重新部署。后来追查发现是我这边的请求工具在处理 `/tenant/`(末尾带斜杠、后面没有具体文件名)这种 URL 时,没有把这个斜杠原样传过去,变成了 `/tenant`(不带斜杠)——直接测 `http://111.229.167.29/tenant/index.html` 返回的确实是"租客端",证明部署其实是成功的,是我的验证方式有问题,不是 Kiro 没部署。这里更正,抱歉造成的来回。
+
+不过这个也顺带暴露一个真实的、优先级不高的小问题:nginx 的 `location /tenant/` 只精确匹配带斜杠的路径,`/tenant`(不带斜杠)这个请求会落到 `location /` 上,显示成房东端而不是 404 或自动跳转。真实场景里如果有人手动敲网址漏了斜杠、或者以后菜单链接配置里少打一个 `/`,会看到不该看到的页面。建议顺手在 nginx 里加一条 `location = /tenant { return 301 /tenant/; }` 之类的规则堵上,不紧急,有空处理就行。
+
+**MySQL 生产密码是否已经从仓库默认值换掉这条,仍然待确认**,这个我没法自己验证,还是需要 Kiro 登录确认一下。
