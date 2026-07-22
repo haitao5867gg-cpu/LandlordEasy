@@ -111,7 +111,12 @@ async function importLeases(csvDir: string) {
   const rows = parseCsv(path.join(csvDir, 'leases.csv'));
   if (rows.length === 0) return;
 
+  // 需要一个 operatorId 来创建 DepositRecord,取第一个房东
+  const firstLandlord = await prisma.landlord.findFirst();
+  const operatorId = firstLandlord?.id || 1;
+
   console.log(`📥 导入租约 (${rows.length} 条)...`);
+  let created = 0;
   for (const row of rows) {
     const building = await prisma.building.findUnique({ where: { name: row.buildingName } });
     if (!building) continue;
@@ -125,10 +130,12 @@ async function importLeases(csvDir: string) {
     }
 
     // 查找或创建租客
-    let tenant = await prisma.tenant.findFirst({ where: { phone: row.tenantPhone } });
+    const tenantName = row.tenantName || `租客_${row.buildingName}${row.roomNo}`;
+    const tenantPhone = row.tenantPhone || `未知_${row.roomNo}`;
+    let tenant = await prisma.tenant.findFirst({ where: { phone: tenantPhone } });
     if (!tenant) {
       tenant = await prisma.tenant.create({
-        data: { name: row.tenantName, phone: row.tenantPhone },
+        data: { name: tenantName, phone: tenantPhone },
       });
     }
 
@@ -142,25 +149,103 @@ async function importLeases(csvDir: string) {
     });
     if (existing) continue;
 
+    // 构建 feeItems:如果有 parkingFee 则加入
+    const feeItems: { name: string; amount: number }[] = [];
+    const parkingFee = parseFloat(row.parkingFee);
+    if (parkingFee > 0) {
+      feeItems.push({ name: '停车费', amount: parkingFee });
+    }
+
     const inviteCode = Math.random().toString(36).substring(2, 10).toUpperCase();
-    await prisma.lease.create({
+    const deposit = parseFloat(row.deposit) || 0;
+
+    const lease = await prisma.lease.create({
       data: {
         roomId: room.id,
         tenantId: tenant.id,
         startDate: new Date(row.startDate),
         endDate: new Date(row.endDate),
         rent: parseFloat(row.rent) || 0,
-        deposit: parseFloat(row.deposit) || 0,
+        deposit,
         payCycle: row.payCycle || 'MONTHLY',
+        carPlate: row.carPlate || null,
+        feeItems: feeItems.length > 0 ? JSON.parse(JSON.stringify(feeItems)) : undefined,
         status: 'ACTIVE',
         inviteCode,
       },
     });
 
+    // 创建押金收取记录(9.6)
+    if (deposit > 0) {
+      await prisma.depositRecord.create({
+        data: {
+          leaseId: lease.id,
+          type: 'RECEIVE',
+          amount: deposit,
+          operatorId,
+        },
+      });
+    }
+
     // 房间标记已租
     await prisma.room.update({ where: { id: room.id }, data: { status: 'RENTED' } });
+    created++;
   }
-  console.log('✅ 租约导入完成');
+  console.log(`✅ 租约导入完成(新增 ${created} 条,含押金记录)`);
+}
+
+async function importExpenses(csvDir: string) {
+  const rows = parseCsv(path.join(csvDir, 'expenses.csv'));
+  if (rows.length === 0) return;
+
+  const firstLandlord = await prisma.landlord.findFirst();
+  const operatorId = firstLandlord?.id || 1;
+
+  console.log(`📥 导入支出 (${rows.length} 条)...`);
+  let created = 0;
+  for (const row of rows) {
+    const date = new Date(row.date);
+    const amount = parseFloat(row.amount) || 0;
+    if (!row.name || amount <= 0) continue;
+
+    // 可选关联楼栋/房间
+    let buildingId: number | null = null;
+    let roomId: number | null = null;
+
+    if (row.buildingName) {
+      const building = await prisma.building.findUnique({ where: { name: row.buildingName } });
+      if (building) {
+        buildingId = building.id;
+        if (row.roomNo) {
+          const room = await prisma.room.findUnique({
+            where: { buildingId_roomNo: { buildingId: building.id, roomNo: row.roomNo } },
+          });
+          if (room) roomId = room.id;
+        }
+      }
+    }
+
+    // 幂等:相同日期+名称+金额视为重复
+    const existing = await prisma.expense.findFirst({
+      where: { date, name: row.name, amount },
+    });
+    if (existing) continue;
+
+    await prisma.expense.create({
+      data: {
+        date,
+        category: row.category || '其他',
+        name: row.name,
+        amount,
+        remark: row.remark || null,
+        buildingId,
+        roomId,
+        operatorId,
+      },
+    });
+    created++;
+  }
+  console.log(`✅ 支出导入完成(新增 ${created} 条)`);
 }
 
 async function main() {
@@ -177,6 +262,7 @@ async function main() {
   await importRoomTypes(csvDir);
   await importRooms(csvDir);
   await importLeases(csvDir);
+  await importExpenses(csvDir);
 
   console.log('🎉 全部导入完成!');
 }

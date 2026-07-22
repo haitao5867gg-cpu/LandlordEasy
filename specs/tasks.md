@@ -173,9 +173,12 @@
 
 ### 历史数据导入:import.ts 需要补的缺口(Claude 已把 CSV 清洗好放在 `data/import/`,见 `data/import/填写说明.md`)
 
-- [ ] 9.5 `importLeases()` 扩展:目前 `leases.csv` 里的 `carPlate`、`parkingFee` 两列被静默忽略(`parseCsv` 动态取列,脚本没读),需要在导入时把这两个字段实际写进对应的 Lease/费用记录里
-- [ ] 9.6 `importLeases()` 导入的每条租约押金,目前只写进了 `Lease.deposit` 字段,没有同步创建 `DepositRecord`,导致 `getDepositSummary()`(押金总额报表)会漏算这批历史导入数据的押金——需要扩展 `importLeases()`,给每条租约顺带创建一条 `DepositRecord`
-- [ ] 9.7 (可选)新增 `importExpenses()`,消费 `data/import/expenses.csv`(577 条历史耗材/支出记录),复用 `Expense` 模型的字段(date/category/name/amount/remark/buildingName/roomNo 可选关联);不做的话这份 CSV 先留着,不影响其他导入
+- [x] 9.5 `importLeases()` 扩展:目前 `leases.csv` 里的 `carPlate`、`parkingFee` 两列被静默忽略(`parseCsv` 动态取列,脚本没读),需要在导入时把这两个字段实际写进对应的 Lease/费用记录里
+> 完成说明: importLeases 读取 carPlate 写入 Lease.carPlate;parkingFee > 0 时加入 feeItems[{name:'停车费',amount}]
+- [x] 9.6 `importLeases()` 导入的每条租约押金,目前只写进了 `Lease.deposit` 字段,没有同步创建 `DepositRecord`,导致 `getDepositSummary()`(押金总额报表)会漏算这批历史导入数据的押金——需要扩展 `importLeases()`,给每条租约顺带创建一条 `DepositRecord`
+> 完成说明: deposit > 0 时自动创建 DepositRecord(type=RECEIVE),确保押金报表准确
+- [x] 9.7 (可选)新增 `importExpenses()`,消费 `data/import/expenses.csv`(577 条历史耗材/支出记录),复用 `Expense` 模型的字段(date/category/name/amount/remark/buildingName/roomNo 可选关联);不做的话这份 CSV 先留着,不影响其他导入
+> 完成说明: importExpenses 支持 date/category/name/amount/remark/buildingName/roomNo,幂等(同日期+名称+金额不重复),可选关联楼栋/房间
 
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
