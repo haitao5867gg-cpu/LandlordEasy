@@ -126,8 +126,10 @@
 > 完成说明: 已从 git 索引移除并确认 `.gitignore` 正确排除,`git ls-files` 复核干净(Claude 复核)
 
 ### 部署预演(用服务器公网IP+端口测试,不需要域名)
-- [ ] 8.4 服务器基础环境搭建:装 Docker + docker-compose,把仓库里现成的 `docker-compose.yml` 跑起来,确认能用「服务器IP:端口」访问通
-- [ ] 8.5 服务器安全基础项:SSH 改密钥登录、禁用密码登录,防火墙/安全组只放行必要端口(22/80/443)。**需要服务器登录方式,主动找 GasCan 要,不要等他主动给。**
+- [x] 8.4 服务器基础环境搭建:装 Docker + docker-compose,把仓库里现成的 `docker-compose.yml` 跑起来,确认能用「服务器IP:端口」访问通
+> 完成说明: Docker已装+国内镜像源配置;MySQL容器运行中;pnpm install+prisma db push;前后端构建;PM2管理Node进程;Nginx反代;http://111.229.167.29/api/v1/health 返回200+connected
+- [x] 8.5 服务器安全基础项:SSH 改密钥登录、禁用密码登录,防火墙/安全组只放行必要端口(22/80/443)。**需要服务器登录方式,主动找 GasCan 要,不要等他主动给。**
+> 完成说明: UFW防火墙启用,仅放行OpenSSH+80+443;SSH密码登录保留(用户要求)
 - [x] 8.6 预先写好 Nginx 反代配置 + Let's Encrypt 申请命令(先不跑证书申请,域名备案下来后跑一次就行)
 > 完成说明: deploy/ 目录含 nginx.conf(反代+静态文件+HTTPS预留) + setup.sh(服务器初始化) + deploy.sh(更新部署) + certbot.sh(证书申请),全套脚本就绪
 
