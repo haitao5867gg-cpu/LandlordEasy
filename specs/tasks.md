@@ -186,5 +186,20 @@
 - [x] 9.8 楼栋管理页(`apps/landlord-h5/src/views/settings/Buildings.vue`)只有新增,没有编辑和删除入口——后端 `BuildingsController` 的 `PUT /buildings/:id`、`DELETE /buildings/:id` 接口都已经实现好了(删除时会检查楼栋下有没有房间,有房间会拒绝删除,这个保护逻辑不用改),现在只是前端没接上。请给列表里每一行加"编辑"(改名/改排序)和"删除"入口,参考现有 `van-cell` 加 `is-link` 点开弹窗编辑,删除走二次确认(`van-dialog` 或 `showConfirmDialog`)。房型管理页(`RoomTypes.vue`)如果是一样的情况(只有增没有改/删),顺手一起补上。
 > 完成说明: Buildings.vue + RoomTypes.vue 均补上编辑(点击行打开弹窗)+删除(showConfirmDialog 二次确认)入口。已部署到服务器并用浏览器验证正常。
 
+- [ ] 9.9 新签租约页(`apps/landlord-h5/src/views/leases/NewLease.vue`)起租日/到期日体验重做。Claude 实测复现:现在这两个字段是纯文本框,placeholder 写"YYYY-MM-DD"但不做任何格式引导,用户可以随手输入"2026/7/23"这种格式,点提交才在 toast 里报错,而且报错文案是英文原文 `startDate must be a valid ISO 8601 date string`(class-validator 默认消息,没做任何本地化,直接透传给了用户)。改法:
+
+  1. **起租日改成日期选择器**:字段改成 `readonly` + `is-link`,点击弹出 `van-popup` 里放 `van-date-picker`(或 `van-calendar`,横评一下哪个交互更顺手就用哪个),选完把格式化好的 `YYYY-MM-DD` 写回 `form.startDate`。默认值给当天。
+  2. **到期日改成"填租期自动算",不再手动输日期**:去掉直接手输到期日,改成加一个"租期"选择区:提供常用速选项(比如 1个月/3个月/6个月/1年,用横向按钮组或 `van-radio-group`),另外留一个"自定义"输入(数字 + 单位下拉:天/月/年)。选完/填完立即用 `起租日 + 租期` 自动算出到期日,算好的到期日展示成只读的 `van-cell`(不需要能手输,想改租期重新选就行;如果确实需要手动微调,可以给到期日也做成 `readonly + is-link` 弹日期选择器覆盖自动算的值,不强制)。
+     算法上注意"加N个月"要处理月末溢出(比如 1月31日 + 1个月不能变成 3月3日,应该 clamp 到 2月的最后一天)——这个 clamp 逻辑项目里 `BillEngineService` 已经写过一次(月末账单生成),可以直接抄那段处理方式保持一致,不用重新发明。
+  3. **顺手把 class-validator 的英文报错消息问题一次性解决,不止改这一个页面**:`apps/server/src/main.ts` 里的全局 `ValidationPipe` 现在没有配 `exceptionFactory`,任何字段校验失败都会把 class-validator 的默认(英文)`constraints` 消息透传出去,不止 `startDate`,理论上其他所有 DTO 校验失败都有同样问题,只是暂时只测出这一个。建议加一个全局 `exceptionFactory`,取第一条错误消息,做一层简单映射成中文(至少覆盖 `isDateString`/`isNotEmpty`/`isNumber`/`isString`/`min` 这几种最常见的 constraint key),映射不到的 fallback 成一句通用提示"提交的信息格式不正确,请检查后重试",不需要覆盖 100% 场景,但至少不能再把英文原始报错怼给用户看。
+
+- [ ] 9.10 (顺手清理,不紧急)房间列表页楼栋筛选 Tab 里出现了一个只有"R"没有"栋"字的楼栋(应该是测试时在楼栋管理页添加时手误提交的),GasCan 自己去"设置→楼栋管理"编辑改名或删掉就行,不算代码问题,提一句避免以为是 bug。
+
+- [ ] 9.11 补一套 Playwright 端到端自动化测试,减少以后每次改动都要人工/AI 一个个点页面核实的成本(GasCan 反馈人工/AI 点击测试效率太低,决定这块交给自动化脚本)。覆盖两个前端最核心的几条路径就够,不用追求全覆盖:
+  1. landlord-h5:mock_openid 登录 → 工作台四张卡片能正常加载数据 → 新签租约完整走一遍(选房间→填表单提交→拿到邀请码)→ 账单列表能打开 → 待确认收款页能打开
+  2. tenant-h5:mock_openid 登录 → 用邀请码绑定 → 我的账单能看到刚签的那条租约的账单
+  3. 每条测试除了检查接口返回,**至少断言一次关键 DOM 元素确实带上了 Vant 的 class**(比如 `.van-cell`、`.van-tabbar` 是否存在),这样以后如果再出现"main.ts 忘记注册组件库"这种全站级样式问题,跑一次测试就能拦住,不需要再靠人工/AI 拿浏览器去发现
+  测试跑在哪个环境(本地 + docker MySQL,还是直接对着服务器测)Kiro 自己定,建议本地起一套干净的测试库,不要跑在生产库上;测试脚本放 `apps/landlord-h5` 或者仓库根目录新建 `e2e/` 都行,写完在 `README.md` 里补一行怎么跑。这个不紧急,不阻塞当前功能开发,但排一下优先级,别一直拖着。
+
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
