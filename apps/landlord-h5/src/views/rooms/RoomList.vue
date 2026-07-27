@@ -37,6 +37,8 @@ import { useRoute, useRouter } from 'vue-router';
 import http from '../../utils/http';
 import { roomStatusMap } from '../../utils/status';
 
+defineOptions({ name: 'RoomList' });
+
 const route = useRoute();
 const router = useRouter();
 const buildings = ref<any[]>([]);

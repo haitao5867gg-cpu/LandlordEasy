@@ -1,5 +1,9 @@
 <template>
-  <router-view />
+  <router-view v-slot="{ Component }">
+    <keep-alive :include="['RoomList']">
+      <component :is="Component" />
+    </keep-alive>
+  </router-view>
   <van-tabbar v-model="activeTab" v-if="showTabbar" route>
     <van-tabbar-item to="/" icon="home-o">工作台</van-tabbar-item>
     <van-tabbar-item to="/rooms" icon="shop-o">房间</van-tabbar-item>
