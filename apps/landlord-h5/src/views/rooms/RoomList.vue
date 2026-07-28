@@ -5,7 +5,8 @@
         <van-icon name="plus" size="20" @click="$router.push('/rooms/batch-create')" />
       </template>
     </van-nav-bar>
-    <van-tabs v-model:active="activeBuilding" @change="onFilterChange">
+    <!-- 等楼栋数据加载完再渲染 Tabs，避免 Tabs 在数据到达前 reset activeBuilding -->
+    <van-tabs v-if="buildings.length > 0" v-model:active="activeBuilding" @change="onFilterChange">
       <van-tab title="全部" :name="0" />
       <van-tab v-for="b in buildings" :key="b.id" :title="b.name" :name="b.id" />
     </van-tabs>
@@ -32,20 +33,20 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { ref, onMounted, onActivated } from 'vue';
+import { useRouter } from 'vue-router';
 import http from '../../utils/http';
 import { roomStatusMap } from '../../utils/status';
 
 defineOptions({ name: 'RoomList' });
 
-const route = useRoute();
 const router = useRouter();
 const buildings = ref<any[]>([]);
 const rooms = ref<any[]>([]);
-const activeBuilding = ref(Number(route.query.buildingId) || 0);
-const statusFilter = ref((route.query.status as string) || '');
+const activeBuilding = ref(0);
+const statusFilter = ref('');
 const loading = ref(true);
+const initialized = ref(false);
 
 const statusOptions = [
   { text: '全部状态', value: '' },
@@ -61,16 +62,10 @@ function statusTagType(s: string) {
   return 'warning';
 }
 
-/** 筛选变化时更新 URL query 并重新请求 */
 function onFilterChange() {
-  const query: Record<string, string> = {};
-  if (activeBuilding.value) query.buildingId = String(activeBuilding.value);
-  if (statusFilter.value) query.status = statusFilter.value;
-  router.replace({ query });
   fetchRooms();
 }
 
-/** 跳转详情时保持当前筛选状态(通过 URL query 已持久化,返回时自动恢复) */
 function goDetail(roomId: number) {
   router.push(`/rooms/${roomId}`);
 }
@@ -88,8 +83,16 @@ async function fetchRooms() {
 }
 
 onMounted(async () => {
-  buildings.value = await http.get('/buildings') as any;
-  await fetchRooms();
+  if (!initialized.value) {
+    buildings.value = await http.get('/buildings') as any;
+    await fetchRooms();
+    initialized.value = true;
+  }
+});
+
+// keep-alive 恢复时不重新请求，状态保持原样
+onActivated(() => {
+  // 什么都不做，组件状态已经缓存
 });
 </script>
 

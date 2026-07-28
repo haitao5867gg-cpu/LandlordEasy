@@ -201,5 +201,19 @@
   3. 每条测试除了检查接口返回,**至少断言一次关键 DOM 元素确实带上了 Vant 的 class**(比如 `.van-cell`、`.van-tabbar` 是否存在),这样以后如果再出现"main.ts 忘记注册组件库"这种全站级样式问题,跑一次测试就能拦住,不需要再靠人工/AI 拿浏览器去发现
   测试跑在哪个环境(本地 + docker MySQL,还是直接对着服务器测)Kiro 自己定,建议本地起一套干净的测试库,不要跑在生产库上;测试脚本放 `apps/landlord-h5` 或者仓库根目录新建 `e2e/` 都行,写完在 `README.md` 里补一行怎么跑。这个不紧急,不阻塞当前功能开发,但排一下优先级,别一直拖着。
 
+## M10 环境隔离(dev/test + prod,同域名同服务器)
+
+> 完整方案见 `specs/env-isolation.md`,GasCan 已确认关键决策(dev 子域名、dev 环境继续用微信 mock 模式),不需要再讨论方案,直接照着实施。
+
+- [ ] 10.1 登录服务器跑 `free -h` 确认内存余量,评估同时跑两套后端+一套MySQL是否有压力,有问题先反馈,没问题继续往下做
+- [ ] 10.2 GasCan 去域名服务商加一条 `dev` 的 A 记录指向服务器公网 IP(这步不用 Kiro 做,GasCan 自己操作,Kiro 只需要提醒他做)
+- [ ] 10.3 MySQL 新建 `landlordeasy_dev` database,跑 `prisma migrate`/`db push` 建表结构,用 `prisma/seed.ts` 灌种子数据(不要拷贝生产数据)
+- [ ] 10.4 后端新增 PM2 进程 `landlordeasy-server-dev`,端口 3001,独立 `.env.dev`(`DATABASE_URL` 指向 dev 库,`WECHAT_MODE=mock`),现有生产进程的 `.env` 建议改名成 `.env.production` 更清楚
+- [ ] 10.5 两个前端各自多构建一份 dev 版本,服务器上分 prod/dev 两组静态目录存放(具体路径见 spec)
+- [ ] 10.6 `deploy/nginx.conf` 加 `dev.<域名>` 的 server 块,反代到 3001 端口 + dev 静态目录
+- [ ] 10.7 域名备案 + Let's Encrypt 能签发后,给 `dev.<域名>` 单独签一次证书(`deploy/certbot.sh` 需要支持传域名参数跑两次)
+- [ ] 10.8 `deploy/deploy.sh` 改成支持 `prod`/`dev` 参数,分别部署到对应环境,更新 README 说明怎么用
+- [ ] 10.9 完成后麻烦 Kiro 自己先用 `dev.<域名>` 走一遍完整流程(新签租约→出账→提醒mock→租客上报→确认)确认 dev 环境跑通、且没有污染 prod 数据库,再告诉 GasCan
+
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
