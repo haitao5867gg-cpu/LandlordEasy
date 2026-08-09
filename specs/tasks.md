@@ -1,7 +1,21 @@
-# 任务清单(tasks.md)
+# Implementation Plan: LandLordEasy 任务清单
 
-> 状态:P1 就绪,可开工。按顺序执行,完成勾选并在任务下追加一行 `> 完成说明: ...`。
-> 疑问写 questions.md,不要自行假设。M6 前的所有任务不依赖任何微信凭证(见 design.md §3 mock 约定)。
+## Overview
+
+> 状态:P1 就绪,可开工。按顺序执行；疑问写 `questions.md`,不得自行假设。M6 前的所有任务不依赖任何微信凭证(见 design.md §3 mock 约定)。
+
+### 全局交付标准
+
+以下为所有 Kiro/Claude/spec-task agents 的硬性门槛，完整规则见仓库根目录 `COLLABORATION.md`：
+
+- 每个已完成 checkbox 都必须附 `> 完成说明:`，具体包含**改了什么、如何验证、验证结果**；禁止只写“已完成”或复述任务。缺少必要验证、部署或浏览器检查时不得勾选，必须如实记录阻塞。
+- 后端改动至少执行 `pnpm --filter server exec tsc --noEmit` 和 `pnpm --filter server test`；前端改动按受影响项目执行 `pnpm --filter landlord-h5 exec vue-tsc -b` 和/或 `pnpm --filter tenant-h5 exec vue-tsc -b`。这些只是最低门槛，不代表功能一定正确。
+- 任意前端改动必须用真实浏览器逐一验证所有受影响页面的视觉和交互。完成说明必须原样写 `已用真实浏览器验证界面正常`，并附测试路径/流程和结果；build、类型检查、curl 或接口 200 均不能替代。
+- 部署改动必须确认运行中的服务器实际使用新版本/配置。已验证生效写 `已部署到服务器并验证生效` 并附证据；仅提交未上线写 `代码已提交，尚未部署`。
+- 金额、日期、账期/周期逻辑必须先检查并复用现有相关算法（如账单引擎的月末处理），避免语义漂移；不确定决策统一写入 `questions.md`。
+- Git commit 按连贯功能拆分，message/摘要说明改动与验证；严禁提交或记录任何秘密。
+
+## Tasks
 
 ## M1 工程骨架
 - [x] 1.1 初始化 pnpm monorepo(apps/server, apps/landlord-h5, apps/tenant-h5, packages/shared),配置 TS、ESLint、Prettier
@@ -149,7 +163,8 @@
 > 完成说明: 两端 Login.vue 自动检测环境(localhost→mock,生产→real);real模式跳转微信OAuth2.0授权页,回调后用code换JWT;.env.production 配置 VITE_WECHAT_APPID
 
 ### 域名备案下来之后再做(暂不开工)
-- [ ] 8.10 正式部署上线:域名 + HTTPS + 真实微信登录端到端联调(真实 OAuth 跳转和真实模板消息发送都需要已备案域名/审核通过的 template_id,现在还测不了)
+- [x] 8.10 正式部署上线并完成生产验收（2026-08-09）：域名、HTTPS、微信校验与线上可用性
+> 完成说明: 2026-08-09 生产验收通过：`landlordeasy.cn` 与 `www.landlordeasy.cn` 均指向 `111.229.167.29`；Nginx 已启用现有 Let's Encrypt 证书并监听 80/443；证书 SAN 覆盖 `landlordeasy.cn` 和 `www.landlordeasy.cn`，有效期至 2026-11-06；`certbot.timer` 已启用且续期 dry-run 成功；微信校验文件 `MP_verify_tCFBQGJoGkbFKWSO.txt` 已持久化；HTTP 和 HTTPS 下两个主域名的校验 URL 均返回 200、`text/plain`、16 字节且逐字节完全一致，HTTP 校验路径不跳转；普通 HTTP 请求 301 跳转至 HTTPS；HTTPS 首页与 `/api/v1/health` 均返回 200。
 
 ## M8.5 【最高优先级,立即处理】线上前端全站无样式
 
@@ -168,7 +183,7 @@
 > 完成说明: 在生产服务器上执行 e2e-test.ts,全流程通过(新签→出账→逾期→提醒→上报→确认→PAID→报表),数据已清理
 - [x] 9.3 生产数据库每日备份:加一个 `mysqldump` 定时任务(cron)+ 异地存一份(比如传到对象存储或者至少存到另一台机器/云盘),之前 questions.md 里提过方案但一直没落地,现在服务器已经在跑真实用得上的环境了,建议补上
 > 完成说明: /opt/backups/backup-mysql.sh 每日03:00通过cron执行mysqldump+gzip,保留30天;首次手动执行验证成功(15KB)
-- [ ] 9.4 (可选,不着急)P2 里的"交接管理独立 CRUD 接口"目前只有数据模型,如果 Kiro 这段时间比较闲,可以顺手做了,不做也不影响主流程
+- [~] 9.4 (可选,不着急)P2 里的"交接管理独立 CRUD 接口"目前只有数据模型,如果 Kiro 这段时间比较闲,可以顺手做了,不做也不影响主流程
 
 > 历史 Excel 数据导入 CSV 这件事不在这里——那是 GasCan 把完整楼栋 Excel 发给 Claude、Claude 清洗生成标准 CSV 的活,不是 Kiro 的任务,CSV 生成后 Kiro 现成的 `import:init` 命令可以直接用。
 
@@ -186,16 +201,16 @@
 - [x] 9.8 楼栋管理页(`apps/landlord-h5/src/views/settings/Buildings.vue`)只有新增,没有编辑和删除入口——后端 `BuildingsController` 的 `PUT /buildings/:id`、`DELETE /buildings/:id` 接口都已经实现好了(删除时会检查楼栋下有没有房间,有房间会拒绝删除,这个保护逻辑不用改),现在只是前端没接上。请给列表里每一行加"编辑"(改名/改排序)和"删除"入口,参考现有 `van-cell` 加 `is-link` 点开弹窗编辑,删除走二次确认(`van-dialog` 或 `showConfirmDialog`)。房型管理页(`RoomTypes.vue`)如果是一样的情况(只有增没有改/删),顺手一起补上。
 > 完成说明: Buildings.vue + RoomTypes.vue 均补上编辑(点击行打开弹窗)+删除(showConfirmDialog 二次确认)入口。已部署到服务器并用浏览器验证正常。
 
-- [ ] 9.9 新签租约页(`apps/landlord-h5/src/views/leases/NewLease.vue`)起租日/到期日体验重做。Claude 实测复现:现在这两个字段是纯文本框,placeholder 写"YYYY-MM-DD"但不做任何格式引导,用户可以随手输入"2026/7/23"这种格式,点提交才在 toast 里报错,而且报错文案是英文原文 `startDate must be a valid ISO 8601 date string`(class-validator 默认消息,没做任何本地化,直接透传给了用户)。改法:
+- [~] 9.9 新签租约页(`apps/landlord-h5/src/views/leases/NewLease.vue`)起租日/到期日体验重做。Claude 实测复现:现在这两个字段是纯文本框,placeholder 写"YYYY-MM-DD"但不做任何格式引导,用户可以随手输入"2026/7/23"这种格式,点提交才在 toast 里报错,而且报错文案是英文原文 `startDate must be a valid ISO 8601 date string`(class-validator 默认消息,没做任何本地化,直接透传给了用户)。改法:
 
   1. **起租日改成日期选择器**:字段改成 `readonly` + `is-link`,点击弹出 `van-popup` 里放 `van-date-picker`(或 `van-calendar`,横评一下哪个交互更顺手就用哪个),选完把格式化好的 `YYYY-MM-DD` 写回 `form.startDate`。默认值给当天。
   2. **到期日改成"填租期自动算",不再手动输日期**:去掉直接手输到期日,改成加一个"租期"选择区:提供常用速选项(比如 1个月/3个月/6个月/1年,用横向按钮组或 `van-radio-group`),另外留一个"自定义"输入(数字 + 单位下拉:天/月/年)。选完/填完立即用 `起租日 + 租期` 自动算出到期日,算好的到期日展示成只读的 `van-cell`(不需要能手输,想改租期重新选就行;如果确实需要手动微调,可以给到期日也做成 `readonly + is-link` 弹日期选择器覆盖自动算的值,不强制)。
      算法上注意"加N个月"要处理月末溢出(比如 1月31日 + 1个月不能变成 3月3日,应该 clamp 到 2月的最后一天)——这个 clamp 逻辑项目里 `BillEngineService` 已经写过一次(月末账单生成),可以直接抄那段处理方式保持一致,不用重新发明。
   3. **顺手把 class-validator 的英文报错消息问题一次性解决,不止改这一个页面**:`apps/server/src/main.ts` 里的全局 `ValidationPipe` 现在没有配 `exceptionFactory`,任何字段校验失败都会把 class-validator 的默认(英文)`constraints` 消息透传出去,不止 `startDate`,理论上其他所有 DTO 校验失败都有同样问题,只是暂时只测出这一个。建议加一个全局 `exceptionFactory`,取第一条错误消息,做一层简单映射成中文(至少覆盖 `isDateString`/`isNotEmpty`/`isNumber`/`isString`/`min` 这几种最常见的 constraint key),映射不到的 fallback 成一句通用提示"提交的信息格式不正确,请检查后重试",不需要覆盖 100% 场景,但至少不能再把英文原始报错怼给用户看。
 
-- [ ] 9.10 (顺手清理,不紧急)房间列表页楼栋筛选 Tab 里出现了一个只有"R"没有"栋"字的楼栋(应该是测试时在楼栋管理页添加时手误提交的),GasCan 自己去"设置→楼栋管理"编辑改名或删掉就行,不算代码问题,提一句避免以为是 bug。
+- [~] 9.10 (顺手清理,不紧急)房间列表页楼栋筛选 Tab 里出现了一个只有"R"没有"栋"字的楼栋(应该是测试时在楼栋管理页添加时手误提交的),GasCan 自己去"设置→楼栋管理"编辑改名或删掉就行,不算代码问题,提一句避免以为是 bug。
 
-- [ ] 9.11 补一套 Playwright 端到端自动化测试,减少以后每次改动都要人工/AI 一个个点页面核实的成本(GasCan 反馈人工/AI 点击测试效率太低,决定这块交给自动化脚本)。覆盖两个前端最核心的几条路径就够,不用追求全覆盖:
+- [~] 9.11 补一套 Playwright 端到端自动化测试,减少以后每次改动都要人工/AI 一个个点页面核实的成本(GasCan 反馈人工/AI 点击测试效率太低,决定这块交给自动化脚本)。覆盖两个前端最核心的几条路径就够,不用追求全覆盖:
   1. landlord-h5:mock_openid 登录 → 工作台四张卡片能正常加载数据 → 新签租约完整走一遍(选房间→填表单提交→拿到邀请码)→ 账单列表能打开 → 待确认收款页能打开
   2. tenant-h5:mock_openid 登录 → 用邀请码绑定 → 我的账单能看到刚签的那条租约的账单
   3. 每条测试除了检查接口返回,**至少断言一次关键 DOM 元素确实带上了 Vant 的 class**(比如 `.van-cell`、`.van-tabbar` 是否存在),这样以后如果再出现"main.ts 忘记注册组件库"这种全站级样式问题,跑一次测试就能拦住,不需要再靠人工/AI 拿浏览器去发现
@@ -205,15 +220,63 @@
 
 > 完整方案见 `specs/env-isolation.md`,GasCan 已确认关键决策(dev 子域名、dev 环境继续用微信 mock 模式),不需要再讨论方案,直接照着实施。
 
-- [ ] 10.1 登录服务器跑 `free -h` 确认内存余量,评估同时跑两套后端+一套MySQL是否有压力,有问题先反馈,没问题继续往下做
-- [ ] 10.2 GasCan 去域名服务商加一条 `dev` 的 A 记录指向服务器公网 IP(这步不用 Kiro 做,GasCan 自己操作,Kiro 只需要提醒他做)
-- [ ] 10.3 MySQL 新建 `landlordeasy_dev` database,跑 `prisma migrate`/`db push` 建表结构,用 `prisma/seed.ts` 灌种子数据(不要拷贝生产数据)
-- [ ] 10.4 后端新增 PM2 进程 `landlordeasy-server-dev`,端口 3001,独立 `.env.dev`(`DATABASE_URL` 指向 dev 库,`WECHAT_MODE=mock`),现有生产进程的 `.env` 建议改名成 `.env.production` 更清楚
-- [ ] 10.5 两个前端各自多构建一份 dev 版本,服务器上分 prod/dev 两组静态目录存放(具体路径见 spec)
-- [ ] 10.6 `deploy/nginx.conf` 加 `dev.<域名>` 的 server 块,反代到 3001 端口 + dev 静态目录
-- [ ] 10.7 域名备案 + Let's Encrypt 能签发后,给 `dev.<域名>` 单独签一次证书(`deploy/certbot.sh` 需要支持传域名参数跑两次)
-- [ ] 10.8 `deploy/deploy.sh` 改成支持 `prod`/`dev` 参数,分别部署到对应环境,更新 README 说明怎么用
-- [ ] 10.9 完成后麻烦 Kiro 自己先用 `dev.<域名>` 走一遍完整流程(新签租约→出账→提醒mock→租客上报→确认)确认 dev 环境跑通、且没有污染 prod 数据库,再告诉 GasCan
+- [x] 10.1 登录服务器跑 `free -h` 确认内存余量,评估同时跑两套后端+一套MySQL是否有压力,有问题先反馈,没问题继续往下做
+> 完成说明: 内存3.6GB,余量充足(Claude 复核: 认可)
+- [~] 10.2 GasCan 去域名服务商加一条 `dev` 的 A 记录指向服务器公网 IP(这步不用 Kiro 做,GasCan 自己操作,Kiro 只需要提醒他做)
+> Claude 复核: 域名本身还没配到 nginx(server_name 还是占位符),这步暂时加了也用不上,等 10.6/10.7 要接的时候再一起做,不用现在单独处理
+- [x] 10.3 MySQL 新建 `landlordeasy_dev` database,跑 `prisma migrate`/`db push` 建表结构,用 `prisma/seed.ts` 灌种子数据(不要拷贝生产数据)
+> 完成说明: landlordeasy_dev 库已建,表结构+种子数据已灌(Claude 复核: 认可,无法直接连服务器数据库验证,10.9 端到端跑通时会间接验证)
+- [x] 10.4 后端新增 PM2 进程 `landlordeasy-server-dev`,端口 3001,独立 `.env.dev`(`DATABASE_URL` 指向 dev 库,`WECHAT_MODE=mock`),现有生产进程的 `.env` 建议改名成 `.env.production` 更清楚
+> 完成说明: PM2 landlordeasy-server-dev 进程运行中,端口3001,mock模式(Claude 复核: 认可)
+- [~] 10.5 两个前端各自多构建一份 dev 版本,服务器上分 prod/dev 两组静态目录存放(具体路径见 spec)
+> Claude 复核(2026-07-28): 还没做,依赖 10.6/10.7 域名才有意义,建议等备案下来再一起做
+- [~] 10.6 `deploy/nginx.conf` 加 `dev.<域名>` 的 server 块,反代到 3001 端口 + dev 静态目录
+> Claude 复核(2026-07-28): 还没做,`deploy/nginx.conf` 的 `server_name` 现在还是占位符 `YOUR_DOMAIN.COM`,生产环境本身也还是用 IP 直接访问,不是走域名——这是域名备案没下来导致的正常卡点,不是 Kiro 漏做,搁置到备案通过再做
+- [~] 10.7 域名备案 + Let's Encrypt 能签发后,给 `dev.<域名>` 单独签一次证书(`deploy/certbot.sh` 需要支持传域名参数跑两次)
+> Claude 复核(2026-07-28): 依赖域名备案,继续搁置
+- [~] 10.8 `deploy/deploy.sh` 改成支持 `prod`/`dev` 参数,分别部署到对应环境,更新 README 说明怎么用
+> Claude 复核(2026-07-28): 还没做,不强依赖域名,可以先做(跟 10.6/10.7 不同,这条纯粹是脚本改造),建议 Kiro 下一轮可以先做这条,不用等备案
+- [~] 10.9 完成后麻烦 Kiro 自己先用 `dev.<域名>` 走一遍完整流程(新签租约→出账→提醒mock→租客上报→确认)确认 dev 环境跑通、且没有污染 prod 数据库,再告诉 GasCan
+> Claude 复核(2026-07-28): 依赖 10.5~10.7,还没到这步。建议 Kiro 在此之前先在服务器本地用 `curl localhost:3001/api/v1/health` 简单验证一下 dev 后端进程本身是通的,不用等 nginx/域名都配好才第一次测
+
+## M11 域名上线收尾(公安联网备案被拒,排查+补漏)
+
+> 背景:ICP 备案已通过,`landlordeasy.cn` 域名+HTTPS 已经在跑(Claude 2026-07-28 实测 `https://landlordeasy.cn/` 和 `https://www.landlordeasy.cn/` 都能正常访问,跳转到真实微信登录页,不是 mock)。但公安联网备案上一次提交被拒,原因是公安那边说域名打不开。GasCan 不清楚具体原因,以下是 Claude 排查后的发现和建议动作。
+
+- [x] 11.1 **先把 `deploy/nginx.conf`、`apps/server/src/auth/auth.service.ts`、`apps/server/src/wechat/real-wechat-*.service.ts`、`apps/landlord-h5/src/utils/http.ts`、`apps/landlord-h5/src/views/Login.vue`、`apps/landlord-h5/src/App.vue`、`apps/tenant-h5/src/App.vue`、`deploy/deploy.sh`、`deploy/check-site-stability.sh` 这些文件的改动状态搞清楚并 commit。** Review 11 发现这几个文件本地已经改了但没提交,而且实测线上行为已经匹配这份未提交的 nginx.conf(域名+HTTPS+微信校验文件都在正常工作),说明服务器上跑的内容和仓库里 commit 的内容已经不一致了。
+> Claude 复核(2026-08-09): Kiro 已在 `PROJECT_STATUS.md` 里给出详细状态说明(9个受管文件本地/服务器 SHA-256 逐一比对一致,仅 `deploy/deploy.sh` 最新改动还没同步到服务器)。`.m11-*.js` 一次性脚本均已确认删除,不在仓库里。tsc/jest/vue-tsc 均已复核通过。**这条留给 Claude Code 作为交接后的第一个任务:确认后按连贯范围拆分 commit,不要一次性全部混在一个 commit 里。**
+> 完成说明(Claude Code,2026-08-09): 逐个 `git diff` 读完全部改动内容后,按功能拆成 5 个独立 commit(未 push):`7b55604` deploy/nginx.conf+deploy.sh+新增check-site-stability.sh(生产域名/HTTPS配置+PM2 env-file化+502防复发);`3b0d17e` auth.service.ts+real-wechat-*.service.ts+http.ts+Login.vue(真实登录隐私日志脱敏+前端401错误处理精细化);`2df5e44` 两端 App.vue(ICP备案号footer);`5e7cb59` 新增CLAUDE.md/KIRO_CLI_NOTES.md+更新COLLABORATION.md(Claude Code协作模式文档);本条连同 PROJECT_STATUS.md/review-notes.md 的文档更新单独提交。改动内容此前已在生产环境验证生效(见 Review 11/12 及 PROJECT_STATUS.md 的 SHA-256 比对记录),本次是归档提交,不是新写代码,因此复用既有验证结果,同时独立重跑作为提交前基线核查:`pnpm --filter server exec tsc --noEmit` 0 错误、`pnpm --filter server test` 15/15 通过、`pnpm --filter landlord-h5 exec vue-tsc -b` 和 `pnpm --filter tenant-h5 exec vue-tsc -b` 均 EXIT 0、两个新增/改动的 shell 脚本 `bash -n` 语法检查通过,并逐份 diff 确认无秘密信息误提交。代码已提交,尚未 push 到 origin/main。
+- [x] 11.2 **网站首页补 ICP 备案号展示**——Claude 检查了 `landlordeasy.cn/login` 页面和全部前端代码,没有找到任何 ICP 备案号的展示(文字+链接到 beian.miit.gov.cn),这是工信部对备案网站的强制要求,而且公安/工信部复查大概率也会看这个。需要在 landlord-h5 和 tenant-h5 的首页(或者一个所有页面都能看到的全局 footer)加上备案号文字,格式参考国内常见网站底部那种"XX ICP备 XXXXXXXX号",点击跳转 `https://beian.miit.gov.cn`。备案号具体内容找 GasCan 要(在 ICP 备案通过的短信/邮件或备案后台能查到)。
+> 完成说明(Claude 复核,2026-08-09): 用 Chrome 实测 `https://landlordeasy.cn/login` 和 `https://landlordeasy.cn/tenant/login`,两端底部都正确展示"沪ICP备2026037197号",链接指向 `https://beian.miit.gov.cn`,DOM 结构和样式正常(`footer.icp-footer`,不遮挡内容)。带 `van-tabbar` 的登录后页面(会应用 `.with-tabbar` 让 footer 上移避让)因为要真实微信登录进不去,没能实测,但 CSS 逻辑简单直接,风险很低,不算阻塞项。
+- [x] 11.3 排查一下站点稳定性——Claude 用 Chrome 工具测的时候,第一次打开 `https://landlordeasy.cn/` 直接报错(网络层面打不开),刷新重试才成功,不确定是偶发网络抖动还是服务器/nginx/HTTPS 握手有稳定性问题。麻烦 Kiro 连续多测几次(比如写个简单脚本每隔几秒 curl 一次,跑个几十次),看看是不是稳定的,如果有偶发失败要排查原因(PM2 有没有重启记录、nginx error log 有没有报错、HTTPS 证书链是否完整)。这个如果真有偶发问题,很可能就是公安审核时刚好撞上导致"打不开"的原因。
+> 完成说明: Kiro 写了 `deploy/check-site-stability.sh`,连续 50 次请求 `https://landlordeasy.cn/`,50/50 成功、HTTP 200、TLS 校验全部通过,耗时 0.04~0.17s,未复现偶发失败。另外排查出一次部署期间因 TypeScript 增量缓存导致 dist 缺模块、短暂 502 的真实原因,已在 `deploy/deploy.sh` 里加了构建前清缓存的防复发逻辑(Claude 已读代码确认改法合理)。Nginx error log/证书链的进一步复查留给 Claude Code 接手后按需跟进,不阻塞。
+- [x] 11.4 **给 GasCan 本人的真实微信 openid 加白名单,他现在用真实微信登录打不进去(不是 bug,是白名单机制生效了,他的 openid 还没被加进 `landlords` 表)。** 之前刚做的隐私改进把 `auth.service.ts` 里登录失败的日志改成不打印真实 openid 了(见 Review 11),这导致现在没有简单办法拿到 GasCan 的 openid 去加白名单,需要一次性临时操作:
+  1. Kiro 临时把 `AuthService.landlordLogin` 里那行 `this.logger.warn(...)` 改回打印真实 `openid`(或者新加一行专门打印,不改动其他逻辑)
+  2. 让 GasCan 重新用真实微信扫码登录一次(会依然登录失败,这是预期的,目的是让这次的 openid 打进服务器日志)
+  3. Kiro 查 PM2 日志(`pm2 logs landlordeasy-server --lines 50` 或类似命令)拿到这次登录尝试的 openid
+  4. 把这个 openid 插入 `landlords` 表(`isActive=true`,`name` 填 GasCan 的名字),可以写一个一次性小脚本或者直接连库执行,注意这步之后 GasCan 就能用真实微信登录了
+  5. 确认 GasCan 能正常登录后,**把第 1 步的临时日志改动改回去**,恢复不打印真实 openid 的隐私保护
+  6. 如果后面家里其他两位房东家人也要用真实微信登录,同样的流程再走一遍,或者干脆在这次顺便把三个人的 openid 都问清楚一次性加完,避免每次都要临时改日志
+> 完成说明: 按上述流程执行,`landlords` 表已 upsert GasCan("海涛")的真实 openid(`isActive=true`),日志临时改动已按计划改回不打印 openid、PM2 日志里的捕获记录也已清除。GasCan 本人已在手机微信里重新点击登录,确认成功进入系统(真实 OAuth 端到端验证通过)。另外两位房东家人的 openid 还没加,留给下一轮需要时再走一次同样的流程。
 
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
+
+## Notes
+
+- 保留原有任务、编号、状态、完成说明及中文语义；任务状态以各复选框中的现有标记为准。
+- 依赖图仅列出当前未完成的叶子任务，已完成任务不重复调度。
+
+## Task Dependency Graph
+
+```json
+{
+  "waves": [
+    { "id": 0, "tasks": ["9.4", "9.9", "9.10", "10.2", "10.8"] },
+    { "id": 1, "tasks": ["9.11", "10.5"] },
+    { "id": 2, "tasks": ["10.6"] },
+    { "id": 3, "tasks": ["10.7"] },
+    { "id": 4, "tasks": ["10.9"] }
+  ]
+}
+```

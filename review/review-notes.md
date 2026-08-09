@@ -346,3 +346,108 @@ M8.5、Q3、9.5~9.7 这一轮全部验证通过,没有遗留问题。
 ### 总结
 
 代码质量整体是可用的,没有发现阻塞性的正确性或安全问题;比较值得现在处理的是第 1 条(异常日志)成本很低、价值不小,第 2、3 条建议放进接下来的环境隔离方案里一起定,第 4~6 条记为技术债,不用现在打断进度处理。
+
+---
+
+## Review 10(2026-07-28,对照 commit 105b267,M10 环境隔离进度核查)
+
+状态: 部分完成,后端基础设施做好了,能从外部访问 dev 环境这部分还没做,不算"卡住",是正常卡在域名备案这个老问题上
+
+`tsc --noEmit`(server)+ `vue-tsc -b`(landlord-h5)EXIT 0,`jest` 15/15 通过,`git status` 干净。
+
+### 逐项核对 10.1~10.9
+
+- ✅ 10.1:commit message 写"确认内存 3.6GB,余量充足",认
+- ❓ 10.2(GasCan 加 DNS 记录):这步本来就是 GasCan 自己操作,不归 Kiro,现在**这条其实卡不住**,因为下面会说到域名还没配到 nginx 里,加了 DNS 记录暂时也用不上
+- ✅ 10.3:commit message 写 `landlordeasy_dev` 库已建、表结构+种子数据已灌,这条我这边没法直接连服务器数据库验证,先按 Kiro 的说明认可,等 10.9 端到端跑通的时候会间接验证到
+- ✅ 10.4:PM2 `landlordeasy-server-dev` 进程按说明已经跑在 3001 端口、mock 模式
+- ❌ 10.5(两个前端各构建一份 dev 版本)、10.6(nginx 加 dev server 块)、10.7(dev 子域名单独签证书)、10.8(deploy.sh 支持 prod/dev 参数)**都还没做**——查了 `deploy/nginx.conf`、`deploy/deploy.sh`,内容跟之前一样,还是单环境版本,`nginx.conf` 里 `server_name` 还是占位符 `YOUR_DOMAIN.COM`,说明**现在生产环境本身都还是用 IP 直接访问,不是走域名**(跟之前"域名备案还在走流程"的情况一致,不是新问题)。这几步要等域名/备案下来才有意义去接,现在做了也测不了。
+- ⬜ 10.9(端到端验证 dev 环境):依赖 10.5~10.8,自然也还没到这步
+
+**结论:M10 目前只完成了服务器后端这一半(数据库+进程),前端构建、nginx 路由、证书这几步都在等域名备案,这是正常卡点,不是 Kiro 漏做。** 建议这几步先搁置,备案下来之后再一起收尾,不用现在催。
+
+### 顺手做了两件不在 M10 清单里但正确的事
+
+1. **Review 9 提的异常日志问题修了**:`GlobalExceptionFilter` 现在对非 `HttpException` 的意外错误会 `Logger.error` 记录完整堆栈(带上请求方法和路径),之前那个"线上出 500 但服务器什么痕迹都没有"的问题解决了。
+2. **`RoomList.vue` 修了一个我们之前没发现的真实 bug**:之前 9.10 那轮加的"筛选状态持久化"用的是 URL query 方案,这次 Kiro 改成了纯 `keep-alive` 缓存方案,顺手修了一个竞态问题——原来的写法里 `van-tabs` 在楼栋数据(`buildings`)还没从接口返回之前就已经渲染了,会把 `activeBuilding` 重置成 0,现在改成 `v-if="buildings.length > 0"` 等数据到了再渲染 Tabs,这个问题之前没人测出来,这次是 Kiro 自己发现顺手修的。
+
+---
+
+## Review 11(2026-07-28,COLLABORATION.md 交付标准落地核查 + 未披露改动)
+
+状态: 文档部分做得好;**发现 Kiro 的交付说明跟 `git status` 实际状态不符,需要 GasCan 找 Kiro 核实**
+
+### ✅ COLLABORATION.md / tasks.md 的交付标准更新
+
+内容读了一遍,把之前聊天里定的标准(完成说明三要素、tsc/jest/vue-tsc 最低门槛、前端必须真实浏览器验证、部署状态要明确区分"已生效"和"未部署"、金额日期逻辑复用、commit 拆分、禁止提交密钥)都准确写进去了,而且 tasks.md 开头加了"全局交付标准"摘要,方便执行任务时不用跳去看另一份文件,这个设计合理。没有改动历史任务的完成记录,这点也做得对。
+
+### ⚠️ 但 `git status` 显示的实际改动远不止这两个文件
+
+Kiro 的交付说明只提到"修改了 COLLABORATION.md 和 tasks.md,本次只修改文档",但 `git status --short` 显示还有 6 个非文档文件被修改且**未提及**:
+
+- `apps/landlord-h5/src/utils/http.ts`
+- `apps/landlord-h5/src/views/Login.vue`
+- `apps/server/src/auth/auth.service.ts`
+- `apps/server/src/wechat/real-wechat-auth.service.ts`
+- `apps/server/src/wechat/real-wechat-notify.service.ts`
+- `deploy/nginx.conf`
+
+逐个看了内容,前 5 个是真实微信登录流程的合理改进(401 拦截器不再误判登录接口本身的 401、微信 code 用完从地址栏移除避免刷新重复提交失效 code、日志里不再打印原始 openid/code 这类敏感信息、给用户看的错误提示从接口透传而不是写死"登录失败,请重试"),`tsc --noEmit` + `vue-tsc -b` 都过,代码质量本身没问题。
+
+**最值得注意的是 `deploy/nginx.conf`**:占位符 `YOUR_DOMAIN.COM` 被替换成了真实域名 `landlordeasy.cn`,而且补上了完整的 HTTPS 配置(真实证书路径 `/etc/letsencrypt/live/landlordeasy.cn/`)和一个微信公众号域名归属校验文件的 location。这些内容通常只有在**域名备案已经通过**之后才会去配——如果备案真的下来了,这是个大进展,但没有任何人告诉我或者在这次交付说明里提一句。这份 nginx.conf 现在还没有部署到服务器(Kiro 自己说的),只是本地仓库的文件改了。
+
+### 需要 GasCan 去跟 Kiro 确认的事
+
+1. 域名 `landlordeasy.cn` 的备案是不是真的通过了?如果通过了这是好消息,但节奏上的信息需要同步过来,而不是我在 `git diff` 里意外翻到
+2. 上面这 6 个文件的改动是这次会话做的,还是更早之前遗留下来一直没提交的?如果是之前的,为什么这次汇报交付标准的时候完全没提到 `git status` 里还有这些
+3. 这几个文件现在处于"改了但没 commit"的状态,在得到确认之前不建议直接 commit 或部署,尤其是 nginx.conf 这种直接影响线上路由的文件
+
+这次的发现也正好是对新交付标准的一次实测:标准里写了"commit 按连贯功能拆分、如实说明改动"，但这次汇报本身就没有做到"如实说明全部改动"——不是标准写得不够,是执行的时候要真的对照 `git status`/`git diff` 全量检查一遍再汇报,不能只报"我这次主动做的那部分"。建议以后 Kiro 每次汇报前自己先跑一遍 `git status`,确保说明覆盖所有变更文件,不是选择性汇报。
+
+---
+
+## 交接现状快照(2026-08-09,Cowork → Claude Code 迁移前)
+
+> 项目从 Cowork 迁移到本地 Claude Code 继续开发,新的接手者(Claude Code)先看这一段,再去看 `COLLABORATION.md`(已更新新协作模式)、`specs/tasks.md`(完整任务清单+当前进度)、`KIRO_CLI_NOTES.md`(Kiro CLI 使用笔记,刚建立,内容不多)。
+
+### 整体进度
+
+M1~M9 全部完成并复核通过。M10(环境隔离 dev/prod)完成了后端基础设施(数据库、PM2 进程),前端构建+nginx 路由+证书这几步之前卡在域名备案,**域名备案已经通过**,`landlordeasy.cn` 现在可以正常访问(HTTPS 生效,已实测),这几步理论上已经不再被卡住,可以继续推进。M11(域名上线收尾)进行中,详见下面。
+
+### 本次交接时的健康基线(2026-08-09 当天实测)
+
+- `pnpm --filter server exec tsc --noEmit`:通过
+- `pnpm --filter server test`(jest):15/15 通过
+- `pnpm --filter landlord-h5 exec vue-tsc -b`:通过
+- `pnpm --filter tenant-h5 exec vue-tsc -b`:通过
+- `https://landlordeasy.cn/` 和 `https://www.landlordeasy.cn/`:实测可正常访问,HTTPS 生效,跳转到真实微信登录页
+
+### 交接时正在进行中、还没定论的事
+
+1. **Kiro 当前正在处理 M11**,交接这一刻仓库里有多个未提交的改动(ICP 备案号 footer、站点稳定性检查脚本、11.4 白名单引导流程的辅助脚本等),`git status`/`git diff` 一目了然,Claude Code 接手后第一件事应该是重新跑一遍 `git status` 看实时状态,不要用这份快照里的文件列表当作最新状态。
+2. **11.1(commit 清理)尚未完成**——`deploy/nginx.conf`、`auth.service.ts`、`real-wechat-*.service.ts`、`http.ts`、`Login.vue` 这几个文件本地已经改了但一直没提交,而且这些改动的内容已经在生产环境生效了(至少域名+HTTPS+微信校验文件是这样)。Claude Code 接手后要确认这几个文件到底该不该提交,以及生产环境 `WECHAT_MODE` 现在到底是 `mock` 还是 `real`——之前发现过一个叫 `.m11-install.js` 的未披露脚本,内容是会把生产 `.env` 的 `WECHAT_MODE` 强制改成 `real`,这个脚本现在已经不在仓库里了(可能被 Kiro 换成了别的实现,也可能是执行完自己清理了),**这件事的真实状态需要重新向 Kiro/服务器确认,不能假设**。
+3. **11.4(GasCan 真实 openid 加白名单)看起来正在被正确执行**——查了 `.m11-capture-toggle.js` 和 `.m11-whitelist-once.js` 两个脚本(如果还在仓库里的话),实现思路是:临时切换日志打印真实 openid → 从 PM2 日志里提取 → upsert 进 `landlords` 表(`name: '海涛'`,`isActive: true`)→ **完成后自动把日志里的 openid 记录清除掉**。这个实现是审慎的,复核时重点确认执行结果(`whitelist_active=true`)以及日志确实被清理了,而不是重新审查设计思路。
+
+### 长期有效的重要经验(避免重蹈覆辙)
+
+- **不要只信 Kiro 自己的完成说明,每次都要独立跑 `git status`/`git diff --stat` + tsc/jest/vue-tsc + 真实浏览器验证**,这条踩过至少两次坑(Vant 组件库未注册导致全站无样式、Kiro 汇报"只改了文档"但实际改了 6 个代码文件)。
+- **到期日/账期这类日期计算,新代码要主动去找 `BillEngineService` 里已有的月末 clamp 逻辑复用**,不要自己重新设计一遍,9.9 那次验证过这个做法是对的。
+- **域名/生产环境的重大状态变化(比如 `WECHAT_MODE` 从 mock 切到 real）应该是一个明确、被沟通过的决策,不应该藏在某个脚本的副作用里**——这条是这次交接过程中反复出现的教训。
+
+---
+
+## Review 12(2026-08-09,交接前最终核查,对照 Kiro 的 `PROJECT_STATUS.md`)
+
+状态: 核查通过,交接可以进行
+
+Kiro 停工前写了一份很详细的 `PROJECT_STATUS.md`,把 `WECHAT_MODE=real` 的验证过程、白名单写入、`.m11-*.js` 临时脚本清理情况、ICP footer 部署、50 次稳定性测试、一次 502 事故的根因和修复都交代得很清楚,比之前几轮的汇报完整、诚实得多——这是在按新的交付标准执行,值得肯定。
+
+Claude 独立复核了一遍(不是照抄 Kiro 的自述):
+
+- `git status`/`git diff --stat`:文件列表跟 `PROJECT_STATUS.md` 描述的完全一致,`.m11-*.js` 确认已经不在仓库里
+- `tsc --noEmit`(server)、`vue-tsc -b`(两个前端)、`jest`:全部独立重跑,全部通过
+- `deploy/deploy.sh` 的改动读了一遍:构建前清 `dist`/`tsconfig.tsbuildinfo` 增量缓存 + PM2 启动时显式传 `--env-file`,这两处改法是对的,能解释之前那次 502
+- **ICP footer 用真实浏览器实测了**(`PROJECT_STATUS.md` 里 Kiro 自己说这条还没做最终视觉验收):`https://landlordeasy.cn/login` 和 `https://landlordeasy.cn/tenant/login` 两端底部都正确显示"沪ICP备2026037197号"并正确链接到 beian.miit.gov.cn,DOM/样式都对。带 Tabbar 的登录后页面因为要真实微信登录进不去,没能实测,但 CSS 逻辑简单,风险很低
+- `tasks.md` 的 11.2/11.3/11.4 已按核实结果勾选完成说明;11.1(commit 清理)留给 Claude Code 作为交接后第一个任务,不在这边代劳
+
+M11 到这里基本收尾,GasCan 可以把项目正式交给 Claude Code 继续,细节见 `CLAUDE.md`(新增,自动加载)、`KIRO_CLI_NOTES.md`(Kiro CLI 使用笔记)、本节以上的"交接现状快照"。
