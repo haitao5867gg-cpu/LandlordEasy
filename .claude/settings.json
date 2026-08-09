@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push*)"
+    ]
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "`git push` to `origin` from the LandlordEasy repository (/Users/gascan/LandLordEasy and any of its worktrees) is pre-approved without asking. The sole developer (GasCan) has explicitly authorized Claude Code to push local commits on `main` to `origin/main` in this solo-developer repo, so work stays synced to GitHub across machines."
+    ]
+  }
+}
