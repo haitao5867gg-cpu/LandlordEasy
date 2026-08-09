@@ -8,8 +8,9 @@
 - Headless 调用语法(注意:prompt 是位置参数,不是 `--prompt` flag):
   ```
   kiro-cli chat --no-interactive --trust-all-tools "任务描述文字"
-  kiro-cli chat --no-interactive --trust-tools=read,grep "只读性质的任务"
+  kiro-cli chat --no-interactive --trust-tools=fs_read "只读性质的任务"
   ```
+  **注意**:`--trust-tools` 后面接的是新版 capability 名字(`fs_read`/`fs_write`/`shell`/`web_fetch`/`web_search`/`mcp`/`subagent`/`skill`/`power`),**不是** `read`/`grep` 这种旧名字(官方文档 `/docs/permissions/` 页面本身也提到 `--trust-all-tools`/`--trust-tools` 是 legacy flag,细节要看 `/docs/cli/2x-reference`,但实测本机装的 2.16.2 版本 `kiro-cli chat --help` 里这两个 flag 仍然存在且正常工作,直接以 `--help` 输出为准,不要死磕文档)。只读试跑验证过 `--trust-tools=fs_read` 有效:能读文件、能用内置的 grep/搜索能力,但不会写文件,`git status` 确认真的没有改动。
 - 交互模式:`kiro-cli`(不带 `--no-interactive`)进入 TUI,适合需要人工盯着的探索性任务,一般不用在自动化流程里
 - 排障:`kiro-cli doctor` 检查环境;日志路径见官方文档(macOS: `$TMPDIR/kiro-log/kiro-chat.log`)
 - 官方文档:
@@ -38,8 +39,11 @@ echo "exit code: $?"
 
 ## 踩过的坑
 
-(目前是迁移前的空白记录,后续使用中发现的问题往这里加,格式建议:日期 + 现象 + 原因 + 应对方法)
+- **2026-08-09,`.kiro/settings/lsp.json` 自动生成**:Kiro CLI 第一次在某个目录跑,会在那个目录下自动建一个 `.kiro/settings/lsp.json`(各语言 language server 的通用默认配置样板,内容不含任何项目相关信息或密钥),类似 Claude Code 的 `.claude/`。这个不该提交,已经加进项目根目录 `.gitignore` 的 IDE 分区。以后如果换到别的目录跑 Kiro CLI,留意一下是不是也需要补这条 gitignore。
+- **CLI 版本 vs 文档描述可能对不上**:`kiro.dev/docs/permissions/` 页面主要讲的是新版 capability 权限模型(`fs_read`/`fs_write`/`shell` 等 YAML 规则),但实际装的 `kiro-cli chat --help` 里 `--trust-all-tools`/`--trust-tools=<TOOL_NAMES>` 这两个 flag 是实打实存在且正常工作的。**调用前建议先跑一遍 `kiro-cli chat --help` 核对真实支持的 flag,不要完全照官方文档抄,版本之间可能有出入。**
 
 ## 好用的 prompt 写法
 
-(后续积累)
+- **精确圈定"能改哪些文件、不能碰什么",比笼统描述任务效果好很多**。实测(2026-08-09,10.8 任务):prompt 里明确写"只改 A、B 两个文件,不要碰 C/D/E,不要连接生产服务器,不要真的执行部署",Kiro 完整遵守了,`git status` 复核确认没有超出范围的改动。
+- **遇到不确定的设计决策(比如"这一步要不要区分环境"),明确要求"想清楚讲讲你的理解,不确定就写进总结里让我来判断,不要自己猜测直接改",比放任它自由发挥或者不给任何指引都好**。实测 10.8 任务里让 Kiro 判断 `prisma migrate deploy` 要不要按 prod/dev 分流,它按要求没有擅自改动,并且在总结里准确指出了"当前实现下 dev 部署会误触发生产库迁移"这个隐患,原文写的分析是对的——之后我把这个具体问题单独开了第二轮任务修复,验证下来 Kiro 给的修复方案(用 Node 原生 `--env-file` 解析,而不是手写 shell 正则)也是稳妥的写法,避开了历史上 MySQL 密码含 `#` 被截断的坑(见 questions.md Q3)。
+- **同一个任务分阶段拆成多轮独立的 headless 调用是可行的**,不需要用 `--resume`——只要每一轮 prompt 里把足够的背景信息(前一轮做了什么、这一轮具体要修什么)写清楚,Kiro 能正确衔接,不会因为"看不到上一轮对话"就乱猜上下文。
