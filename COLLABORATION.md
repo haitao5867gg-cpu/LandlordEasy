@@ -1,22 +1,46 @@
-# 协作规则(Claude ↔ Kiro)
+# 协作与交付规则（Claude ↔ Kiro ↔ spec-task agents）
 
-本仓库是「房屋收租」项目的唯一信息源,由三方协作:
+本仓库是「房屋收租」项目的唯一信息源。Claude 负责需求、设计、任务拆分和 review；Kiro/其他 spec-task agents 按 `specs/` 实现与验证；GasCan 是最终决策人。以下规则是所有代理的硬性要求。
 
-- **Claude(Mac)**:负责需求梳理、架构设计、任务拆分、code review。产出写在 `specs/` 和 `review/`。
-- **Kiro(Windows, 开发者)**:负责按 `specs/tasks.md` 实现代码,写入 `src/`。完成任务后在 tasks.md 勾选并附简要说明;有疑问写入 `questions.md`。
-- **GasCan(用户)**:最终决策人。
+## 工作模式（2026-08-09 起）
 
-## Kiro 工作流
-1. 先读 `specs/requirements.md` → `specs/design.md` → `specs/tasks.md`
-2. 按 tasks.md 顺序开发,不要偏离 design.md 的技术方案
-3. 每完成一个任务:勾选 checkbox,并在任务下追加一行 `> 完成说明: ...`
-4. 拿不准的决策**不要自行假设**,写入 `questions.md` 等待答复
-5. 收到 `review/review-notes.md` 的意见后优先处理
+项目从 Cowork 迁移到本地 Claude Code。新模式下 **Claude Code 既是架构师/审查者，也直接通过 headless 模式调用本机已登录的 Kiro CLI 来执行实现工作**，不再依赖 GasCan 在 Claude 和 Kiro 之间手动转达。具体要求：
 
-## Claude 工作流
-1. 与用户讨论后更新 specs/
-2. Kiro 提交代码后,对照 spec 审查,意见写入 `review/review-notes.md`
-3. 回复 `questions.md` 中的问题(在问题下方以 **答:** 开头)
+1. **正式大量使用前先学会用**：第一次使用 Kiro CLI headless 模式前，先读官方文档搞清楚参数和行为，不要凭猜测调用：
+   - `https://kiro.dev/docs/cli/headless/`（headless 模式本身）
+   - `https://kiro.dev/docs/reference/cli-commands/`（命令参考）
+   - `https://kiro.dev/docs/permissions/`（`--trust-all-tools` / `--trust-tools` 信任模型）
+   建议先用一个小的、无风险的任务（比如只读性质的代码检查）试跑一次,确认调用方式、输出格式、退出码都符合预期,再开始承接 tasks.md 里的正式任务。
+2. **积累经验,不要每次从零摸索**：把用下来的经验(有效的 prompt 写法、容易踩的坑、哪些任务适合直接 `--trust-all-tools`、哪些必须逐步授权、常见失败模式怎么处理)记录到 `KIRO_CLI_NOTES.md`(不存在就新建),每次调用前先看一眼这份笔记,用完顺手补充,让后面的调用越来越顺。
+3. **权限不要一刀切放开**：常规编码任务可以用 `--trust-all-tools` 提高效率；但凡涉及生产部署、修改服务器配置、改数据库、动 `.env`/密钥这类操作,必须逐步授权或先用 Plan 模式看一遍计划,不要图省事全信任。
+4. **调用 Kiro 干活和审查 Kiro 干得好不好,必须是两个独立的检查动作,不能因为是自己叫它干的就降低审查标准**。每次 Kiro CLI 跑完，都必须自己独立执行「最低验证门槛」一节的全部检查（不能依赖 Kiro 自述的结果），确认无误后再由 Claude Code 自己在 `tasks.md` 写下最终的完成说明——不要直接照抄 Kiro 输出里的自我总结。
+5. **汇报前必须先跑一遍 `git status` 和 `git diff --stat`，如实覆盖所有变更文件**，不能只报告自己主动做的那部分改动。这条是从实际踩过的坑（Kiro 曾经遗漏未提交的改动，包括一次涉及生产 `WECHAT_MODE` 切换的未披露脚本）里总结出来的，必须严格执行。
 
-## Kiro 开工指令
-用户说「开工」即执行:读完 specs/ 三份文档后,从 tasks.md 第一个未勾选任务开始,按顺序开发。所有对外部服务(微信、短信等)的依赖已在 design.md 中约定 mock 方案,没有任何凭证也能开发和自测。完成即勾选、提交、push,遇到决策疑问写 questions.md,不要自行假设。
+## 开工与决策
+
+1. 开工前依次阅读 `specs/requirements.md`、`specs/design.md`、`specs/tasks.md` 和相关 `review/review-notes.md`，按未完成任务顺序执行，不得擅自偏离已确认方案。
+2. 任何不确定的需求或技术决策必须写入 `questions.md` 等待确认，禁止自行假设。
+3. 涉及金额、日期、账期或周期计算时，必须先检查并复用已有相关算法和语义（例如 `BillEngineService` 的月末 clamp 与账期边界），避免同类逻辑漂移。
+
+## 完成说明与状态
+
+1. 每个勾选为完成的 `tasks.md` checkbox 下都必须有 `> 完成说明:`，并具体写清三件事：**改了什么、如何验证、验证结果**。不得只写“已完成”、复述任务标题或给出无法核实的笼统结论。
+2. 未执行本规则要求的类型检查、测试、真实浏览器验证或部署验证时，不得勾选完成；应保留未完成状态，并在任务下如实记录阻塞项、已完成部分和未验证内容。
+3. 构建、类型检查和测试通过只是最低门槛，不等于功能正确；完成说明不得把这些结果表述为完整功能验收。
+
+## 最低验证门槛
+
+- 后端改动至少运行 `pnpm --filter server exec tsc --noEmit` 和 `pnpm --filter server test`，并记录各自结果。
+- 房东端前端改动至少运行 `pnpm --filter landlord-h5 exec vue-tsc -b`；租客端前端改动至少运行 `pnpm --filter tenant-h5 exec vue-tsc -b`。涉及哪个前端就验证哪个，涉及两个就都验证。
+- 任意前端改动还必须用**真实浏览器**逐一验证所有受影响页面的视觉与交互；构建、类型检查、接口 200、curl 或静态代码审查均不能替代。完成说明必须原样包含 `已用真实浏览器验证界面正常`，并列出测试路径/操作流程及实际结果。
+- 部署类改动必须在运行中的服务器上确认新版本/新配置已被实际加载并生效（不能只看本地代码、commit、push 或上传文件）。已验证线上生效时写 `已部署到服务器并验证生效` 并附验证对象与结果；尚未部署时必须写 `代码已提交，尚未部署`，不得混淆两种状态。
+
+## Git 与安全
+
+1. commit 按连贯、可独立说明的功能拆分；commit message 和交付摘要应说明改动内容及验证方式/结果，避免把无关改动混在一起。
+2. 任何密钥、密码、token、生产 `.env`、私钥或其他秘密都不得提交、写入文档或完成说明。
+
+## 协作流程
+
+- Claude 与用户确认后更新 `specs/`，代码提交后对照 spec 审查并把意见写入 `review/review-notes.md`；在 `questions.md` 的问题下以 **答:** 回复。
+- 用户说“开工”时，代理应读完上述文档，从第一个未完成任务开始。外部服务按 design 中的 mock 约定处理；遇到未决事项写入 `questions.md`，不得猜测。
