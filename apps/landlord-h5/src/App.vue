@@ -4,6 +4,11 @@
       <component :is="Component" />
     </keep-alive>
   </router-view>
+  <footer class="icp-footer" :class="{ 'with-tabbar': showTabbar }">
+    <a href="https://beian.miit.gov.cn" target="_blank" rel="noopener noreferrer">
+      沪ICP备2026037197号
+    </a>
+  </footer>
   <van-tabbar v-model="activeTab" v-if="showTabbar" route>
     <van-tabbar-item to="/" icon="home-o">工作台</van-tabbar-item>
     <van-tabbar-item to="/rooms" icon="shop-o">房间</van-tabbar-item>
@@ -29,5 +34,26 @@ const showTabbar = computed(() => {
 body {
   margin: 0;
   background: #f7f8fa;
+}
+
+.icp-footer {
+  position: fixed;
+  right: 0;
+  bottom: 12px;
+  left: 0;
+  z-index: 9;
+  text-align: center;
+  pointer-events: none;
+}
+
+.icp-footer.with-tabbar {
+  bottom: 58px;
+}
+
+.icp-footer a {
+  color: #969799;
+  font-size: 12px;
+  text-decoration: none;
+  pointer-events: auto;
 }
 </style>
