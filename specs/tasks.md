@@ -231,12 +231,14 @@
 > 完成说明: PM2 landlordeasy-server-dev 进程运行中,端口3001,mock模式(Claude 复核: 认可)
 - [~] 10.5 两个前端各自多构建一份 dev 版本,服务器上分 prod/dev 两组静态目录存放(具体路径见 spec)
 > Claude 复核(2026-07-28): 还没做,依赖 10.6/10.7 域名才有意义,建议等备案下来再一起做
+> Claude Code 复核(2026-08-09): 不再需要单独实现——10.8 改造 `deploy/deploy.sh` 时已经把这条的效果做进去了(两个前端构建命令本身不区分环境,因为 `baseURL` 是相对路径 `/api/v1` 天然适配;`deploy.sh dev` 会把构建产物 `cp -a` 复制到 `/var/www/landlordeasy/landlord-h5-dev/` 和 `.../tenant-h5-dev/`,自动创建目录)。机制已就绪但还没有在服务器上真正跑过 `deploy.sh dev` 验证目录确实生成,所以本条继续保留未完成状态,等 10.8 真正部署验证时会一并验证这条,不需要再单独排期。
 - [~] 10.6 `deploy/nginx.conf` 加 `dev.<域名>` 的 server 块,反代到 3001 端口 + dev 静态目录
 > Claude 复核(2026-07-28): 还没做,`deploy/nginx.conf` 的 `server_name` 现在还是占位符 `YOUR_DOMAIN.COM`,生产环境本身也还是用 IP 直接访问,不是走域名——这是域名备案没下来导致的正常卡点,不是 Kiro 漏做,搁置到备案通过再做
 - [~] 10.7 域名备案 + Let's Encrypt 能签发后,给 `dev.<域名>` 单独签一次证书(`deploy/certbot.sh` 需要支持传域名参数跑两次)
 > Claude 复核(2026-07-28): 依赖域名备案,继续搁置
 - [~] 10.8 `deploy/deploy.sh` 改成支持 `prod`/`dev` 参数,分别部署到对应环境,更新 README 说明怎么用
 > Claude 复核(2026-07-28): 还没做,不强依赖域名,可以先做(跟 10.6/10.7 不同,这条纯粹是脚本改造),建议 Kiro 下一轮可以先做这条,不用等备案
+> Claude Code(2026-08-09,Kiro CLI headless 实现,Claude Code 独立复核): 改了什么——`deploy/deploy.sh` 现在要求第一个参数必须是 `prod` 或 `dev`,缺失/非法值打印用法说明并 `exit 1`;`prod` 分支行为与改动前完全一致(PM2 进程名 `landlord-easy`、`apps/server/.env`、前端产物留在原 `dist/` 目录),不引入任何回归;`dev` 分支新增:前端构建产物 `cp -a` 到 `/var/www/landlordeasy/{landlord-h5,tenant-h5}-dev/`(自动 `mkdir -p`)、PM2 进程名 `landlordeasy-server-dev`、`--env-file=apps/server/.env.dev`。另外修了 Kiro 自己在第一轮总结里主动标出来的遗留问题:`prisma generate`/`migrate deploy` 原来无条件读 `apps/server/.env`,会导致 `deploy.sh dev` 误操作生产数据库——现在改成用 Node 原生 `--env-file` 解析对应环境文件(`prod`→`.env`,`dev`→`.env.dev`)取出 `DATABASE_URL` 再显式 `export` 给 prisma 命令用,文件不存在或缺 `DATABASE_URL` 都会打印中文错误并 `exit 1`。如何验证:①`bash -n deploy/deploy.sh` 两轮改动后均 EXIT 0;②本地实测无参数/非法参数(`staging`)均正确报用法说明并 `exit 1`;③把 DATABASE_URL 解析逻辑单独摘出来,用本地临时文件测试正常提取(含空格和 `#` 特殊字符,验证不会重蹈 questions.md Q3 提过的 `#` 被截断的坑)和"文件存在但缺 DATABASE_URL"两种场景,行为符合预期;④专门验证了 `set -e` 在解析失败时确实会终止整个脚本(不会带着空 DATABASE_URL 继续往下跑 prisma 命令);⑤`git diff --stat` 确认只改了 `deploy/deploy.sh` + `README.md` 两个文件,没有碰 `deploy/nginx.conf`/`deploy/setup.sh`/`deploy/certbot.sh` 或任何 `apps/` 源码;⑥Kiro 运行时在仓库根目录生成了一个 `.kiro/settings/lsp.json`(工具自身的通用 LSP 配置样板,无敏感内容),已补进 `.gitignore` 的 IDE 分区,不提交。这条改动本身是纯 shell 脚本/文档改动,不涉及 TypeScript/Vue/Prisma 代码,因此用 `bash -n` + 隔离行为测试作为验证手段,没有额外跑 `tsc`/`jest`/`vue-tsc`(没有相关代码改动)。验证结果:脚本逻辑本地验证全部通过,**但没有连接实际服务器执行过 `deploy.sh dev`**(任务范围明确要求不得连接生产服务器),也就没有真正验证过 `/var/www/landlordeasy/*-dev/` 目录会被正确创建、`landlordeasy-server-dev` 进程会被正确重启——**代码已提交,尚未部署验证**,按规则不勾选完成,留到下一次有服务器访问授权时实际跑一遍 `deploy.sh dev` 再收尾(会一并验证 10.5)。
 - [~] 10.9 完成后麻烦 Kiro 自己先用 `dev.<域名>` 走一遍完整流程(新签租约→出账→提醒mock→租客上报→确认)确认 dev 环境跑通、且没有污染 prod 数据库,再告诉 GasCan
 > Claude 复核(2026-07-28): 依赖 10.5~10.7,还没到这步。建议 Kiro 在此之前先在服务器本地用 `curl localhost:3001/api/v1/health` 简单验证一下 dev 后端进程本身是通的,不用等 nginx/域名都配好才第一次测
 

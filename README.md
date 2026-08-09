@@ -91,6 +91,18 @@ pnpm dev:tenant
 
 访问 http://localhost:5174
 
+## 服务器部署
+
+部署脚本必须显式指定目标环境,不传参数或传入其他值会直接报错退出:
+
+```bash
+bash deploy/deploy.sh prod
+bash deploy/deploy.sh dev
+```
+
+- `prod`:拉取 `main`、安装依赖并完成数据库迁移和全量构建,保留两个前端项目各自的 `dist/` 目录,重启 PM2 进程 `landlord-easy`,最后检查并重载 Nginx。
+- `dev`:执行相同的拉取、依赖安装、数据库迁移和构建流程,再将两个前端构建产物分别复制到 `/var/www/landlordeasy/landlord-h5-dev/` 和 `/var/www/landlordeasy/tenant-h5-dev/`,重启 PM2 进程 `landlordeasy-server-dev`,最后检查并重载 Nginx。运行前需确保服务器上已存在 `apps/server/.env.dev`,其中配置 dev 后端端口和独立数据库等环境变量。
+
 ## 开发约定
 
 - 提交信息格式: `feat|fix|docs|chore: 描述`
