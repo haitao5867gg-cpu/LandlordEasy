@@ -21,12 +21,24 @@ pnpm --filter landlord-h5 build
 pnpm --filter tenant-h5 build
 
 echo "=== 构建后端 ==="
+# 清理增量编译缓存，避免 dist 被删除后 TypeScript 跳过未变更模块。
+rm -rf apps/server/dist
+rm -f apps/server/tsconfig.tsbuildinfo
 pnpm --filter server build
 
 echo "=== 重启后端服务 ==="
-# 用 PM2 管理 Node 进程
+# 用 PM2 管理 Node 进程。生产配置由 Node 显式加载，避免依赖登录 shell 环境。
 if command -v pm2 &> /dev/null; then
-    pm2 restart landlord-easy 2>/dev/null || pm2 start apps/server/dist/main.js --name landlord-easy
+    if pm2 describe landlord-easy &> /dev/null; then
+        pm2 restart landlord-easy
+    else
+        pm2 start /usr/bin/node \
+            --name landlord-easy \
+            --cwd /opt/landlord-easy \
+            -- \
+            --env-file=/opt/landlord-easy/apps/server/.env \
+            /opt/landlord-easy/apps/server/dist/main.js
+    fi
     pm2 save
 else
     echo "PM2 未安装,执行: npm install -g pm2"
