@@ -1,4 +1,4 @@
-import { Injectable, Inject, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Inject, UnauthorizedException, Logger } from '@nestjs/common';
 import * as jwt from 'jsonwebtoken';
 import { PrismaService } from '../prisma/prisma.service';
 import { WECHAT_AUTH_SERVICE, IWechatAuthService } from '../wechat/wechat-auth.interface';
@@ -12,6 +12,7 @@ export interface JwtPayload {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
   private readonly jwtSecret: string;
   private readonly jwtExpiresIn: number; // seconds
 
@@ -31,8 +32,10 @@ export class AuthService {
 
     const landlord = await this.prisma.landlord.findUnique({ where: { openid } });
     if (!landlord || !landlord.isActive) {
-      throw new UnauthorizedException('无权访问:openid 不在房东白名单中');
+      this.logger.warn('房东微信授权成功，但启用状态的白名单中未找到该账号');
+      throw new UnauthorizedException('无权访问:当前微信未加入房东白名单');
     }
+    this.logger.log('房东微信授权及白名单校验成功');
 
     const payload: JwtPayload = {
       sub: landlord.id,

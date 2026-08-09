@@ -17,7 +17,7 @@ export class RealWechatAuthService implements IWechatAuthService {
   }
 
   async getOpenidByCode(code: string): Promise<WechatAuthResult> {
-    this.logger.log(`[REAL] 微信授权 code=${code}`);
+    this.logger.log('[REAL] 开始处理微信网页授权');
 
     if (!this.appId || !this.appSecret) {
       throw new Error('WECHAT_APPID 或 WECHAT_SECRET 未配置');
@@ -37,7 +37,7 @@ export class RealWechatAuthService implements IWechatAuthService {
       throw new UnauthorizedException('微信授权未返回 openid');
     }
 
-    this.logger.log(`[REAL] 授权成功 openid=${data.openid}`);
+    this.logger.log('[REAL] 微信网页授权成功');
     return { openid: data.openid, sessionKey: data.session_key };
   }
 }

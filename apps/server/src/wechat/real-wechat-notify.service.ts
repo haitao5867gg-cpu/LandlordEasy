@@ -20,7 +20,7 @@ export class RealWechatNotifyService implements IWechatNotifyService {
   }
 
   async sendTemplateMessage(payload: NotifyPayload, retried = false): Promise<boolean> {
-    this.logger.log(`[REAL] 发送模板消息 -> openid=${payload.openid}, template=${payload.templateId}`);
+    this.logger.log('[REAL] 开始发送模板消息');
 
     try {
       const token = await this.getAccessToken();

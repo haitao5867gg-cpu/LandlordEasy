@@ -8,6 +8,20 @@ const http = axios.create({
   timeout: 15000,
 });
 
+export function getHttpErrorMessage(error: unknown): string {
+  if (!axios.isAxiosError(error)) {
+    return error instanceof Error ? error.message : '网络错误';
+  }
+
+  const message = error.response?.data?.message;
+  if (Array.isArray(message)) return message.join('；');
+  return typeof message === 'string' && message ? message : error.message || '网络错误';
+}
+
+function isLoginRequest(url?: string): boolean {
+  return /\/auth\/(?:landlord|tenant)\/login(?:\?|$)/.test(url || '');
+}
+
 // 请求拦截器: 自动带 token
 http.interceptors.request.use((config) => {
   const authStore = useAuthStore();
@@ -29,14 +43,18 @@ http.interceptors.response.use(
     return data.data !== undefined ? data.data : data;
   },
   (error) => {
-    if (error.response?.status === 401) {
-      const authStore = useAuthStore();
+    const authStore = useAuthStore();
+    const isExpiredSession =
+      error.response?.status === 401 &&
+      Boolean(authStore.token) &&
+      !isLoginRequest(error.config?.url);
+
+    if (isExpiredSession) {
       authStore.logout();
       router.push('/login');
       showToast('登录已过期,请重新登录');
     } else {
-      const msg = error.response?.data?.message || error.message || '网络错误';
-      showToast(msg);
+      showToast(getHttpErrorMessage(error));
     }
     return Promise.reject(error);
   },

@@ -33,7 +33,7 @@
 import { ref, onMounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { showToast } from 'vant';
-import http from '../utils/http';
+import http, { getHttpErrorMessage } from '../utils/http';
 import { useAuthStore } from '../stores/auth';
 
 const router = useRouter();
@@ -63,6 +63,8 @@ onMounted(() => {
   // 真实模式: 检查微信回调带回的 code
   const code = route.query.code as string;
   if (code && !isMockMode.value) {
+    // 微信 code 只能使用一次；先从地址栏移除，避免刷新后重复提交失效 code。
+    window.history.replaceState({}, '', '/login');
     handleWechatCallback(code);
   }
 });
@@ -101,8 +103,8 @@ async function handleWechatCallback(code: string) {
     const res = await http.post('/auth/landlord/login', { code });
     authStore.setToken((res as unknown as { token: string }).token);
     router.push('/');
-  } catch (e: any) {
-    authError.value = '登录失败,请重试';
+  } catch (e: unknown) {
+    authError.value = getHttpErrorMessage(e);
   } finally {
     loading.value = false;
   }
