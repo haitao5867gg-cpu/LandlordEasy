@@ -278,9 +278,15 @@
 - 前端只在"真实生产环境的判断分支"里,而且后端确认开关打开时,才会在微信登录按钮下方多显示一个样式低调、明显小一号的按钮。
 - Claude Code 本地端到端验证了开关打开/关闭两种情况下接口的行为都符合预期(打开时能拿到能用的 token、关闭时返回 403),`tsc`/`jest`/`vue-tsc` 全部独立重跑通过。受浏览器工具的内网访问限制,没能用真实浏览器截图验证按钮本身的视觉渲染,这一点如实记录。
 
-**当前状态:这个功能只在代码仓库里,还没有部署到生产服务器**,需要部署这次代码改动、并且手动在服务器 `.env` 里加一行 `PUBLIC_REVIEW_MODE=true`、重启 PM2 进程才会真正生效。部署这一步需要 GasCan 另外明确授权后才会执行,不会自动发生。
+**当前状态(2026-08-10 更新):已部署到生产服务器,开关已打开,功能生效中。** GasCan 已明确授权部署并打开开关。Claude Code 已用真实浏览器在 `https://landlordeasy.cn/login` 点击"备案审核临时通道"按钮,确认能成功登录进工作台(看到真实数据:空置279/到期9/逾期194)。部署过程详见 `review/review-notes.md` Review 14。
 
 **审核通过后必须做的事(11.5 的完成条件)**:登录服务器把 `.env` 里的 `PUBLIC_REVIEW_MODE` 改成 `false`(或删掉这行)、`pm2 restart landlord-easy`,并用 `curl https://landlordeasy.cn/api/v1/auth/review-mode` 确认返回 `enabled:false`。做完这一步之前,11.5 不能勾选完成——建议 GasCan 自己也在日历/备忘录上提醒一下,不要只依赖这份文档。
+
+### 部署这次功能时顺带发现的两个问题(2026-08-10,记录以免遗忘,详见 review-notes.md Review 14)
+
+- [ ] 11.6 **`deploy/deploy.sh` 的 `prisma migrate deploy` 这一步实际上从来没有成功过。** 这个项目一直用的是 `prisma db push` 工作流,仓库里根本没有 `apps/server/prisma/migrations` 目录。`migrate deploy` 在没有迁移文件、但目标库非空的情况下会直接报错(`P3005`)退出,而 `deploy.sh` 开头是 `set -e`,这意味着**这一步一直会导致整个部署脚本中途失败**——这很可能就是过去为什么服务器一直是靠手动改文件"部署"、而不是正常跑 `deploy.sh` 的根本原因(见 11.7)。这次部署时临时跳过了这一步手动完成部署。需要把 `deploy.sh` 里这两行改成 `prisma db push`(或者干脆只保留 `prisma generate`,数据库结构层面的变更单独手动 `db push`,不放进常规部署脚本自动跑),让脚本以后能真的从头到尾一次跑完,不用再手动分步操作。
+- [x] 11.7 **服务器 git 仓库长期落后于本地仓库,还有一堆从未提交的本地改动,这次已处理。** 发现服务器 `/opt/landlord-easy` 的 git HEAD 停在很老的 commit(`90cc0e7`,M8 时期),但很多文件被手动改过并从未提交(工作流一直是"本地/Kiro 改完手动同步到服务器",从没推过仓库)——这跟 11.1 处理的本地未提交问题是同一类问题,只是发生在服务器这一端。
+> 完成说明(Claude Code,2026-08-10): 用 `git stash push -u`(可完全恢复,不是 `reset --hard`)把服务器上所有本地改动和未跟踪文件先存起来,确认 `git status` 干净后 `git pull origin main` 干净地 fast-forward 到最新(`90cc0e7..841b196`)。逐一核对了 stash 里的改动内容,确认绝大多数只是"后来已经正式提交过的功能,当时手动同步上去的",内容没有丢失。**唯一需要手动保留的是 `apps/landlord-h5/.env.production` 里的真实微信 AppID**(仓库里只有占位符 `YOUR_APPID_HERE`),已经用 `git checkout stash@{0} -- <文件>` 精确取回并确认恢复正确。stash(`pre-deploy-drift-backup-2026-08-10`)保留在服务器上没有删除,作为安全网,以后确认不再需要可以清掉。验证:部署后 `curl https://landlordeasy.cn/api/v1/health` 和真实浏览器访问均正常,微信登录用的 AppID 也确认是真实值没有被占位符覆盖。**以后所有部署都必须走 `git pull` 保持服务器 git 历史与仓库同步,不要再手动改服务器文件不提交**,这是这次问题的根源。
 
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
