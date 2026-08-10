@@ -451,3 +451,23 @@ Claude 独立复核了一遍(不是照抄 Kiro 的自述):
 - `tasks.md` 的 11.2/11.3/11.4 已按核实结果勾选完成说明;11.1(commit 清理)留给 Claude Code 作为交接后第一个任务,不在这边代劳
 
 M11 到这里基本收尾,GasCan 可以把项目正式交给 Claude Code 继续,细节见 `CLAUDE.md`(新增,自动加载)、`KIRO_CLI_NOTES.md`(Kiro CLI 使用笔记)、本节以上的"交接现状快照"。
+
+---
+
+## Review 13(2026-08-10,GasCan 问"能不能重新提交公安联网备案",补上 PROJECT_STATUS.md 遗留的最后一项检查)
+
+状态: 核查通过,建议可以重新提交
+
+背景:`PROJECT_STATUS.md`"下一步建议"第 3 条("检查 Nginx error log、PM2 重启记录和证书链")此前一直写的是"留给 Claude Code 接手后按需跟进,不阻塞",没有人真正做过。GasCan 问起能不能提交备案,直接关系到这条要不要现在补上,于是 SSH 连接生产服务器(GasCan 已确认授权,只读诊断,没有做任何修改)做了完整核查。
+
+### 核查结果
+
+1. **PM2 重启记录**:`landlord-easy`(prod)重启计数 `↺2`,当前实例运行 13+ 小时稳定;`landlordeasy-server-dev` 运行 12 天、0 重启。
+2. **PM2 日志排查重启原因**:定位到重启是 `MODULE_NOT_FOUND: ./prisma/prisma.module`(dist 目录缺模块),时间戳 2026-08-09 20:28:27 成功恢复——跟 Kiro 交接前 `PROJECT_STATUS.md` 里记录的"一次因增量缓存导致 dist 缺模块、短暂 502,已清理缓存并完整重建"是**同一次事故**的服务器端原始日志证据,不是新发生的问题;`deploy/deploy.sh` 里对应的防复发修复(构建前清 `dist`/`tsconfig.tsbuildinfo`)已经在这次事故之后的 commit 里,后续没有再复现。
+3. **Nginx error log**:当天(2026-08-09)的轮转日志 `error.log.1` 里有且仅有一条 `connect() failed (111: Connection refused)... upstream: http://127.0.0.1:3000` 记录,时间戳 19:49:01,跟上面 PM2 崩溃恢复窗口吻合,说明当时确实有几十分钟的真实不可用窗口,但只在这一次事故里出现,之后轮转的 error.log(今天 00:00 起)完全是空的。
+4. **证书链**:`openssl s_client` 从外部客户端验证,证书有效期 2026-08-08~2026-11-06(续期机制在正常工作),完整链(leaf → Let's Encrypt YE1 → ISRG Root YE/X2/X1)验证结果 `Verify return code: 0 (ok)`,没有断链问题。
+5. **实测稳定性**:用仓库里 `deploy/check-site-stability.sh` 对 `https://landlordeasy.cn/` 连续测 30 次,30/30 成功、全部 200、响应时间 0.05~0.08s(一次 1.06s 的波动不算异常模式)。另外确认 `www` 子域名 200、HTTP 301 正确跳转 HTTPS、微信校验文件 HTTP/HTTPS 均 200。
+
+### 结论
+
+现在的线上状态是健康的,能查到的稳定性、证书、错误日志三项都没有问题。**唯一值得如实告知 GasCan 的一点**:8月9日晚确实发生过一次真实的、几十分钟量级的服务不可用(不是凭空猜测,有 nginx/PM2 日志实证),根因是部署时的增量缓存问题,当时已经现场修复且后续 13+ 小时(含多次自动化定时任务)都稳定,`deploy.sh` 也已经加了防复发逻辑。如果这次公安复查的时间点没有精确撞上那几十分钟,不影响提交;如果不放心,可以再多观察一两天确认没有第二次复现,再提交也不迟——这个判断留给 GasCan 自己决定节奏,Claude 这边给出的是"技术上没有已知阻塞项"的结论。
