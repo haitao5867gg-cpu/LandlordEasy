@@ -24,6 +24,11 @@
           微信授权登录
         </van-button>
       </div>
+      <div v-if="reviewModeEnabled" class="review-login-btn">
+        <van-button plain size="small" :loading="reviewLoginLoading" @click="handleReviewLogin">
+          备案审核临时通道
+        </van-button>
+      </div>
       <p v-if="authError" class="error-text">{{ authError }}</p>
     </template>
   </div>
@@ -42,6 +47,8 @@ const authStore = useAuthStore();
 const openid = ref('');
 const loading = ref(false);
 const authError = ref('');
+const reviewModeEnabled = ref(false);
+const reviewLoginLoading = ref(false);
 
 // 判断 mock 还是 real 模式
 // 开发环境(localhost)默认 mock,生产环境默认 real
@@ -52,6 +59,8 @@ const isMockMode = ref(
 );
 
 onMounted(() => {
+  void fetchReviewMode();
+
   // 从 URL 获取 mock_openid(开发模式)
   const mockOpenid = route.query.mock_openid as string;
   if (mockOpenid) {
@@ -68,6 +77,30 @@ onMounted(() => {
     handleWechatCallback(code);
   }
 });
+
+/** 查询备案审核演示登录是否开放 */
+async function fetchReviewMode() {
+  try {
+    const res = await http.get('/auth/review-mode');
+    reviewModeEnabled.value = (res as unknown as { enabled: boolean }).enabled === true;
+  } catch {
+    reviewModeEnabled.value = false;
+  }
+}
+
+/** 备案审核演示登录 */
+async function handleReviewLogin() {
+  reviewLoginLoading.value = true;
+  try {
+    const res = await http.post('/auth/landlord/review-login');
+    authStore.setToken((res as unknown as { token: string }).token);
+    router.push('/');
+  } catch {
+    // 错误已由拦截器处理
+  } finally {
+    reviewLoginLoading.value = false;
+  }
+}
 
 /** Mock 模式登录 */
 async function handleLogin() {
@@ -117,5 +150,6 @@ async function handleWechatCallback(code: string) {
 .login-header h1 { font-size: 24px; margin-bottom: 8px; }
 .login-header p { color: #999; }
 .login-btn { margin-top: 24px; padding: 0 16px; }
+.review-login-btn { margin-top: 20px; text-align: center; }
 .error-text { text-align: center; color: #ee0a24; margin-top: 16px; }
 </style>
