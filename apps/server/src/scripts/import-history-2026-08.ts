@@ -8,6 +8,7 @@ const DEPOSIT_CHANGE_MIN_AMOUNT = 300;
 const DEPOSIT_CHANGE_MIN_RATIO = 0.15;
 const KEYWORDS = ['转租', '新签', '退房', '到期退', '前客户', '调房'] as const;
 const DEPARTURE_KEYWORDS = ['退房', '到期退', '调房'] as const;
+const ALLOWED_DATABASE_NAMES = new Set(['landlord_easy', 'landlordeasy_dev']);
 
 type PropertyName = '嘉定公寓' | '明远公寓';
 type RawCsvRow = Record<string, string>;
@@ -109,9 +110,22 @@ function assertLocalDatabase(): void {
   if (parsed.protocol !== 'mysql:' || !localHosts.has(parsed.hostname)) {
     throw new Error(`安全检查失败：只允许本地 MySQL，当前目标为 ${parsed.hostname}`);
   }
-  if (databaseName !== 'landlord_easy') {
-    throw new Error(`安全检查失败：只允许本地 landlord_easy 数据库，当前为 ${databaseName}`);
+  if (!ALLOWED_DATABASE_NAMES.has(databaseName)) {
+    throw new Error(
+      `安全检查失败：只允许数据库 ${[...ALLOWED_DATABASE_NAMES].join('、')}，当前为 ${databaseName}`,
+    );
   }
+
+  const confirmTargetPrefix = '--confirm-target=';
+  const confirmedDatabaseName = process.argv
+    .find((argument) => argument.startsWith(confirmTargetPrefix))
+    ?.slice(confirmTargetPrefix.length);
+  if (confirmedDatabaseName !== databaseName) {
+    throw new Error(
+      `安全检查失败：必须显式传入 --confirm-target=${databaseName}，且参数值需与 DATABASE_URL 中的数据库名完全一致${confirmedDatabaseName === undefined ? '' : `（当前为 ${confirmedDatabaseName}）`}`,
+    );
+  }
+
   console.log(`🔒 数据库安全检查通过：${parsed.hostname}:${parsed.port || '3306'}/${databaseName}`);
 }
 
