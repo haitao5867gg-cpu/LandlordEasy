@@ -184,9 +184,9 @@ LandlordEasy 房屋收租系统。嘉定公寓,4~5 栋自建楼约 300 间房(�
 
 ### 下一次接手/继续时，按这个顺序处理
 
-1. 检查 `apps/server/src/scripts/import-history-2026-08.ts` 的 `assertLocalDatabase()` 改好了没有（应该支持 `landlord_easy` 和 `landlordeasy_dev` 两个库名白名单 + 显式 `--confirm-target=` 参数确认）。
-2. 重建服务器 `apps/server/.env.dev`（DATABASE_URL 指向 `landlordeasy_dev`，PORT=3001，WECHAT_MODE=mock，其余字段可以从生产 `.env` 抄同样的数据库账号密码）。
-3. 把最新代码部署到服务器（`git pull` + 后端重新 build，这次没有 schema 变更，不涉及 `prisma migrate`/`db push`）。
+1. ✅ 已完成（2026-08-20）：`assertLocalDatabase()` 已改成 `landlord_easy`/`landlordeasy_dev` 双白名单 + 显式 `--confirm-target=<库名>` 确认，`tsc` 独立验证通过，已 commit+push（commit `d8ef469`）。
+2. ✅ 已完成（2026-08-20）：服务器 `apps/server/.env.dev` 已重建（DATABASE_URL 指向 `landlordeasy_dev`，PORT=3001，WECHAT_MODE=mock，数据库账号密码复用生产 `.env`），`landlordeasy-server-dev` 已重启验证 `curl http://localhost:3001/api/v1/health` 正常返回 connected。
+3. 把最新代码（含上面两条修复）部署到服务器（`git pull` + 后端重新 build，这次没有 schema 变更，不涉及 `prisma migrate`/`db push`）——**这一步还没做，下一步从这里继续**。（`git pull` + 后端重新 build，这次没有 schema 变更，不涉及 `prisma migrate`/`db push`）。
 4. **先对 `landlordeasy_dev` 跑一次导入并验证**（真实浏览器打开 dev 环境点一遍房间列表/租约详情，确认数据显示正常），确认没问题后再对生产 `landlord_easy` 跑。
 5. 对生产库执行前，**再跑一次生产库最新备份**（不要用步骤开始前那份，跑导入前的最后一刻应该再备份一次），执行后同样要真实浏览器验证 `landlordeasy.cn` 房东端实际显示正常。
 6. 执行完更新 `specs/tasks.md`，把这次数据导入作为一条新任务记录完成说明（目前还没有对应的任务编号，建议新增一条，比如放在 M11 之后新开一个 M12 或者独立章节）。
