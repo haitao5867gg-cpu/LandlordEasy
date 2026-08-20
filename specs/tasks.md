@@ -262,7 +262,8 @@
   6. 如果后面家里其他两位房东家人也要用真实微信登录,同样的流程再走一遍,或者干脆在这次顺便把三个人的 openid 都问清楚一次性加完,避免每次都要临时改日志
 > 完成说明: 按上述流程执行,`landlords` 表已 upsert GasCan("海涛")的真实 openid(`isActive=true`),日志临时改动已按计划改回不打印 openid、PM2 日志里的捕获记录也已清除。GasCan 本人已在手机微信里重新点击登录,确认成功进入系统(真实 OAuth 端到端验证通过)。另外两位房东家人的 openid 还没加,留给下一轮需要时再走一次同样的流程。
 
-- [ ] 11.5 **待办(高优先级,不要忘):关闭"备案审核演示登录"临时通道。** 详见本文件下方新增的"临时功能追踪"章节。
+- [x] 11.5 **关闭"备案审核演示登录"临时通道。** 详见本文件下方"临时功能追踪"章节。
+> 完成说明(Claude Code,2026-08-20): 公安联网备案审核已完成(GasCan 确认),登录生产服务器把 `apps/server/.env` 的 `PUBLIC_REVIEW_MODE` 改成 `false`、`pm2 restart landlord-easy`。验证:`curl https://landlordeasy.cn/api/v1/auth/review-mode` 返回 `enabled:false`;`POST .../auth/landlord/review-login` 返回 `403 演示登录未开放`;`GET .../api/v1/health` 正常。临时通道已完全关闭,生产环境不再有这个开放入口。
 
 ## 临时功能追踪(不是正式 spec 任务,记在这里避免忘记)
 
