@@ -77,6 +77,7 @@ interface ImportStats {
   depositReceives: number;
   depositRefunds: number;
   expenses: number;
+  commissionExpenses: number;
   skippedEmptyRentRows: number;
   mergedBillRows: number;
   unassignedDepositEvents: number;
@@ -697,6 +698,7 @@ async function importHistory(
     depositReceives: 0,
     depositRefunds: 0,
     expenses: 0,
+    commissionExpenses: 0,
     skippedEmptyRentRows: ledgerRows.filter((row) => positive(row.rent) === null).length,
     mergedBillRows: 0,
     unassignedDepositEvents: 0,
@@ -858,11 +860,7 @@ async function importHistory(
           (sum, row) => sum + (positive(row.parkingFee) ?? 0),
           0,
         );
-        const commissionAmount = group.reduce(
-          (sum, row) => sum + (positive(row.commission) ?? 0),
-          0,
-        );
-        const totalAmount = rentAmount + parkingAmount + commissionAmount;
+        const totalAmount = rentAmount + parkingAmount;
         const periodStart = new Date(Math.min(...group.map((row) => row.periodStart.getTime())));
         const periodEnd = new Date(Math.max(...group.map((row) => row.periodEnd.getTime())));
         const paidAt = new Date(Math.max(...group.map((row) => row.sourceMonth.getTime())));
@@ -870,7 +868,6 @@ async function importHistory(
           { type: 'RENT', name: '租金', amount: rentAmount },
         ];
         if (parkingAmount > 0) items.push({ type: 'FEE', name: '停车费', amount: parkingAmount });
-        if (commissionAmount > 0) items.push({ type: 'FEE', name: '佣金/中介费', amount: commissionAmount });
 
         await prisma.bill.create({
           data: {
@@ -953,6 +950,27 @@ async function importHistory(
   if (depositData.length > 0) await prisma.depositRecord.createMany({ data: depositData });
 
   const expenseData: Prisma.ExpenseCreateManyInput[] = [];
+  for (const row of ledgerRows) {
+    const amount = positive(row.commission);
+    if (amount === null) continue;
+
+    const room = roomBySourceKey.get(roomKey(row.property, row.sourceRoomNo));
+    if (!room) {
+      throw new Error(`佣金支出对应房间不存在：${row.property}/${row.sourceRoomNo}`);
+    }
+    expenseData.push({
+      date: row.periodStart,
+      category: '中介佣金',
+      name: '中介佣金',
+      amount,
+      remark: `历史导入，来源 ${row.sheet}`,
+      buildingId: room.buildingId,
+      roomId: room.id,
+      operatorId: landlordId,
+    });
+    stats.commissionExpenses++;
+  }
+
   for (const [index, row] of expenseRows.entries()) {
     const property = asPropertyName(row.property);
     const amount = Number(row.amount);
