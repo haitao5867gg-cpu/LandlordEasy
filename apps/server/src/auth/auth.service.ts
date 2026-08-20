@@ -35,7 +35,8 @@ export class AuthService {
 
     const landlord = await this.prisma.landlord.findUnique({ where: { openid } });
     if (!landlord || !landlord.isActive) {
-      this.logger.warn('房东微信授权成功，但启用状态的白名单中未找到该账号');
+      // TEMP(11.4 流程,加白名单用,用完立刻revert): 临时打印真实 openid
+      this.logger.warn(`房东微信授权成功，但启用状态的白名单中未找到该账号，openid=${openid}`);
       throw new UnauthorizedException('无权访问:当前微信未加入房东白名单');
     }
     this.logger.log('房东微信授权及白名单校验成功');
