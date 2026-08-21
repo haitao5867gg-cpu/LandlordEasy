@@ -4,7 +4,7 @@
       <component :is="Component" />
     </keep-alive>
   </router-view>
-  <footer class="icp-footer" :class="{ 'with-tabbar': showTabbar }">
+  <footer v-if="showIcpFooter" class="icp-footer" :class="{ 'with-tabbar': showTabbar }">
     <a href="https://beian.miit.gov.cn" target="_blank" rel="noopener noreferrer">
       沪ICP备2026037197号
     </a>
@@ -28,6 +28,8 @@ const showTabbar = computed(() => {
   const hiddenRoutes = ['/login'];
   return !hiddenRoutes.includes(route.path);
 });
+
+const showIcpFooter = computed(() => route.path === '/mine');
 </script>
 
 <style>
