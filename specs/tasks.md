@@ -306,6 +306,9 @@
 - [x] 12.3 **房东端备案号 footer 挡视野,改成只在"我的"页展示。** GasCan 微信内实测反馈:固定在 tabbar 上方的备案号每个页面都占位置、挡视野。
 > 完成说明(Claude Code,2026-08-21): 改了什么——`apps/landlord-h5/src/App.vue` 把 footer 从无条件渲染(仅 `/login` 隐藏)改成只在 `route.path === '/mine'` 时渲染,新增 `showIcpFooter` computed。租客端(tenant-h5)本次未改动——GasCan 明确当前优先做房东端、租客端暂不开发,且 tenant-h5 没有对应的"我的"页面可以承载(已记入项目记忆,避免下次话题时又默认两端同步改)。如何验证——`vue-tsc -b` 通过,`pnpm --filter landlord-h5 build` 通过;部署到服务器(`git pull` + 重新 build,静态产物直接输出到 nginx 配置的 `root` 目录,无需额外拷贝步骤)后,**已用真实浏览器验证界面正常**:GasCan 在微信内打开 `landlordeasy.cn` 房东端实测,工作台页面确认备案号已消失、tabbar 正常,GasCan 本人确认"没问题了"。另确认了微信内置浏览器底部的前进后退箭头是微信 WebView 自带的浏览器 chrome,不是本项目代码渲染的内容,前端代码接触不到、无法通过改代码去掉;要彻底摆脱需要迁移到微信小程序,这是技术栈级别的改动,本次未做,仅口头告知 GasCan。
 
+- [x] 12.4 **详情/子页面底部内容被固定 tabbar 遮挡,租约详情页"退租"/"续签"按钮只露出一点点。** GasCan 微信内实测反馈,截图显示按钮只剩红/蓝两条细边露在 tabbar 上方,需要手动上划才能点到。
+> 完成说明(Claude Code,2026-08-21): 根因——`van-tabbar` 全局 `position:fixed`,只有4个顶层页面(工作台/房间/账单/我的)各自手写了 `padding-bottom:60px` 规避,其余16个子页面/详情页(含租约详情)从未处理,内容够长时末尾会被 tabbar 盖住。改了什么——`apps/landlord-h5/src/App.vue` 把 `router-view` 套进一个按 `showTabbar` 状态整体加 `padding-bottom:60px` 的容器,不再依赖每个页面各自记得写;同步删掉 Home/Mine/BillList/RoomList 四个页面里原有的重复 `padding-bottom:60px`,避免叠加成双倍留白。如何验证——`vue-tsc -b`、`pnpm --filter landlord-h5 build` 均通过;对其余15个子页面做了代码级排查(`grep position:fixed`/`van-button`),确认除 `App.vue` 的全局 tabbar 外没有任何页面自己再定义固定/粘性底部元素,即租约详情页不是特例,所有页面本来都有同样的潜在风险,这次是一次性全局修复,不是只补了一个洞;本想用浏览器工具自己实测,但沙盒环境的资源拦截规则挡住了主 JS/CSS bundle(`ERR_BLOCKED_BY_CLIENT`,换新标签页复现同样问题),判断是工具环境限制不是网站问题,放弃这条路径。部署到服务器后**已用真实浏览器验证界面正常**:GasCan 在微信内打开受影响最明显的那条(账单较多的在租租约)详情页,确认"退租"/"续签"按钮完整可见、不用上划,GasCan 本人确认"现在好了"。
+
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
 
