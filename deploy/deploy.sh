@@ -45,7 +45,7 @@ fi
 
     cd apps/server
     npx prisma generate
-    npx prisma migrate deploy
+    npx prisma db push --skip-generate
 )
 
 echo "=== 构建前端 ==="
