@@ -20,4 +20,3 @@ const router = useRouter();
 const authStore = useAuthStore();
 function handleLogout() { authStore.logout(); router.push('/login'); }
 </script>
-<style scoped>.mine-page { padding-bottom: 60px; }</style>

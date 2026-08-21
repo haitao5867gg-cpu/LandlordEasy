@@ -97,6 +97,5 @@ onActivated(() => {
 </script>
 
 <style scoped>
-.room-list-page { padding-bottom: 60px; }
 .page-loading { display: flex; justify-content: center; padding: 60px; }
 </style>

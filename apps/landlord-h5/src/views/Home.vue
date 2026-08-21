@@ -72,7 +72,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.home-page { padding-bottom: 60px; }
 .page-loading { display: flex; justify-content: center; padding: 60px; }
 .dashboard-cards { margin-top: 12px; }
 .cell-icon { margin-right: 8px; font-size: 20px; }

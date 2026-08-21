@@ -1,9 +1,11 @@
 <template>
-  <router-view v-slot="{ Component }">
-    <keep-alive :include="['RoomList']">
-      <component :is="Component" />
-    </keep-alive>
-  </router-view>
+  <div class="app-content" :class="{ 'with-tabbar': showTabbar }">
+    <router-view v-slot="{ Component }">
+      <keep-alive :include="['RoomList']">
+        <component :is="Component" />
+      </keep-alive>
+    </router-view>
+  </div>
   <footer v-if="showIcpFooter" class="icp-footer" :class="{ 'with-tabbar': showTabbar }">
     <a href="https://beian.miit.gov.cn" target="_blank" rel="noopener noreferrer">
       沪ICP备2026037197号
@@ -50,6 +52,11 @@ body {
 
 .icp-footer.with-tabbar {
   bottom: 58px;
+}
+
+.app-content.with-tabbar {
+  padding-bottom: 60px;
+  box-sizing: border-box;
 }
 
 .icp-footer a {
