@@ -91,6 +91,16 @@ pnpm dev:tenant
 
 访问 http://localhost:5174
 
+9. **运行核心 E2E 测试(首次先安装 Chromium)**
+
+```bash
+pnpm exec playwright install chromium && pnpm test:e2e
+```
+
+测试会在 `localhost:3307` 启动并在结束后销毁专用 MySQL,以 `WECHAT_MODE=mock` 启动本地后端和两个前端,不会连接开发库、生产库或远程服务器。若默认 Docker Hub 镜像代理不可用,可在命令前设置 `E2E_MYSQL_IMAGE=mysql:8.0` 改用本地/官方镜像。
+
+**排障**:如果卡在后端启动这一步、报错 `Cannot find module '.../apps/server/dist/main'`,且 `pnpm --filter server build` 本身也是退出码 0 但完全没有编译输出、`dist/` 目录压根没生成——这不是这套测试或代码的问题,是本机 Node 版本太新(实测 Node 26.x)和 `@nestjs/cli@10.x` 的 webpack 编译链不兼容,会静默失败且不报任何错误。解决办法:装一个 LTS Node(比如 `brew install node@20`,装完是 keg-only 不会影响你平时用的 Node 版本),手动跑一次 `PATH="/opt/homebrew/opt/node@20/bin:$PATH" pnpm --filter server build` 确认能正常生成 `apps/server/dist/main.js`,之后 `run.sh` 走的是同一个 `pnpm --filter server build`,只要这条命令能稳定跑通,`run.sh` 就没问题。
+
 ## 服务器部署
 
 部署脚本必须显式指定目标环境,不传参数或传入其他值会直接报错退出:
