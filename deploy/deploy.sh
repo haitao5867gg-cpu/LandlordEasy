@@ -10,6 +10,19 @@ if [[ "$DEPLOY_TARGET" != "prod" && "$DEPLOY_TARGET" != "dev" ]]; then
     exit 1
 fi
 
+# PM2 的进程列表按运行用户隔离(root 和 ubuntu 各自看到不同的进程表)。
+# 用 sudo/root 执行本脚本会导致 `pm2 describe` 检测不到已存在的、由部署
+# 用户启动的进程，误判"进程不存在"从而新建一个抢占同一端口、必然崩溃的
+# 重复进程，而真正在服务的旧进程完全没有被重启、新代码也就没有真正生效
+# (2026-08-23 实际踩过一次)。不要用 sudo 执行，用部署专用用户直接运行。
+if [[ "$EUID" -eq 0 ]]; then
+    echo "错误: 不要用 sudo 或 root 身份执行本脚本。" >&2
+    echo "PM2 进程列表按用户隔离，root 身份运行会导致检测不到已存在的部署" >&2
+    echo "进程、错误地新建一个抢占端口的重复进程，真正在跑的服务不会被更新。" >&2
+    echo "请直接用部署用户运行: bash deploy/deploy.sh $DEPLOY_TARGET" >&2
+    exit 1
+fi
+
 echo "=== 拉取最新代码 ==="
 git pull origin main
 

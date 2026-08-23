@@ -12,6 +12,7 @@ import { RoomTypesModule } from './room-types/room-types.module';
 import { RoomsModule } from './rooms/rooms.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { MaintenanceModule } from './maintenance/maintenance.module';
+import { HandoverModule } from './handover/handover.module';
 import { LeasesModule } from './leases/leases.module';
 import { BillsModule } from './bills/bills.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -37,6 +38,7 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
     RoomsModule,
     DashboardModule,
     MaintenanceModule,
+    HandoverModule,
     LeasesModule,
     BillsModule,
     PaymentsModule,

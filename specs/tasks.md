@@ -183,7 +183,8 @@
 > 完成说明: 在生产服务器上执行 e2e-test.ts,全流程通过(新签→出账→逾期→提醒→上报→确认→PAID→报表),数据已清理
 - [x] 9.3 生产数据库每日备份:加一个 `mysqldump` 定时任务(cron)+ 异地存一份(比如传到对象存储或者至少存到另一台机器/云盘),之前 questions.md 里提过方案但一直没落地,现在服务器已经在跑真实用得上的环境了,建议补上
 > 完成说明: /opt/backups/backup-mysql.sh 每日03:00通过cron执行mysqldump+gzip,保留30天;首次手动执行验证成功(15KB)
-- [~] 9.4 (可选,不着急)P2 里的"交接管理独立 CRUD 接口"目前只有数据模型,如果 Kiro 这段时间比较闲,可以顺手做了,不做也不影响主流程
+- [x] 9.4 P2 里的"交接管理独立 CRUD 接口",此前只有数据模型 `HandoverRecord`
+> 完成说明(Claude Code,2026-08-23): 改了什么——新增 `apps/server/src/handover/`(controller/service/dto/module),挂 `LandlordGuard`,提供 `GET /handover?leaseId=`(按租约筛选列表)、`POST /handover`(创建,`type` 限定 `CHECKIN`/`CHECKOUT`)、`PUT /handover/:id`(更新checklist/remark,对应"退房核对补扣款依据")、`DELETE /handover/:id`,已注册进 `app.module.ts`。参照结构最相似的 `maintenance` 模块的代码风格。如何验证——不只是 `tsc`/`jest` 通过,专门起了一次性 Docker MySQL(`e2e/docker-compose.yml`,127.0.0.1:3307,跟生产/dev物理隔离)+ 真实 build 出来的后端进程,用 mock 登录拿真实JWT,对四个接口逐一发真实HTTP请求验证:创建入住交接记录成功、按leaseId查询能查到、更新remark生效、删除后再查确认真的没了;另外验证了`type`传非法值被class-validator正确拒绝(中文提示,不是英文原始报错)、不带token请求被`LandlordGuard`正确拒绝401。`tsc --noEmit` 0错误,`jest` 15/15通过(新模块本身是薄封装Prisma的CRUD,跟`maintenance`等同类模块一样不额外配jest单测)。**代码已提交,尚未部署到服务器**(下一步)。
 
 > 历史 Excel 数据导入 CSV 这件事不在这里——那是 GasCan 把完整楼栋 Excel 发给 Claude、Claude 清洗生成标准 CSV 的活,不是 Kiro 的任务,CSV 生成后 Kiro 现成的 `import:init` 命令可以直接用。
 
@@ -241,7 +242,8 @@
 - [x] 10.9 用 dev.<域名> 走一遍完整流程(新签租约→出账)确认 dev 环境跑通、且没有污染 prod 数据库
 > 完成说明(Claude Code,2026-08-23): 用真实浏览器(mock_landlord_001登录)在 `https://dev.landlordeasy.cn` 走了一遍:登录→工作台(四张卡片数据正常,与dev库的真实历史数据吻合)→房间列表筛选空置→选一间空房→新签租约(填写租客/租金/押金)→提交成功拿到邀请码→点"完成"关闭弹窗(今天新修的按钮,确认在dev环境也生效)→页面恢复正常交互。全程走的是 `landlordeasy_dev` 库(通过 dev 后端 mock 模式自建的测试账号 `mock_landlord_001`),与生产 `landlord_easy` 库物理隔离,不会污染生产数据。
 
-- [ ] 10.10 **(新增技术债)`deploy/deploy.sh` 用 `pm2 describe`/`pm2 start` 判断进程是否已存在时,没有考虑执行脚本的系统用户可能与已存在进程的运行用户不一致的情况**(PM2 daemon 按用户隔离,`sudo` 执行时会检测到 root 自己的(空)进程列表,误判"不存在"从而新建重复进程,而不是重启真正在跑的那个)。2026-08-23 执行 `deploy.sh dev` 时因为误用 `sudo` 实际踩到过,已手动清理,不影响当前状态,但下次任何人再用 `sudo` 跑这个脚本会重踩。建议:脚本里显式检查运行用户,或者在 PM2 相关命令前加提示"不要用 sudo 执行,应该用部署专用的 ubuntu 用户运行"。不紧急,记录下来避免遗忘。
+- [x] 10.10 `deploy/deploy.sh` 用 `pm2 describe`/`pm2 start` 判断进程是否已存在时,没有考虑执行脚本的系统用户可能与已存在进程的运行用户不一致的情况
+> 完成说明(Claude Code,2026-08-23): 改了什么——在参数校验之后加一段 `if [[ "$EUID" -eq 0 ]]`检查,用 sudo/root 执行本脚本时直接报中文错误并 `exit 1`,提示"不要用sudo,直接用部署用户运行",不再往下执行到PM2那一步误建重复进程。如何验证——`bash -n deploy/deploy.sh` 语法检查通过;`$EUID -eq 0` 是检测root身份最标准的bash写法(readonly变量,没法在测试里伪造脚本内赋值来做隔离单测,但逻辑本身是shell脚本里检测root的通用惯用法),真正的验证是这次改动直接对应2026-08-23当天实际踩过的坑(见上方10.8完成说明),这段检查加上之后,同样的误操作会在最开始就被拦下来,不会再走到PM2误建重复进程那一步。
 
 ## M11 域名上线收尾(公安联网备案被拒,排查+补漏)
 
@@ -323,8 +325,6 @@
 
 ```json
 {
-  "waves": [
-    { "id": 0, "tasks": ["9.4", "10.10"] }
-  ]
+  "waves": []
 }
 ```
