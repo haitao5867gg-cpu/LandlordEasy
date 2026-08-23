@@ -223,8 +223,8 @@
 
 - [x] 10.1 登录服务器跑 `free -h` 确认内存余量,评估同时跑两套后端+一套MySQL是否有压力,有问题先反馈,没问题继续往下做
 > 完成说明: 内存3.6GB,余量充足(Claude 复核: 认可)
-- [~] 10.2 GasCan 去域名服务商加一条 `dev` 的 A 记录指向服务器公网 IP(这步不用 Kiro 做,GasCan 自己操作,Kiro 只需要提醒他做)
-> Claude 复核: 域名本身还没配到 nginx(server_name 还是占位符),这步暂时加了也用不上,等 10.6/10.7 要接的时候再一起做,不用现在单独处理
+- [x] 10.2 GasCan 去域名服务商加一条 `dev` 的 A 记录指向服务器公网 IP
+> 完成说明(2026-08-22): GasCan 在腾讯云云解析 DNSPod 后台加好了 `dev.landlordeasy.cn` → `111.229.167.29` 的 A 记录。Claude Code 复核:本地沙盒查到的解析结果异常(`198.18.0.39`,本机网络环境问题),改用服务器上 `dig`/`getent hosts` 直接验证,确认解析正确指向服务器IP。
 - [x] 10.3 MySQL 新建 `landlordeasy_dev` database,跑 `prisma migrate`/`db push` 建表结构,用 `prisma/seed.ts` 灌种子数据(不要拷贝生产数据)
 > 完成说明: landlordeasy_dev 库已建,表结构+种子数据已灌(Claude 复核: 认可,无法直接连服务器数据库验证,10.9 端到端跑通时会间接验证)
 - [x] 10.4 后端新增 PM2 进程 `landlordeasy-server-dev`,端口 3001,独立 `.env.dev`(`DATABASE_URL` 指向 dev 库,`WECHAT_MODE=mock`),现有生产进程的 `.env` 建议改名成 `.env.production` 更清楚
