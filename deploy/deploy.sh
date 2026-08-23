@@ -1,6 +1,14 @@
 #!/bin/bash
 # 部署/更新脚本
-# 在服务器上执行: cd /opt/landlord-easy && bash deploy/deploy.sh <prod|dev>
+# prod: cd /opt/landlord-easy     && bash deploy/deploy.sh prod   (main 分支)
+# dev:  cd /opt/landlord-easy-dev && bash deploy/deploy.sh dev    (dev 分支)
+#
+# prod/dev 现在是两个独立的 git worktree,各自固定跟着 main/dev 分支,
+# 互不干扰。`git pull` 不写死分支名,直接跟随当前 worktree 绑定的
+# upstream(prod 目录跟 main、dev 目录跟 dev),脚本本身不用关心分支名,
+# 也就不会出现"意外把另一个分支的代码部署到错误目标"这种问题——只要
+# 每个目录 checkout 的分支是对的,这个脚本永远只会部署它自己所在目录
+# 当前跟踪的那个分支。
 
 set -e
 
@@ -23,8 +31,25 @@ if [[ "$EUID" -eq 0 ]]; then
     exit 1
 fi
 
-echo "=== 拉取最新代码 ==="
-git pull origin main
+# 脚本所在的 git 仓库根目录(不依赖调用者当前工作目录是否正确),
+# prod worktree 和 dev worktree 都用这份脚本,靠这个动态计算出的
+# 路径区分自己实际在哪个目录里跑,不再写死 /opt/landlord-easy。
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+EXPECTED_BRANCH="main"
+[[ "$DEPLOY_TARGET" == "dev" ]] && EXPECTED_BRANCH="dev"
+if [[ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]]; then
+    echo "错误: 当前目录 $PROJECT_ROOT checkout 的是 '$CURRENT_BRANCH' 分支," >&2
+    echo "但 deploy.sh $DEPLOY_TARGET 期望是 '$EXPECTED_BRANCH' 分支。" >&2
+    echo "prod 应该在 /opt/landlord-easy(main) 里跑,dev 应该在" >&2
+    echo "/opt/landlord-easy-dev(dev) 里跑,不要跑错目录。" >&2
+    exit 1
+fi
+
+echo "=== 拉取最新代码($PROJECT_ROOT, 分支 $CURRENT_BRANCH) ==="
+git pull
 
 echo "=== 安装依赖 ==="
 pnpm install
@@ -88,10 +113,10 @@ if [[ "$DEPLOY_TARGET" == "prod" ]]; then
         else
             pm2 start /usr/bin/node \
                 --name landlord-easy \
-                --cwd /opt/landlord-easy \
+                --cwd "$PROJECT_ROOT" \
                 -- \
-                --env-file=/opt/landlord-easy/apps/server/.env \
-                /opt/landlord-easy/apps/server/dist/main.js
+                --env-file="$PROJECT_ROOT/apps/server/.env" \
+                "$PROJECT_ROOT/apps/server/dist/main.js"
         fi
         pm2 save
     else
@@ -106,10 +131,10 @@ else
         else
             pm2 start /usr/bin/node \
                 --name landlordeasy-server-dev \
-                --cwd /opt/landlord-easy \
+                --cwd "$PROJECT_ROOT" \
                 -- \
-                --env-file=/opt/landlord-easy/apps/server/.env.dev \
-                /opt/landlord-easy/apps/server/dist/main.js
+                --env-file="$PROJECT_ROOT/apps/server/.env.dev" \
+                "$PROJECT_ROOT/apps/server/dist/main.js"
         fi
         pm2 save
     else
