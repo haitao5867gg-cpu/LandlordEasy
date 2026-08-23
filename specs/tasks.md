@@ -332,6 +332,14 @@
 
 - 记录但本次不处理(需要产品决策,不是范围明确的bug修复):`Bill.status` 的 `CANCELED` 状态定义了但从未实现任何触发路径,是个"预留未完工"的功能角落,不算bug;`AuditLog` 表**审查时误判为"没人用"**,实际上有一个全局 `AuditLogInterceptor`(`APP_INTERCEPTOR`)自动记录所有房东身份的写操作,已在同一次会话里查出并当场纠正,不是遗留问题。
 
+## M14 dev/prod git物理隔离(2026-08-23)
+
+> 背景:GasCan 发现现有的 dev/prod 部署共用同一份服务器 checkout(`/opt/landlord-easy`,只是重启不同PM2进程),意味着"先在dev测试、觉得不对就回滚"这件事做不到——只要推到main,下次任何部署都会拿到同一份最新代码。要求补一套真正隔离、可独立回滚的机制。
+
+- [x] 14.1 **用 git worktree + 双分支(`main`/`dev`)给 dev/prod 建立真正的物理隔离,dev 上的改动可以独立回滚而不影响生产。**
+> 完成说明(Claude Code,2026-08-23): 改了什么——①从 `main` 切出 `dev` 分支推送到远程;②服务器新增 `/opt/landlord-easy-dev` 作为独立 git worktree,固定跟 `dev` 分支,`/opt/landlord-easy` 继续跟 `main`(生产不变);③把 `apps/server/.env.dev`(不进git的文件)复制到新目录;④重写 `deploy.sh`:不再硬编码 `/opt/landlord-easy`,改成用脚本自身所在路径动态算出 `PROJECT_ROOT`;`git pull` 不写死分支名,跟随当前worktree绑定的upstream;加一层校验,当前目录实际checkout的分支跟命令行传的 `prod`/`dev` 参数对不上时直接报错退出,不会跑错目标。过程中还顺手修了两个环境遗留问题:`/opt`目录本身是root所有,ubuntu用户没权限直接建新目录,需要sudo建目录后chown;`/var/www/landlordeasy/landlord-h5-dev/`里有之前一次sudo误操作留下的root所有权文件,挡住了新的cp操作,同样sudo chown修复。如何验证——不是只做完配置就假设能用,做了一次完整的端到端回归:①在dev worktree里跑 `deploy.sh dev` 完整成功,`dev.landlordeasy.cn` 健康检查+真实浏览器打开确认正常;②故意在 `/opt/landlord-easy`(main分支)目录里跑 `deploy.sh dev`,确认被脚本自己的分支校验直接拒绝退出,没有执行到任何有副作用的步骤,生产站点未受影响;③做了一次真实的"改动→部署→观察→回滚→重新部署→确认恢复"完整闭环:在 `Login.vue` 标题加一个仅用于验证的测试标记,只推到 `dev` 分支,部署到dev worktree,真实浏览器分别打开 `dev.landlordeasy.cn`(看到测试标记)和 `landlordeasy.cn`(生产,完全没有这个标记,确认隔离生效)截图对比;然后在 `dev` 分支上 `git revert` 这个测试commit并重新部署,浏览器复核dev也恢复原样;全程用 `git log`/`git diff` 核实 `main` 分支历史自始至终没有出现过这次测试commit,`dev`/`main` 当前文件内容完全一致(revert完全抵消)。
+> **新工作流(供以后所有会话遵守)**:日常改动先提交到 `dev` 分支 → 部署到 `/opt/landlord-easy-dev` 测试 → 觉得不对就在 `dev` 分支上 revert/reset,不影响生产 → 测试满意后把 `dev` 合并进 `main` → 对 `/opt/landlord-easy` 跑 `deploy.sh prod` 才是真正上线。README.md「服务器部署」一节已同步更新。
+
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
 

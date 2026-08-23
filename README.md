@@ -103,15 +103,20 @@ pnpm exec playwright install chromium && pnpm test:e2e
 
 ## 服务器部署
 
-部署脚本必须显式指定目标环境,不传参数或传入其他值会直接报错退出:
+服务器上 `main`(生产)和 `dev`(测试)是两个**物理隔离的 git worktree**,分别在 `/opt/landlord-easy`(跟 `main`)和 `/opt/landlord-easy-dev`(跟 `dev`),不是共用同一份 checkout。这意味着:
+- 日常改动先推到 `dev` 分支、部署到 dev worktree 测试,觉得不对可以直接在 `dev` 分支上 `git revert`/`reset`,**完全不会影响 `main` 或生产**
+- 测试满意后把 `dev` 合并进 `main`,再对 `/opt/landlord-easy` 跑一次 `deploy.sh prod` 才是真正上线
+- 两个目录各自 `cd` 进去执行部署脚本,不能在错误的目录里跑错误的目标(脚本自己会校验当前 checkout 的分支跟传入的 `prod`/`dev` 参数是否匹配,不匹配直接报错退出,不会跑错)
 
 ```bash
-bash deploy/deploy.sh prod
-bash deploy/deploy.sh dev
+cd /opt/landlord-easy     && bash deploy/deploy.sh prod   # main 分支 -> 生产
+cd /opt/landlord-easy-dev && bash deploy/deploy.sh dev    # dev 分支  -> dev环境
 ```
 
-- `prod`:拉取 `main`、安装依赖并完成数据库迁移和全量构建,保留两个前端项目各自的 `dist/` 目录,重启 PM2 进程 `landlord-easy`,最后检查并重载 Nginx。
-- `dev`:执行相同的拉取、依赖安装、数据库迁移和构建流程,再将两个前端构建产物分别复制到 `/var/www/landlordeasy/landlord-h5-dev/` 和 `/var/www/landlordeasy/tenant-h5-dev/`,重启 PM2 进程 `landlordeasy-server-dev`,最后检查并重载 Nginx。运行前需确保服务器上已存在 `apps/server/.env.dev`,其中配置 dev 后端端口和独立数据库等环境变量。
+- `prod`:拉取当前分支(即 `main`)最新提交、安装依赖并完成数据库迁移和全量构建,保留两个前端项目各自的 `dist/` 目录,重启 PM2 进程 `landlord-easy`,最后检查并重载 Nginx。
+- `dev`:拉取当前分支(即 `dev`)最新提交,执行相同的依赖安装、数据库迁移和构建流程,再将两个前端构建产物分别复制到 `/var/www/landlordeasy/landlord-h5-dev/` 和 `/var/www/landlordeasy/tenant-h5-dev/`,重启 PM2 进程 `landlordeasy-server-dev`,最后检查并重载 Nginx。运行前需确保 `/opt/landlord-easy-dev/apps/server/.env.dev` 存在(这个文件不进 git,`/opt/landlord-easy` 那份要手动复制一份过去,配置 dev 后端端口和独立数据库等环境变量)。
+
+**不要用 `sudo` 执行 `deploy.sh`**——PM2 进程列表按系统用户隔离,root 身份执行会检测不到已存在的部署进程,误建一个抢占端口、必然崩溃的重复进程,脚本本身会在开头直接拒绝 root/sudo 执行。脚本最后 `nginx -t`/`systemctl reload nginx` 这两步需要 root 权限(读证书、控制服务),服务器上已经给部署用户配了一条最小权限的 `/etc/sudoers.d/deploy-nginx`,只免密码授权这两条具体命令,脚本内部会自动用 `sudo -n` 调用,不需要手动处理。
 
 ## 开发约定
 
