@@ -244,6 +244,7 @@
 
 - [x] 10.10 `deploy/deploy.sh` 用 `pm2 describe`/`pm2 start` 判断进程是否已存在时,没有考虑执行脚本的系统用户可能与已存在进程的运行用户不一致的情况
 > 完成说明(Claude Code,2026-08-23): 改了什么——在参数校验之后加一段 `if [[ "$EUID" -eq 0 ]]`检查,用 sudo/root 执行本脚本时直接报中文错误并 `exit 1`,提示"不要用sudo,直接用部署用户运行",不再往下执行到PM2那一步误建重复进程。如何验证——`bash -n deploy/deploy.sh` 语法检查通过;`$EUID -eq 0` 是检测root身份最标准的bash写法(readonly变量,没法在测试里伪造脚本内赋值来做隔离单测,但逻辑本身是shell脚本里检测root的通用惯用法),真正的验证是这次改动直接对应2026-08-23当天实际踩过的坑(见上方10.8完成说明),这段检查加上之后,同样的误操作会在最开始就被拦下来,不会再走到PM2误建重复进程那一步。
+> **追加(同一天稍后)**: 加了 EUID 检查、改用普通 ubuntu 用户实际重新执行 `deploy.sh prod` 部署 9.4 交接管理接口时,又踩到一个新问题——最后"重载 Nginx"这步 `nginx -t && systemctl reload nginx` 需要 root 权限(读 Let's Encrypt 证书文件、控制 systemd 服务),普通用户跑会失败;更隐蔽的是,`nginx -t` 失败后整行 `&&` 复合命令在 `set -e` 下不会触发脚本退出(bash 已知行为:`&&`/`||`/`if` 链条里的命令失败被认为是"已检查过的",不会触发 errexit),导致 `systemctl reload nginx` 被静默跳过,但脚本还是照常打印了"部署完成"——**这次实际发生过,不是理论推演**,靠人工核对生产站点状态才发现 reload 没真正生效(所幸这次没改 nginx 配置本身,不影响实际服务)。修法:①给服务器 `ubuntu` 用户加了一条最小权限的 `/etc/sudoers.d/deploy-nginx`(`sudo visudo -c` 验证语法后生效),只免密码授权 `/usr/sbin/nginx -t` 和 `/usr/bin/systemctl reload nginx` 这两条具体命令,不是整个脚本或任意 sudo;②`deploy.sh` 这两条命令加 `sudo -n`(`-n` 确保权限不够时直接报错退出,不会卡在密码提示);③把 `&&` 链改成显式 `if`,`nginx -t` 失败时打印中文错误并 `exit 1`,不会再误打印"部署完成"。验证:`sudo -n nginx -t` 手动测试确认免密码权限生效(退出码0);之后重跑 `bash deploy/deploy.sh prod`(不用sudo)从头到尾真正跑完全部步骤,包括 reload 这一步,生产站点 `curl https://landlordeasy.cn/api/v1/health` 确认正常。
 
 ## M11 域名上线收尾(公安联网备案被拒,排查+补漏)
 

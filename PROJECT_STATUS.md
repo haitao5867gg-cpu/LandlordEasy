@@ -13,6 +13,7 @@ LandlordEasy 房屋收租系统。嘉定公寓,4~5 栋自建楼约 300 间房(�
 ## 基础设施(避免每次新会话重新问)
 - 生产服务器:腾讯云轻量应用服务器(上海),IP `111.229.167.29`,SSH 用户 `ubuntu`,密钥在 `/Users/gascan/LandLordEasy/LandLordEasy_SSHKey.pem`(不入库)。
 - 域名 `landlordeasy.cn` 的注册和 DNS 解析也托管在腾讯云(跟服务器同一个账号),不是别的域名服务商;加子域名/改解析记录去腾讯云控制台的"云解析 DNSPod"部分(不是轻量应用服务器面板本身,是同一账号下的另一个功能区)。
+- 服务器上有一条持久化的 sudoers 配置 `/etc/sudoers.d/deploy-nginx`(2026-08-23 加,详见 `specs/tasks.md` 10.10):只免密码授权 `ubuntu` 用户执行 `/usr/sbin/nginx -t` 和 `/usr/bin/systemctl reload nginx` 这两条具体命令,不是整个脚本或任意 sudo,是给 `deploy.sh` 用的,不要因为"不熟悉"就删掉。
 
 ## 已定稿(specs/ 三件套,commit 6e0205b)
 - requirements.md:需求 v1(含房型模板、房间历史档案、支出管理、租客访问规则、滞纳金默认=当期租金等)

@@ -119,6 +119,18 @@ else
 fi
 
 echo "=== 重载 Nginx ==="
-nginx -t && systemctl reload nginx
+# nginx -t / systemctl reload 需要 root 权限(读证书文件、控制服务)，本脚本
+# 整体不能用 sudo 执行(见上方 EUID 检查的原因)，所以这两条单独用 sudo，
+# 服务器上需要预先给部署用户配好受限的 NOPASSWD sudoers 规则(只允许这两条
+# 具体命令，不是整个脚本)。用 if 显式判断，避免 `cmd1 && cmd2` 在 `set -e`
+# 下前半句失败时不会触发脚本退出、却又静默跳过 reload 的坑(2026-08-23 真实
+# 踩过一次:普通用户没权限读证书导致 nginx -t 失败，reload 没真正执行，但
+# 脚本还是照常打印了"部署完成")。
+if sudo -n nginx -t; then
+    sudo -n systemctl reload nginx
+else
+    echo "错误: nginx 配置检查失败,已跳过 reload,部署未完全成功" >&2
+    exit 1
+fi
 
 echo "=== 部署完成! ==="
