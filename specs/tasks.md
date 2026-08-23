@@ -314,6 +314,24 @@
 - [x] 12.4 **详情/子页面底部内容被固定 tabbar 遮挡,租约详情页"退租"/"续签"按钮只露出一点点。** GasCan 微信内实测反馈,截图显示按钮只剩红/蓝两条细边露在 tabbar 上方,需要手动上划才能点到。
 > 完成说明(Claude Code,2026-08-21): 根因——`van-tabbar` 全局 `position:fixed`,只有4个顶层页面(工作台/房间/账单/我的)各自手写了 `padding-bottom:60px` 规避,其余16个子页面/详情页(含租约详情)从未处理,内容够长时末尾会被 tabbar 盖住。改了什么——`apps/landlord-h5/src/App.vue` 把 `router-view` 套进一个按 `showTabbar` 状态整体加 `padding-bottom:60px` 的容器,不再依赖每个页面各自记得写;同步删掉 Home/Mine/BillList/RoomList 四个页面里原有的重复 `padding-bottom:60px`,避免叠加成双倍留白。如何验证——`vue-tsc -b`、`pnpm --filter landlord-h5 build` 均通过;对其余15个子页面做了代码级排查(`grep position:fixed`/`van-button`),确认除 `App.vue` 的全局 tabbar 外没有任何页面自己再定义固定/粘性底部元素,即租约详情页不是特例,所有页面本来都有同样的潜在风险,这次是一次性全局修复,不是只补了一个洞;本想用浏览器工具自己实测,但沙盒环境的资源拦截规则挡住了主 JS/CSS bundle(`ERR_BLOCKED_BY_CLIENT`,换新标签页复现同样问题),判断是工具环境限制不是网站问题,放弃这条路径。部署到服务器后**已用真实浏览器验证界面正常**:GasCan 在微信内打开受影响最明显的那条(账单较多的在租租约)详情页,确认"退租"/"续签"按钮完整可见、不用上划,GasCan 本人确认"现在好了"。
 
+## M13 架构review修复(2026-08-23)
+
+> 背景:GasCan 要求"作为架构师整体review一遍"当前代码。系统性抽查了所有DTO的class-validator覆盖、所有controller的guard覆盖、main.ts全局配置、前端token/CORS处理模式,给出6条发现(3条中优先级可直接修、2条是"功能未完成"需要产品决策不算bug、1条是审查者自己看漏了全局AuditLog拦截器的误判已当场纠正)。GasCan 要求立即修复其中范围明确的4条。
+
+- [x] 13.1 **`main.ts` 的 `app.enableCors()` 不带参数,等于放行所有来源跨域请求,但两个前端都是nginx同源反代部署,业务上用不到跨域,配合token存localStorage,不必要的宽松CORS只会放大潜在XSS的攻击面。**
+> 完成说明(Claude Code,2026-08-23): 改了什么——删掉 `main.ts` 里的 `app.enableCors()` 调用。如何验证——本地起后端后 `curl -I ... -H "Origin: https://evil.example.com"` 确认响应里不再有任何 `Access-Control-*` 头;部署到生产后同样对 `https://landlordeasy.cn` 复测一遍,确认头确实消失、`health` 接口正常返回。
+
+- [x] 13.2 **全局没有任何请求限流,包括登录接口,理论上存在暴力尝试风险。**
+> 完成说明(Claude Code,2026-08-23): 改了什么——装 `@nestjs/throttler`(v6.5.0,匹配NestJS 10),`app.module.ts` 全局注册 `ThrottlerGuard`(每IP每分钟100次),`auth.controller.ts` 的 `landlord/login`、`tenant/login`、`landlord/review-login` 三个登录类接口单独用 `@Throttle` 收紧到每分钟10次。如何验证——本地连续对 `landlord/login` 发11次请求,第10次开始收到429(前9次正常201);dev/生产环境本次未重复触发限流验证(逻辑跟本地一致,不必要地打满10次干扰生产环境没有意义)。
+
+- [x] 13.3 **`ConfirmPaymentDto.action` 只用 `@IsString()`,非法值不会在HTTP层被拒绝,而是被service层的 `else` 分支静默当成"驳回"处理。**
+> 完成说明(Claude Code,2026-08-23): 改了什么——`payments.dto.ts` 把 `@IsString()` 改成 `@IsIn(['confirm', 'reject'])`。如何验证——本地对 `POST /payments/:id/confirm` 传 `{"action":"delete_everything"}`,确认返回400中文提示而不是被当成reject静默处理。
+
+- [x] 13.4 **`HandoverRecord` 模型缺 `operatorId` 字段,跟其他同类"操作记录"模型(`DepositRecord`/`MaintenanceRecord`/`Expense`)不一致,交接记录没法追溯是哪位房东录的。**
+> 完成说明(Claude Code,2026-08-23): 改了什么——`schema.prisma` 给 `HandoverRecord` 加 `operatorId Int` 必填字段+`Landlord` 反向关联,`handover.service.ts`/`handover.controller.ts` 改成从JWT当前登录房东身份自动写入,不需要客户端传。db push前专门查过dev/生产库该表当时都是0条记录(这个模块是M13当天才刚上线的CRUD接口,之前只有数据模型没有任何写入路径),不存在迁移时NULL值冲突的风险,不需要给默认值或做数据回填。如何验证——本地一次性Docker库 `db push` 成功;真实创建一条交接记录确认 `operatorId` 自动带上且值正确(等于当前登录房东的id);按标准流程先在 `landlordeasy_dev` 库 `db push`+真实创建记录验证,再对生产库打新备份(手动跑 `backup-mysql.sh`,不是复用当天凌晨cron那份)、`db push`、`deploy.sh prod` 完整部署,生产健康检查确认正常。
+
+- 记录但本次不处理(需要产品决策,不是范围明确的bug修复):`Bill.status` 的 `CANCELED` 状态定义了但从未实现任何触发路径,是个"预留未完工"的功能角落,不算bug;`AuditLog` 表**审查时误判为"没人用"**,实际上有一个全局 `AuditLogInterceptor`(`APP_INTERCEPTOR`)自动记录所有房东身份的写操作,已在同一次会话里查出并当场纠正,不是遗留问题。
+
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
 
