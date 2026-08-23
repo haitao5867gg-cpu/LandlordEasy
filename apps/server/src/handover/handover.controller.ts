@@ -9,10 +9,13 @@ import {
   Query,
   UseGuards,
   ParseIntPipe,
+  Req,
 } from '@nestjs/common';
+import { Request } from 'express';
 import { HandoverService } from './handover.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { CreateHandoverDto, UpdateHandoverDto } from './handover.dto';
+import { JwtPayload } from '../auth/auth.service';
 
 @Controller('handover')
 @UseGuards(LandlordGuard)
@@ -25,8 +28,9 @@ export class HandoverController {
   }
 
   @Post()
-  create(@Body() dto: CreateHandoverDto) {
-    return this.handoverService.create(dto);
+  create(@Body() dto: CreateHandoverDto, @Req() req: Request) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.handoverService.create(dto, user.sub);
   }
 
   @Put(':id')

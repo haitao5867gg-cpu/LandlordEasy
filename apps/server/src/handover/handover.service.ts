@@ -15,13 +15,14 @@ export class HandoverService {
     });
   }
 
-  async create(dto: CreateHandoverDto) {
+  async create(dto: CreateHandoverDto, operatorId: number) {
     return this.prisma.handoverRecord.create({
       data: {
         leaseId: dto.leaseId,
         type: dto.type,
         checklist: dto.checklist as Prisma.InputJsonValue | undefined,
         remark: dto.remark,
+        operatorId,
       },
     });
   }

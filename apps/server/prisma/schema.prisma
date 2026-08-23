@@ -16,10 +16,11 @@ model Landlord {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  auditLogs      AuditLog[]
-  depositRecords DepositRecord[]
-  payments       Payment[]       @relation("ConfirmedBy")
-  expenses       Expense[]
+  auditLogs       AuditLog[]
+  depositRecords  DepositRecord[]
+  payments        Payment[]        @relation("ConfirmedBy")
+  expenses        Expense[]
+  handoverRecords HandoverRecord[]
 
   @@map("landlords")
 }
@@ -200,15 +201,17 @@ model DepositRecord {
 
 // ========== 交接记录 ==========
 model HandoverRecord {
-  id        Int      @id @default(autoincrement())
-  leaseId   Int
-  type      String   // CHECKIN / CHECKOUT
-  checklist Json?    // [{item, condition}]
-  remark    String?  @db.Text
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         Int      @id @default(autoincrement())
+  leaseId    Int
+  type       String   // CHECKIN / CHECKOUT
+  checklist  Json?    // [{item, condition}]
+  remark     String?  @db.Text
+  operatorId Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
-  lease Lease @relation(fields: [leaseId], references: [id])
+  lease    Lease    @relation(fields: [leaseId], references: [id])
+  operator Landlord @relation(fields: [operatorId], references: [id])
 
   @@map("handover_records")
 }

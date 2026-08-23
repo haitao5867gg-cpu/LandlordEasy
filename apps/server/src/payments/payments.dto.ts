@@ -1,4 +1,4 @@
-import { IsInt, IsString, IsOptional, IsNumber, IsDateString, Min } from 'class-validator';
+import { IsInt, IsString, IsIn, IsOptional, IsNumber, IsDateString, Min } from 'class-validator';
 
 /** 租客上报付款 */
 export class TenantReportPaymentDto {
@@ -35,6 +35,6 @@ export class ManualPaymentDto {
 
 /** 确认/驳回 */
 export class ConfirmPaymentDto {
-  @IsString()
+  @IsIn(['confirm', 'reject'])
   action!: 'confirm' | 'reject';
 }
