@@ -211,3 +211,13 @@ LandlordEasy 房屋收租系统。嘉定公寓,4~5 栋自建楼约 300 间房(�
 ### 关于协作模式的变化（供下一个接手的会话理解上下文）
 
 GasCan 明确说了"接下来我需要跟你一起不断优化这个产品"——项目已经从"完成部署上线"转入日常产品迭代阶段。分工上，GasCan 明确要求把大部分实现工作交给 Kiro CLI（新账号，token 充足），Claude Code 承担架构设计+代码审查角色，但**审查标准没有降低**——这次会话里两个真实 bug（sheet月份错位、佣金记账方向）都是 Claude Code 独立复核数据分布/交叉验证发现的，不是走流程性的"跑一下 tsc 就过"，这个习惯需要保持。
+
+---
+
+## 最新状态：2026-08-23（e2e测试首次真实跑通+发现修复两个生产bug；M10 dev环境隔离全部完成）
+
+- **本机运行环境是 GasCan 自己的 Mac**（不是隔离云沙盒），这一点之前的会话判断错了——之前把网络异常/DNS怪结果归因于"沙盒被过滤"，实际上就是本机网络/工具环境本身的问题；这台机器上还装了 Kiro CLI 桌面版、Docker Desktop、Node 26（较新，跟 `@nestjs/cli@10.x` 的 webpack 编译链不兼容，`nest start`/某些情况下 `nest build` 会静默失败退出码0但不产出 dist），已额外装了 keg-only 的 Node 20 用于跑 e2e 时的后端 build。
+- **9.11 e2e 测试首次真实浏览器跑通**：过程曲折（Playwright 自带 Chromium 下载反复卡死、改用系统 Chrome 绕过、`nest start` 静默失败改成先 `nest build` 再 `node dist/main`），最终 `e2e/playwright.config.ts`/`e2e/run.sh` 已清理成不依赖这台机器特定路径的可提交版本，README.md 补了排障说明。
+- **9.12 e2e 真实跑通时抓到两个当前生产环境的活跃bug**（代码审查完全看不出来，必须真实运行才发现）：①`NewLease.vue` "签约成功"弹窗无法关闭（Vant Dialog死锁）；②`tenant-api.controller.ts` 的 `BindInviteCodeDto` 缺 class-validator 装饰器，导致**租客绑定邀请码在当前生产环境完全失败**——跟 questions.md Q3 点名警告过的 `LoginDto` 同一类问题又犯了一次，顺手排查修复了 `admin.controller.ts` 另外3个同样零装饰器的DTO。两个修复已部署到生产服务器并验证。
+- **M10 dev环境隔离（10.5~10.9）全部完成**：`dev.landlordeasy.cn` 已配好HTTPS（Let's Encrypt证书，反代3001端口独立后端+独立静态目录+独立 `landlordeasy_dev` 数据库），真实浏览器走通"登录→新签租约→关闭成功弹窗"全流程，确认与生产库物理隔离。过程中发现 `deploy.sh` 在用 `sudo` 执行时会因为PM2按用户隔离而误建重复进程（已处理，记为技术债10.10）。
+- **当前 `specs/tasks.md` 唯一剩余的未完成任务**：9.4（可选，交接管理CRUD接口）和 10.10（deploy.sh用户校验技术债），均不紧急不阻塞。
