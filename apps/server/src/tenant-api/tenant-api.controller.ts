@@ -1,10 +1,12 @@
 import { Controller, Get, Post, Body, UseGuards, Req, BadRequestException } from '@nestjs/common';
 import { Request } from 'express';
+import { IsString } from 'class-validator';
 import { TenantGuard } from '../auth/guards/tenant.guard';
 import { TenantApiService } from './tenant-api.service';
 import { JwtPayload } from '../auth/auth.service';
 
 class BindInviteCodeDto {
+  @IsString()
   inviteCode!: string;
 }
 

@@ -14,23 +14,40 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
+import { IsString, IsOptional, IsBoolean, IsNumber } from 'class-validator';
 import { AdminService } from './admin.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { JwtPayload } from '../auth/auth.service';
 
 class AddLandlordDto {
+  @IsString()
   openid!: string;
+
+  @IsString()
   name!: string;
 }
 
 class UpdateLandlordDto {
+  @IsOptional()
+  @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsBoolean()
   isActive?: boolean;
 }
 
 class UpdateSettingsDto {
+  @IsOptional()
+  @IsNumber()
   reminderPreDays?: number;
+
+  @IsOptional()
+  @IsNumber()
   reminderOverdueInterval?: number;
+
+  @IsOptional()
+  @IsString()
   qrcodeImageUrl?: string;
 }
 

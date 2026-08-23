@@ -90,6 +90,7 @@
         <h2>{{ inviteCode }}</h2>
         <van-button size="small" @click="copyCode">复制邀请码</van-button>
       </div>
+      <van-button block @click="closeResult">完成</van-button>
     </van-dialog>
   </div>
 </template>
@@ -201,6 +202,10 @@ async function handleSubmit() {
 function copyCode() {
   navigator.clipboard.writeText(inviteCode.value);
   showToast('已复制');
+}
+
+function closeResult() {
+  showResult.value = false;
 }
 </script>
 
