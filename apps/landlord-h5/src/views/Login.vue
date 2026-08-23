@@ -1,7 +1,7 @@
 <template>
   <div class="login-page">
     <div class="login-header">
-      <h1>房东管理(DEV隔离验证)</h1>
+      <h1>房东管理</h1>
       <p>LandlordEasy</p>
     </div>
 
