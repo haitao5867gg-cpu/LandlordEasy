@@ -24,6 +24,8 @@ Thumbs.db
 
 # Testing
 coverage/
+e2e/test-results/
+playwright-report/
 
 # Logs
 *.log

@@ -11,10 +11,14 @@
     "lint": "pnpm -r lint",
     "format": "prettier --write \"**/*.{ts,tsx,vue,json,md}\"",
     "seed": "pnpm --filter server seed",
-    "import:init": "pnpm --filter server import:init"
+    "import:init": "pnpm --filter server import:init",
+    "test:e2e": "bash e2e/run.sh"
   },
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=9.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0"
   }
 }
