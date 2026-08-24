@@ -1,35 +1,59 @@
 <template>
   <div>
     <van-nav-bar title="批量建房" left-arrow @click-left="$router.back()" />
-    <van-form @submit="handleSubmit">
+    <van-form @submit="handleSubmit" @failed="onFailed">
       <van-cell-group inset>
-        <van-field name="buildingId" label="楼栋" :rules="[{ required: true }]">
-          <template #input>
-            <van-radio-group v-model="form.buildingId" direction="horizontal">
-              <van-radio v-for="b in buildings" :key="b.id" :name="b.id">{{ b.name }}</van-radio>
-            </van-radio-group>
-          </template>
-        </van-field>
-        <van-field name="roomTypeId" label="房型(可选)">
-          <template #input>
-            <van-radio-group v-model="form.roomTypeId" direction="horizontal">
-              <van-radio :name="0">不选</van-radio>
-              <van-radio v-for="rt in roomTypes" :key="rt.id" :name="rt.id">{{ rt.name }}</van-radio>
-            </van-radio-group>
-          </template>
-        </van-field>
-        <van-field v-model="form.startRoom" label="起始房号" placeholder="如 301" :rules="[{ required: true }]" />
-        <van-field v-model="form.endRoom" label="结束房号" placeholder="如 315" :rules="[{ required: true }]" />
+        <van-field
+          name="buildingId"
+          label="楼栋"
+          readonly
+          is-link
+          :model-value="selectedBuildingText"
+          placeholder="请选择楼栋"
+          :rules="[{ required: true, message: '请选择楼栋' }]"
+          @click="showBuildingPicker = true"
+        />
+        <van-field
+          name="roomTypeId"
+          label="房型(可选)"
+          readonly
+          is-link
+          :model-value="selectedRoomTypeText"
+          placeholder="请选择房型"
+          @click="showRoomTypePicker = true"
+        />
+        <van-field
+          v-model="form.startRoom"
+          label="起始房号"
+          placeholder="如 301"
+          :rules="[{ required: true, message: '请输入起始房号' }]"
+        />
+        <van-field v-model="form.endRoom" label="结束房号" placeholder="留空则只建1间" />
       </van-cell-group>
       <div style="margin: 16px;">
         <van-button round block type="primary" native-type="submit" :loading="loading">提交</van-button>
       </div>
     </van-form>
+
+    <van-popup v-model:show="showBuildingPicker" position="bottom">
+      <van-picker
+        :columns="buildingColumns"
+        @confirm="onBuildingConfirm"
+        @cancel="showBuildingPicker = false"
+      />
+    </van-popup>
+    <van-popup v-model:show="showRoomTypePicker" position="bottom">
+      <van-picker
+        :columns="roomTypeColumns"
+        @confirm="onRoomTypeConfirm"
+        @cancel="showRoomTypePicker = false"
+      />
+    </van-popup>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../../utils/http';
@@ -38,20 +62,55 @@ const router = useRouter();
 const buildings = ref<any[]>([]);
 const roomTypes = ref<any[]>([]);
 const loading = ref(false);
+const showBuildingPicker = ref(false);
+const showRoomTypePicker = ref(false);
 const form = reactive({ buildingId: 0, roomTypeId: 0, startRoom: '', endRoom: '' });
+
+const buildingColumns = computed(() =>
+  buildings.value.map((building) => ({ text: building.name, value: building.id })),
+);
+const roomTypeColumns = computed(() => [
+  { text: '不选', value: 0 },
+  ...roomTypes.value.map((roomType) => ({ text: roomType.name, value: roomType.id })),
+]);
+const selectedBuildingText = computed(
+  () => buildings.value.find((building) => building.id === form.buildingId)?.name || '',
+);
+const selectedRoomTypeText = computed(
+  () => roomTypeColumns.value.find((roomType) => roomType.value === form.roomTypeId)?.text || '',
+);
 
 onMounted(async () => {
   buildings.value = await http.get('/buildings') as any;
   roomTypes.value = await http.get('/room-types') as any;
 });
 
+function onBuildingConfirm({ selectedOptions }: any) {
+  form.buildingId = selectedOptions[0].value;
+  showBuildingPicker.value = false;
+}
+
+function onRoomTypeConfirm({ selectedOptions }: any) {
+  form.roomTypeId = selectedOptions[0].value;
+  showRoomTypePicker.value = false;
+}
+
+function onFailed(errorInfo: any) {
+  showToast(errorInfo.errors?.[0]?.message || '请检查表单');
+}
+
 async function handleSubmit() {
   loading.value = true;
   try {
-    const data: any = { buildingId: form.buildingId, startRoom: form.startRoom, endRoom: form.endRoom };
+    const data: any = { buildingId: form.buildingId, startRoom: form.startRoom };
+    if (form.endRoom) data.endRoom = form.endRoom;
     if (form.roomTypeId) data.roomTypeId = form.roomTypeId;
     const res = await http.post('/rooms/batch', data) as any;
-    showToast(`成功创建 ${res.created} 间房`);
+    if (res.skipped?.length) {
+      showToast(`成功创建${res.created}间房，房号${res.skipped.join('、')}已存在未创建`);
+    } else {
+      showToast(`成功创建 ${res.created} 间房`);
+    }
     router.back();
   } finally {
     loading.value = false;

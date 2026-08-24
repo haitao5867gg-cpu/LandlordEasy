@@ -64,6 +64,7 @@ export class BatchCreateRoomsDto {
   @IsString()
   startRoom!: string; // e.g. '301'
 
+  @IsOptional()
   @IsString()
-  endRoom!: string; // e.g. '315'
+  endRoom?: string; // e.g. '315'
 }

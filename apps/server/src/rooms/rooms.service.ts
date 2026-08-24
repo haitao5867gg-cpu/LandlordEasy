@@ -70,32 +70,47 @@ export class RoomsService {
   /** 批量创建房间 */
   async batchCreate(dto: BatchCreateRoomsDto) {
     const startNum = parseInt(dto.startRoom);
-    const endNum = parseInt(dto.endRoom);
+    const endNum = dto.endRoom ? parseInt(dto.endRoom) : startNum;
 
     if (isNaN(startNum) || isNaN(endNum) || startNum > endNum) {
       throw new BadRequestException('房间号区间无效');
     }
 
-    const rooms = [];
+    const roomNos = [];
     for (let num = startNum; num <= endNum; num++) {
-      const roomNo = num.toString();
-      const floor = Math.floor(num / 100); // 301 → 3层
+      roomNos.push(num.toString());
+    }
 
-      rooms.push({
+    const existingRooms = await this.prisma.room.findMany({
+      where: {
         buildingId: dto.buildingId,
-        roomNo,
-        floor,
-        roomTypeId: dto.roomTypeId || null,
-        status: 'VACANT',
-      });
+        roomNo: { in: roomNos },
+      },
+      select: { roomNo: true },
+    });
+    const existingRoomNos = new Set(existingRooms.map((room) => room.roomNo));
+    const skipped = roomNos.filter((roomNo) => existingRoomNos.has(roomNo));
+    const toCreate = roomNos.filter((roomNo) => !existingRoomNos.has(roomNo));
+
+    if (toCreate.length === 0) {
+      throw new BadRequestException(`房号 ${roomNos.join('~')} 均已存在,未创建任何房间`);
     }
 
     const result = await this.prisma.room.createMany({
-      data: rooms,
+      data: toCreate.map((roomNo) => {
+        const num = parseInt(roomNo);
+        return {
+          buildingId: dto.buildingId,
+          roomNo,
+          floor: Math.floor(num / 100),
+          roomTypeId: dto.roomTypeId || null,
+          status: 'VACANT',
+        };
+      }),
       skipDuplicates: true,
     });
 
-    return { created: result.count, total: rooms.length };
+    return { created: result.count, total: roomNos.length, skipped };
   }
 
   async update(id: number, dto: UpdateRoomDto) {
