@@ -80,12 +80,8 @@ test.describe.serial('核心收租流程', () => {
     await expectApiSuccess(await buildingsPromise);
     await expectApiSuccess(await roomsPromise);
 
-    await page.getByText('全部状态', { exact: true }).click();
     const vacantRoomsPromise = waitForApi(page, 'GET', '/rooms', { status: 'VACANT' });
-    await page
-      .locator('.van-dropdown-item .van-cell')
-      .filter({ hasText: '空置' })
-      .click();
+    await page.locator('.van-tabs').nth(1).getByRole('tab', { name: '空置' }).click();
     const vacantRooms = await expectApiSuccess<unknown[]>(await vacantRoomsPromise);
     expect(vacantRooms.length).toBeGreaterThan(0);
 
