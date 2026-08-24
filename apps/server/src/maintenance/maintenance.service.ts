@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateMaintenanceDto } from './maintenance.dto';
 
@@ -16,6 +16,11 @@ export class MaintenanceService {
   }
 
   async create(dto: CreateMaintenanceDto, operatorId: number) {
+    const room = await this.prisma.room.findUnique({ where: { id: dto.roomId } });
+    if (!room) {
+      throw new BadRequestException('房间不存在');
+    }
+
     return this.prisma.maintenanceRecord.create({
       data: {
         roomId: dto.roomId,

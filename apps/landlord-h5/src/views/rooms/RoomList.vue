@@ -95,9 +95,11 @@ onMounted(async () => {
   }
 });
 
-// keep-alive 恢复时不重新请求，状态保持原样
+// keep-alive 恢复时保留筛选条件并重新请求最新数据
 onActivated(() => {
-  // 什么都不做，组件状态已经缓存
+  if (initialized.value) {
+    fetchRooms();
+  }
 });
 </script>
 
