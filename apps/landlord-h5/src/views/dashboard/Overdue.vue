@@ -4,10 +4,21 @@
     <van-loading v-if="loading" class="page-loading" />
     <template v-else>
       <van-cell title="逾期总数" :value="String(data.total)" />
-      <template v-for="(items, bName) in data.buildings" :key="bName">
-        <van-cell-group inset :title="`${bName}`">
-          <van-cell v-for="item in items" :key="item.billId" :title="`${item.roomNo} - ${item.tenantName}`" :label="`逾期${item.overdueDays}天`" :value="`¥${item.amount}`" />
-        </van-cell-group>
+      <van-empty v-if="data.total === 0" description="暂无逾期账单" />
+      <template v-else>
+        <template v-for="(items, bName) in data.buildings" :key="bName">
+          <van-cell-group inset :title="`${bName}`">
+            <van-cell
+              v-for="item in items"
+              :key="item.billId"
+              :title="`${item.roomNo} - ${item.tenantName}`"
+              :label="`逾期${item.overdueDays}天`"
+              :value="`¥${item.amount}`"
+              is-link
+              @click="$router.push('/bills/' + item.billId)"
+            />
+          </van-cell-group>
+        </template>
       </template>
     </template>
   </div>

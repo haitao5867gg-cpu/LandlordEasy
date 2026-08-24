@@ -52,22 +52,17 @@ const overdueCount = ref(0);
 const pendingCount = ref(0);
 
 onMounted(async () => {
-  try {
-    const [vacancy, expiring, overdue, pending] = await Promise.all([
-      http.get('/dashboard/vacancy'),
-      http.get('/dashboard/expiring'),
-      http.get('/dashboard/overdue'),
-      http.get('/payments/pending'),
-    ]);
-    vacantCount.value = (vacancy as any).total || 0;
-    expiringCount.value = Array.isArray(expiring) ? expiring.length : 0;
-    overdueCount.value = (overdue as any).total || 0;
-    pendingCount.value = Array.isArray(pending) ? pending.length : 0;
-  } catch {
-    // handled by interceptor
-  } finally {
-    loading.value = false;
-  }
+  const [vacancy, expiring, overdue, pending] = await Promise.allSettled([
+    http.get('/dashboard/vacancy'),
+    http.get('/dashboard/expiring'),
+    http.get('/dashboard/overdue'),
+    http.get('/payments/pending'),
+  ]);
+  if (vacancy.status === 'fulfilled') vacantCount.value = (vacancy.value as any).total || 0;
+  if (expiring.status === 'fulfilled') expiringCount.value = Array.isArray(expiring.value) ? expiring.value.length : 0;
+  if (overdue.status === 'fulfilled') overdueCount.value = (overdue.value as any).total || 0;
+  if (pending.status === 'fulfilled') pendingCount.value = Array.isArray(pending.value) ? pending.value.length : 0;
+  loading.value = false;
 });
 </script>
 

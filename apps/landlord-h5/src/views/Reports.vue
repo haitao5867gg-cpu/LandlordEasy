@@ -44,13 +44,13 @@ const loading = ref(true);
 
 async function fetchReport() {
   loading.value = true;
-  try {
-    const [r, d] = await Promise.all([
-      http.get('/dashboard/reports/monthly', { params: { month: month.value } }),
-      http.get('/dashboard/reports/deposit-summary'),
-    ]);
-    report.value = r; deposit.value = d;
-  } finally { loading.value = false; }
+  const [r, d] = await Promise.allSettled([
+    http.get('/dashboard/reports/monthly', { params: { month: month.value } }),
+    http.get('/dashboard/reports/deposit-summary'),
+  ]);
+  if (r.status === 'fulfilled') report.value = r.value;
+  if (d.status === 'fulfilled') deposit.value = d.value;
+  loading.value = false;
 }
 onMounted(fetchReport);
 </script>

@@ -4,10 +4,20 @@
     <van-loading v-if="loading" class="page-loading" />
     <template v-else>
       <van-cell title="空置总数" :value="String(data.total)" />
-      <template v-for="(rooms, bName) in data.buildings" :key="bName">
-        <van-cell-group inset :title="`${bName}(${rooms.length}间)`">
-          <van-cell v-for="r in rooms" :key="r.id" :title="r.roomNo" :value="`空置${r.vacantDays}天`" />
-        </van-cell-group>
+      <van-empty v-if="data.total === 0" description="暂无空置房间" />
+      <template v-else>
+        <template v-for="(rooms, bName) in data.buildings" :key="bName">
+          <van-cell-group inset :title="`${bName}(${rooms.length}间)`">
+            <van-cell
+              v-for="r in rooms"
+              :key="r.id"
+              :title="r.roomNo"
+              :value="`空置${r.vacantDays}天`"
+              is-link
+              @click="$router.push('/rooms/' + r.id)"
+            />
+          </van-cell-group>
+        </template>
       </template>
     </template>
   </div>
