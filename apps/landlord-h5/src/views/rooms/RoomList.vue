@@ -10,9 +10,14 @@
       <van-tab title="全部" :name="0" />
       <van-tab v-for="b in buildings" :key="b.id" :title="b.name" :name="b.id" />
     </van-tabs>
-    <van-dropdown-menu>
-      <van-dropdown-item v-model="statusFilter" :options="statusOptions" @change="onFilterChange" />
-    </van-dropdown-menu>
+    <van-tabs v-model:active="statusFilter" @change="onFilterChange">
+      <van-tab
+        v-for="option in statusOptions"
+        :key="option.value"
+        :title="option.text"
+        :name="option.value"
+      />
+    </van-tabs>
     <van-loading v-if="loading" class="page-loading" />
     <van-empty v-else-if="rooms.length === 0" description="暂无房间" />
     <van-cell-group v-else inset>
