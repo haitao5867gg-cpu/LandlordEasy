@@ -340,6 +340,25 @@
 > 完成说明(Claude Code,2026-08-23): 改了什么——①从 `main` 切出 `dev` 分支推送到远程;②服务器新增 `/opt/landlord-easy-dev` 作为独立 git worktree,固定跟 `dev` 分支,`/opt/landlord-easy` 继续跟 `main`(生产不变);③把 `apps/server/.env.dev`(不进git的文件)复制到新目录;④重写 `deploy.sh`:不再硬编码 `/opt/landlord-easy`,改成用脚本自身所在路径动态算出 `PROJECT_ROOT`;`git pull` 不写死分支名,跟随当前worktree绑定的upstream;加一层校验,当前目录实际checkout的分支跟命令行传的 `prod`/`dev` 参数对不上时直接报错退出,不会跑错目标。过程中还顺手修了两个环境遗留问题:`/opt`目录本身是root所有,ubuntu用户没权限直接建新目录,需要sudo建目录后chown;`/var/www/landlordeasy/landlord-h5-dev/`里有之前一次sudo误操作留下的root所有权文件,挡住了新的cp操作,同样sudo chown修复。如何验证——不是只做完配置就假设能用,做了一次完整的端到端回归:①在dev worktree里跑 `deploy.sh dev` 完整成功,`dev.landlordeasy.cn` 健康检查+真实浏览器打开确认正常;②故意在 `/opt/landlord-easy`(main分支)目录里跑 `deploy.sh dev`,确认被脚本自己的分支校验直接拒绝退出,没有执行到任何有副作用的步骤,生产站点未受影响;③做了一次真实的"改动→部署→观察→回滚→重新部署→确认恢复"完整闭环:在 `Login.vue` 标题加一个仅用于验证的测试标记,只推到 `dev` 分支,部署到dev worktree,真实浏览器分别打开 `dev.landlordeasy.cn`(看到测试标记)和 `landlordeasy.cn`(生产,完全没有这个标记,确认隔离生效)截图对比;然后在 `dev` 分支上 `git revert` 这个测试commit并重新部署,浏览器复核dev也恢复原样;全程用 `git log`/`git diff` 核实 `main` 分支历史自始至终没有出现过这次测试commit,`dev`/`main` 当前文件内容完全一致(revert完全抵消)。
 > **新工作流(供以后所有会话遵守)**:日常改动先提交到 `dev` 分支 → 部署到 `/opt/landlord-easy-dev` 测试 → 觉得不对就在 `dev` 分支上 revert/reset,不影响生产 → 测试满意后把 `dev` 合并进 `main` → 对 `/opt/landlord-easy` 跑 `deploy.sh prod` 才是真正上线。README.md「服务器部署」一节已同步更新。
 
+## M15 批量建房体验修复 + 发现并修复dev环境PM2部署bug(2026-08-24)
+
+> 背景:GasCan 实测"批量建房"页反馈4点问题:①楼栋/房型横排单选选项一多很挤;②只填起始房号不填结束房号,点提交没反应;③只建1间也要填两次房号;④已有101房间又建101,提示"成功创建0个房间"却不说原因。GasCan 明确要求"你自己测完之后再给我",并授权自由发挥改善体验。
+
+- [x] 15.1 **批量建房页4点体验问题修复,并在自测过程中额外发现2个真实bug。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核+独立验证,2026-08-24): 改了什么——
+> ①`apps/landlord-h5/src/views/rooms/BatchCreate.vue`:楼栋/房型从横排radio改成点击弹出`van-picker`底部选择器;`endRoom`字段去掉必填规则,placeholder改成"留空则只建1间";`van-form`加`@failed`事件,校验失败(如漏填起始房号)用toast明确提示,不再"点提交没反应";提交成功后如果后端返回`skipped`非空,toast同时告知创建了几间、哪些房号已存在未创建。
+> ②`apps/server/src/rooms/rooms.dto.ts`:`BatchCreateRoomsDto.endRoom`从必填改可选。
+> ③`apps/server/src/rooms/rooms.service.ts`:`endRoom`留空时默认等于`startRoom`(只建1间);批量创建前先查这批房号里哪些已存在,若**全部**已存在则直接抛`BadRequestException`说明"房号xxx均已存在,未创建任何房间",不再像原来那样静默返回`created:0`;若**部分**重复,创建不重复的那些并在返回值里带上`skipped`列表。
+> ④(Claude Code自测中发现的真实bug,追加修复)`rooms.service.ts`补上楼栋存在性校验:MySQL下Prisma的`createMany`+`skipDuplicates:true`实际走`INSERT IGNORE`语义,会把外键约束失败也一并静默吞掉——如果`buildingId`无效,不校验的话会返回"成功但created:0"这种误导性假成功,跟原问题④是同一类缺陷。提前查一下楼栋是否存在,不存在直接报错"楼栋不存在,请重新选择"。
+>
+> 如何验证——`vue-tsc -b`、`pnpm --filter server exec tsc --noEmit`、`pnpm --filter server test`(15项全过)、两端`build`均独立重跑通过。**已用真实浏览器验证界面正常**:在`dev.landlordeasy.cn`完整走了4轮场景——①楼栋/房型点击弹出底部选择器、选中后正确回显;②起始房号=888、结束房号留空提交,toast"成功创建1间房",SQL查库确认Q栋只多了1条roomNo=888的记录;③同样参数再提交一次,页面停留原地弹出"房号 888 均已存在,未创建任何房间"错误提示(不是静默假成功);④起始887/结束889再提交,toast同时提示创建数量和跳过的888,SQL查库确认887/889新建、888未被覆盖/未重复。测试产生的临时房间数据已清理(留了一条887/889期间被其他会话的e2e测试意外关联了lease的888号房未删,不影响,系统未上线数据会重新初始化)。
+>
+> **自测过程中意外发现并修复了一个更严重的部署基础设施bug(15.2),导致这次UI/后端改动一开始部署后其实完全没有生效**,详见下条。
+
+- [x] 15.2 **`landlordeasy-server-dev` 这个PM2进程从M14 dev/prod worktree拆分开始,就一直错误地指向`/opt/landlord-easy`(生产目录)而不是`/opt/landlord-easy-dev`,导致dev环境的所有后端代码更新此前实际从未真正生效过,`deploy.sh dev`一直在反复重启的其实是生产的旧代码。**
+> 背景——15.1改完部署到dev后,Claude Code自测发现后端行为完全没变(`endRoom`留空仍报英文类错误`endRoom必须为文本`)。排查过程:核对本地/服务器`dist`文件内容确认新代码确实编译正确 → 用`ps`/`readlink /proc/<pid>/cwd`直接查PM2进程实际运行的文件,发现`landlordeasy-server-dev`的`cwd`和`script path`都指向`/opt/landlord-easy`而不是`/opt/landlord-easy-dev` → 确认根因:`pm2 restart <name>`只会重启已注册的进程,不会更新它的cwd/script路径,而这个进程从M14拆分dev/prod worktree时就从未被正确重新注册过,`deploy.sh`里的`if pm2 describe X 存在 then restart`逻辑只要"进程名存在"就直接信任并restart,从不校验它是否指向对的目录——M14当时的"端到端回归验证"用的是前端(Login.vue标题标记)测试,前端静态文件确实是分开部署到独立目录的,所以那次验证是真实通过的,但从未测试过后端专属改动,这个bug才一直没被发现。
+> 完成说明(Claude Code,2026-08-24): 改了什么——①一次性手动修复:`pm2 delete landlordeasy-server-dev` + 用正确的`--cwd /opt/landlord-easy-dev`重新`pm2 start`,`pm2 save`;②根治`deploy/deploy.sh`:重启PM2进程前,不再是"存在就直接restart",改成先读取已注册进程的`pm2_env.pm_cwd`跟本次部署目录比对,不一致就先`pm2 delete`再重新`start`,一致才`restart`,prod/dev共用同一个`restart_pm2_process`函数,以后即使再发生"进程注册目录跟worktree拆分后的实际目录对不上"这种情况,`deploy.sh`会自动纠正而不是静默继续用旧代码。如何验证——`bash -n deploy/deploy.sh`语法检查通过;手动修复后用`readlink -f /proc/<pid>/cwd`和`cat /proc/<pid>/cmdline`确认新进程真的绑定`/opt/landlord-easy-dev`;重新跑一次`deploy.sh dev`(带着新的校验逻辑),因为这次cwd已经一致,走的是正常`pm2 restart`分支,没有重新触发delete+recreate,进程保持正确;之后15.1的批量建房场景重新在dev上验证,行为符合新代码预期(见15.1)。**这个bug只影响dev环境的后端更新是否真正生效,不影响生产**——生产的PM2进程`landlord-easy`本身一直就指向`/opt/landlord-easy`(生产worktree本来就是这个目录),从未有过同类问题。
+
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
 
