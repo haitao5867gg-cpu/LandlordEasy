@@ -76,6 +76,13 @@ export class RoomsService {
       throw new BadRequestException('房间号区间无效');
     }
 
+    // 提前校验楼栋是否存在: MySQL 下 createMany 的 skipDuplicates 实际走 INSERT IGNORE,
+    // 会把外键约束失败也一并静默吞掉,不校验的话无效 buildingId 会返回"成功但created:0"的假成功。
+    const building = await this.prisma.building.findUnique({ where: { id: dto.buildingId } });
+    if (!building) {
+      throw new BadRequestException('楼栋不存在,请重新选择');
+    }
+
     const roomNos = [];
     for (let num = startNum; num <= endNum; num++) {
       roomNos.push(num.toString());
