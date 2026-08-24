@@ -8,6 +8,7 @@
         <template #value>
           <van-tag :type="l.isActive ? 'success' : 'default'">{{ l.isActive ? '启用' : '禁用' }}</van-tag>
           <van-button v-if="l.isActive" size="mini" type="danger" style="margin-left:8px" @click="handleDisable(l.id)">禁用</van-button>
+          <van-button v-else size="mini" type="primary" style="margin-left:8px" @click="handleEnable(l.id)">启用</van-button>
         </template>
       </van-cell>
     </van-cell-group>
@@ -40,6 +41,14 @@ async function handleDisable(id: number) {
   try {
     await http.delete(`/admin/landlords/${id}`);
     showToast('已禁用');
+    await fetchList();
+  } catch { /* error handled by interceptor */ }
+}
+
+async function handleEnable(id: number) {
+  try {
+    await http.put(`/admin/landlords/${id}`, { isActive: true });
+    showToast('已启用');
     await fetchList();
   } catch { /* error handled by interceptor */ }
 }

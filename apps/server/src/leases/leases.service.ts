@@ -103,6 +103,9 @@ export class LeasesService {
 
     // 押金结算
     const depositAmount = Number(lease.deposit);
+    if (dto.depositRefund > depositAmount) {
+      throw new BadRequestException('退还押金不能超过实际押金金额');
+    }
     if (dto.depositRefund > 0) {
       await this.prisma.depositRecord.create({
         data: {
@@ -151,6 +154,9 @@ export class LeasesService {
     if (!lease) throw new NotFoundException('租约不存在');
     if (lease.status !== 'ACTIVE') {
       throw new BadRequestException('只能续签活跃租约');
+    }
+    if (new Date(dto.newEndDate) <= lease.startDate) {
+      throw new BadRequestException('新到期日不能早于或等于起租日');
     }
 
     return this.prisma.lease.update({

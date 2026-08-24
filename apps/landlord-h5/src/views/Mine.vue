@@ -14,9 +14,16 @@
 </template>
 
 <script setup lang="ts">
+import { showConfirmDialog } from 'vant';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 const router = useRouter();
 const authStore = useAuthStore();
-function handleLogout() { authStore.logout(); router.push('/login'); }
+async function handleLogout() {
+  try {
+    await showConfirmDialog({ title: '退出登录', message: '确定要退出登录吗?' });
+    authStore.logout();
+    router.push('/login');
+  } catch { /* 用户取消 */ }
+}
 </script>
