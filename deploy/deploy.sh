@@ -105,20 +105,45 @@ rm -f apps/server/tsconfig.tsbuildinfo
 pnpm --filter server build
 
 echo "=== 重启后端服务 ==="
-if [[ "$DEPLOY_TARGET" == "prod" ]]; then
-    # 用 PM2 管理 Node 进程。生产配置由 Node 显式加载，避免依赖登录 shell 环境。
-    if command -v pm2 &> /dev/null; then
-        if pm2 describe landlord-easy &> /dev/null; then
-            pm2 restart landlord-easy
+# `pm2 restart <name>` 只是重启已注册的进程，不会更新它的 cwd/script 路径——
+# 如果这个名字的进程当初是在错误的目录下注册的(比如 dev worktree 拆分前的
+# 历史遗留、或者手误在另一个目录跑了一次)，restart 只会不断重启那份错误路径
+# 下的旧代码，本次部署的新代码永远不会被真正加载，而且不会有任何报错，表现
+# 上跟"部署成功"一模一样(2026-08-24 真实踩过一次: landlordeasy-server-dev
+# 一直指向 /opt/landlord-easy 而不是 /opt/landlord-easy-dev)。这里在 restart
+# 前先核对已注册进程的 cwd 是否跟本次部署目录一致，不一致就先删除重建，而不
+# 是无条件相信"这个名字的进程存在"就等于"指向了对的地方"。
+restart_pm2_process() {
+    local name="$1"
+    local expected_cwd="$2"
+    local env_file="$3"
+    local main_js="$4"
+
+    if pm2 describe "$name" &> /dev/null; then
+        local actual_cwd
+        actual_cwd="$(pm2 jlist | node -e '
+            const list = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const p = list.find((x) => x.name === process.argv[1]);
+            process.stdout.write((p && p.pm2_env && p.pm2_env.pm_cwd) || "");
+        ' "$name")"
+        if [[ "$actual_cwd" != "$expected_cwd" ]]; then
+            echo "警告: PM2 进程 $name 当前绑定目录($actual_cwd)与本次部署目录($expected_cwd)不一致,重新创建该进程。"
+            pm2 delete "$name"
+            pm2 start /usr/bin/node --name "$name" --cwd "$expected_cwd" -- --env-file="$env_file" "$main_js"
         else
-            pm2 start /usr/bin/node \
-                --name landlord-easy \
-                --cwd "$PROJECT_ROOT" \
-                -- \
-                --env-file="$PROJECT_ROOT/apps/server/.env" \
-                "$PROJECT_ROOT/apps/server/dist/main.js"
+            pm2 restart "$name"
         fi
-        pm2 save
+    else
+        pm2 start /usr/bin/node --name "$name" --cwd "$expected_cwd" -- --env-file="$env_file" "$main_js"
+    fi
+    pm2 save
+}
+
+if [[ "$DEPLOY_TARGET" == "prod" ]]; then
+    # 生产配置由 Node 显式加载，避免依赖登录 shell 环境。
+    if command -v pm2 &> /dev/null; then
+        restart_pm2_process "landlord-easy" "$PROJECT_ROOT" \
+            "$PROJECT_ROOT/apps/server/.env" "$PROJECT_ROOT/apps/server/dist/main.js"
     else
         echo "PM2 未安装,执行: npm install -g pm2"
         echo "然后: pm2 start apps/server/dist/main.js --name landlord-easy"
@@ -126,17 +151,8 @@ if [[ "$DEPLOY_TARGET" == "prod" ]]; then
 else
     # dev 配置由 Node 显式加载独立的 .env.dev 文件。
     if command -v pm2 &> /dev/null; then
-        if pm2 describe landlordeasy-server-dev &> /dev/null; then
-            pm2 restart landlordeasy-server-dev
-        else
-            pm2 start /usr/bin/node \
-                --name landlordeasy-server-dev \
-                --cwd "$PROJECT_ROOT" \
-                -- \
-                --env-file="$PROJECT_ROOT/apps/server/.env.dev" \
-                "$PROJECT_ROOT/apps/server/dist/main.js"
-        fi
-        pm2 save
+        restart_pm2_process "landlordeasy-server-dev" "$PROJECT_ROOT" \
+            "$PROJECT_ROOT/apps/server/.env.dev" "$PROJECT_ROOT/apps/server/dist/main.js"
     else
         echo "PM2 未安装,执行: npm install -g pm2"
         echo "然后按 dev 配置启动 landlordeasy-server-dev"
