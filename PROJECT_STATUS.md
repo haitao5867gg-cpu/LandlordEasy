@@ -222,3 +222,35 @@ GasCan 明确说了"接下来我需要跟你一起不断优化这个产品"—�
 - **9.12 e2e 真实跑通时抓到两个当前生产环境的活跃bug**（代码审查完全看不出来，必须真实运行才发现）：①`NewLease.vue` "签约成功"弹窗无法关闭（Vant Dialog死锁）；②`tenant-api.controller.ts` 的 `BindInviteCodeDto` 缺 class-validator 装饰器，导致**租客绑定邀请码在当前生产环境完全失败**——跟 questions.md Q3 点名警告过的 `LoginDto` 同一类问题又犯了一次，顺手排查修复了 `admin.controller.ts` 另外3个同样零装饰器的DTO。两个修复已部署到生产服务器并验证。
 - **M10 dev环境隔离（10.5~10.9）全部完成**：`dev.landlordeasy.cn` 已配好HTTPS（Let's Encrypt证书，反代3001端口独立后端+独立静态目录+独立 `landlordeasy_dev` 数据库），真实浏览器走通"登录→新签租约→关闭成功弹窗"全流程，确认与生产库物理隔离。过程中发现 `deploy.sh` 在用 `sudo` 执行时会因为PM2按用户隔离而误建重复进程（已处理，记为技术债10.10）。
 - **当前 `specs/tasks.md` 唯一剩余的未完成任务**：9.4（可选，交接管理CRUD接口）和 10.10（deploy.sh用户校验技术债），均不紧急不阻塞。
+  > **以下这条已过期，见下方新的一节**：9.4 和 10.10 当天稍后都已经完成了，不再是"剩余任务"。
+
+---
+
+## 最新状态：2026-08-23（同一天延续，架构review修复 + dev/prod git物理隔离，这是当前最新的交接快照）
+
+> 这一节覆盖上方所有更早的状态。新会话直接看这一节就够，不需要再往上翻——上面的历史记录留着是为了能查到"为什么会是这样"，但"现在是什么状态"以这一节为准。
+
+### 这次会话做完的事（按时间顺序）
+
+1. **历史数据导入(M12)、备份cron修复、备案号footer/tabbar遮挡修复(M12续)**——已完成，见上方 2026-08-21/22 章节，不重复。
+2. **9.4 交接管理CRUD接口**：新增 `apps/server/src/handover/` 模块，已部署生产并验证。
+3. **9.11/9.12 e2e测试首次真实跑通，抓到并修复两个生产bug**（新签租约弹窗死锁、租客绑定邀请码接口全挂）——已完成部署验证。
+4. **M10 dev环境隔离(10.5~10.9)全部完成**：`dev.landlordeasy.cn` 配好HTTPS，独立后端(3001端口)+独立静态目录+独立 `landlordeasy_dev` 数据库。
+5. **M13 架构review修复**：GasCan 要求"作为架构师整体review一遍"，系统抽查全部DTO/guard/CORS/token处理后给出6条发现，其中4条范围明确的当场修复并部署：①去掉不必要的 `enableCors()`；②加 `@nestjs/throttler` 全局限流+登录接口更严格限流；③`ConfirmPaymentDto.action` 从 `@IsString()` 收紧成 `@IsIn()`；④`HandoverRecord` 补 `operatorId` 字段(schema变更，已按标准流程走dev验证→生产备份→生产push→部署)。另外2条(`Bill.status.CANCELED`死状态、`AuditLog`审查时的误判)记录但不处理，前者需要产品决策，后者是审查者自己看漏了已有的全局 `AuditLogInterceptor`，当场纠正不是遗留问题。
+6. **M14：dev/prod 从"共用一份checkout"改成真正的 git worktree 物理隔离**（GasCan 主动要求，明确说了"需要能回滚"）：
+   - 新建 `dev` 分支(从 `main` 切出)，服务器新增 `/opt/landlord-easy-dev` worktree 跟着 `dev` 分支；`/opt/landlord-easy` 继续跟 `main`(生产不变)。
+   - `deploy.sh` 重写成不再硬编码 `/opt/landlord-easy`，动态识别自己所在目录+校验分支匹配，用错目录直接拒绝执行。
+   - **做了一次完整的端到端回归验证**（不是只搭好就假设能用）：在 `dev` 分支加测试标记→部署→浏览器对比确认dev有、生产没有→`dev`分支revert→重新部署→确认恢复原样，全程 `main` 历史没有出现过测试commit。
+   - **新工作流生效**：日常改动先推 `dev` 分支+部署到 `dev.landlordeasy.cn` 测试，GasCan 觉得没问题后告知"推到生产"，再把 `dev` 合并进 `main`、对 `/opt/landlord-easy` 执行 `deploy.sh prod`。**代码类改动这个流程可以很快**(不需要重新走一遍"备份→验证→部署"全套，因为服务器上代码已经拉好build好，promote到prod只是重启prod进程)；**但涉及数据库schema变更的改动，dev测过依然不能跳过生产库的备份/验证流程**，这是两件独立的事。
+
+### 下次接手时需要知道的几个坑（避免重踩）
+
+- **访问 dev 环境必须带 `?mock_openid=xxx` 这个URL参数**，不能只访问 `https://dev.landlordeasy.cn/login`。前端 `Login.vue` 的 mock/real 模式判断只看 hostname 是不是 `localhost`/`127.0.0.1`，或者 URL 有没有带这个query参数——跟后端的 `WECHAT_MODE=mock` 是两套完全独立的判断逻辑，混为一谈会导致真实测试时页面直接跳去微信授权、报"请在微信客户端打开链接"。完整URL示例：`https://dev.landlordeasy.cn/login?mock_openid=mock_landlord_001`（房东端，对应种子数据"张大海"）、`https://dev.landlordeasy.cn/tenant/login?mock_openid=随便填`（租客端）。
+- **这台Mac的Node是v26.3.1，比较新，跟 `@nestjs/cli@10.x` 的webpack编译链不兼容**，`nest build`/`nest start` 会间歇性静默失败(退出码0但不产出dist，没有任何报错)。本机额外装了 keg-only 的 Node 20(`brew install node@20`，不会影响默认Node版本)专门用来跑本地server build，命令模式：`PATH="/opt/homebrew/opt/node@20/bin:$PATH" node_modules/.bin/nest build`(在 `apps/server` 目录下跑)。**服务器上的Node版本没这个问题**，`deploy.sh` 在服务器上跑 `pnpm --filter server build` 是稳定的，这个坑只影响本机开发调试。
+- **服务器访问GitHub经常超时**(`git pull`/`git push` 单次失败率不低，但重试几次通常能成功)，这是国内服务器访问GitHub的已知不稳定问题，不是配置错误，重试就好，不用深究。
+- **`deploy.sh` 不能用 `sudo` 执行**，会因为PM2按用户隔离误建重复进程；`nginx -t`/`systemctl reload nginx` 这两步需要root权限，服务器已经配了最小权限的 `/etc/sudoers.d/deploy-nginx` 只授权这两条命令，脚本内部自动用 `sudo -n` 调用，不需要手动处理。
+- **`/opt` 目录本身归 root 所有**，ubuntu用户不能直接在 `/opt` 下新建目录/文件，需要sudo建好再chown。如果以后要在服务器新建类似 `/opt/landlord-easy-dev` 这样的顶层目录，记得这一步。
+
+### 当前 `specs/tasks.md` 状态
+
+**所有任务checkbox均为完成状态**，M9~M14全部完成，`Task Dependency Graph` 的 `waves` 为空数组。截至这次会话结束，没有已知的未完成任务或阻塞项。
