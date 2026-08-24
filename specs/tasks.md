@@ -359,6 +359,30 @@
 > 背景——15.1改完部署到dev后,Claude Code自测发现后端行为完全没变(`endRoom`留空仍报英文类错误`endRoom必须为文本`)。排查过程:核对本地/服务器`dist`文件内容确认新代码确实编译正确 → 用`ps`/`readlink /proc/<pid>/cwd`直接查PM2进程实际运行的文件,发现`landlordeasy-server-dev`的`cwd`和`script path`都指向`/opt/landlord-easy`而不是`/opt/landlord-easy-dev` → 确认根因:`pm2 restart <name>`只会重启已注册的进程,不会更新它的cwd/script路径,而这个进程从M14拆分dev/prod worktree时就从未被正确重新注册过,`deploy.sh`里的`if pm2 describe X 存在 then restart`逻辑只要"进程名存在"就直接信任并restart,从不校验它是否指向对的目录——M14当时的"端到端回归验证"用的是前端(Login.vue标题标记)测试,前端静态文件确实是分开部署到独立目录的,所以那次验证是真实通过的,但从未测试过后端专属改动,这个bug才一直没被发现。
 > 完成说明(Claude Code,2026-08-24): 改了什么——①一次性手动修复:`pm2 delete landlordeasy-server-dev` + 用正确的`--cwd /opt/landlord-easy-dev`重新`pm2 start`,`pm2 save`;②根治`deploy/deploy.sh`:重启PM2进程前,不再是"存在就直接restart",改成先读取已注册进程的`pm2_env.pm_cwd`跟本次部署目录比对,不一致就先`pm2 delete`再重新`start`,一致才`restart`,prod/dev共用同一个`restart_pm2_process`函数,以后即使再发生"进程注册目录跟worktree拆分后的实际目录对不上"这种情况,`deploy.sh`会自动纠正而不是静默继续用旧代码。如何验证——`bash -n deploy/deploy.sh`语法检查通过;手动修复后用`readlink -f /proc/<pid>/cwd`和`cat /proc/<pid>/cmdline`确认新进程真的绑定`/opt/landlord-easy-dev`;重新跑一次`deploy.sh dev`(带着新的校验逻辑),因为这次cwd已经一致,走的是正常`pm2 restart`分支,没有重新触发delete+recreate,进程保持正确;之后15.1的批量建房场景重新在dev上验证,行为符合新代码预期(见15.1)。**这个bug只影响dev环境的后端更新是否真正生效,不影响生产**——生产的PM2进程`landlord-easy`本身一直就指向`/opt/landlord-easy`(生产worktree本来就是这个目录),从未有过同类问题。
 
+## M16 房东端全模块回归测试 + 10项发现问题修复(2026-08-24)
+
+> 背景:GasCan 要求"针对房东端所有模块撰写测试用例让 Kiro CLI 去测试,覆盖所有场景,体验不好就优化",并明确"我是项目负责人,Kiro CLI 是干活的,我负责最终质量把关"。这是继 M15 批量建房修复之后,同一天延续的更大范围工作。
+
+- [x] 16.1 **设计覆盖房东端全部16个功能模块的测试计划,交给 Kiro CLI 用 Playwright 分4批实现并对着 dev.landlordeasy.cn 执行(不依赖本地Docker/build,用真实历史数据而不是空种子库),Claude Code 独立复核每一批。**
+> 完成说明(Claude Code设计+复核,Kiro CLI实现执行,2026-08-24): 改了什么——新增 `e2e/LANDLORD_TEST_PLAN.md`(测试计划,先用 Explore agent 摸底全部20个页面的功能点/校验规则/API调用作为设计输入,再逐模块列出正常流程+边界场景+体验检查点,共 80+ 条用例)和 `e2e/dev-remote.config.ts`(不依赖本地环境,baseURL直接指向dev环境,用系统Chrome规避Playwright自带Chromium下载问题)。分4批把测试计划交给 Kiro CLI 实现成 `e2e/tests/landlord-*.spec.ts` 四个文件并实际执行,每批完成后 Claude Code 独立用 `git status`/`git diff --stat` 核实改动范围、审查 diff、复核报告内容,不直接采信 Kiro 自述。
+>
+> 如何验证——最终80条用例全部通过或如实记录现象(不下"是bug"结论,只记录事实由 Claude Code 自己判断),写入 `e2e/LANDLORD_TEST_REPORT.md`。第一、二批测试因 Playwright worker 中途重启导致造数逻辑重复执行,dev 数据库一度残留285间测试房间/256份租约/237张账单/72条收款记录,Claude Code 独立发现后先用 `docker exec mysqldump` 打快照做安全网,再按外键依赖顺序(ReminderLog→Payment→BillItem→Bill→DepositRecord→HandoverRecord→Lease→AuditLog→Room→Tenant)写清理脚本清理,并额外发现6间更早遗留的测试房间(未打前缀)和1条M14会话残留的测试租约一并清理,最终核对房间/租约/押金/租客/房东/楼栋/房型/维修记录/支出记录九项统计与2026-08-21记录的历史真实数据基线**完全一致**。第三、四批测试因为在prompt里加了"避免重复造数"的明确要求,残留控制在个位数,且第四批涉及的高风险用例(禁用自己账号、删除有房间关联的真实楼栋Q栋、删除正被使用的真实房型)全部由 Kiro 在操作前先动态核实目标是真实数据、只走一次正规UI流程验证被拒绝、不绕过接口强制操作,过程全部记录在案,Claude Code 逐条核实确认无误操作。
+>
+> 结果——确认坐实的问题及严重程度评估见下方 16.2/16.3 的修复记录;另有3条记录为"已知功能缺口,不算bug"(手机号复用同一租客不覆盖姓名——GasCan确认这就是想要的设计;`Bill.status.CANCELED`死状态；测试过程本身未发现新的此类问题)。
+
+- [x] 16.2 **修复真实浏览器测试发现的3个高优先级问题(2个后端500崩溃+1个前端状态不同步)。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核+部署验证,2026-08-24): 改了什么——①`apps/server/src/maintenance/maintenance.service.ts`:新增维修记录前先校验 `roomId` 对应房间是否存在,不存在直接 `BadRequestException('房间不存在')`,而不是让 Prisma 外键约束错误冒泡成未处理异常被全局过滤器兜底成500。②`apps/server/src/dashboard/reports.service.ts`:`getMonthlyReport` 方法开头用正则校验 `month` 参数格式(`YYYY-MM`),不合法直接400,而不是让 `new Date()` 产出的 Invalid Date 传进 Prisma 查询导致500。③`apps/landlord-h5/src/views/rooms/RoomList.vue`:`onActivated` 钩子里补上 `fetchRooms()` 调用,keep-alive 恢复时重新拉取最新数据(保留原有楼栋/状态筛选),不再是"什么都不做"导致新签/退租后返回列表状态还是旧的。
+>
+> 如何验证——`tsc --noEmit`(server)、`vue-tsc -b`(landlord-h5)、`jest`(15/15)独立重跑通过;部署到 dev 后用 curl 直接验证:维修记录传不存在的 roomId 返回 `{"code":400,"message":"房间不存在"}`(此前是500),报表传"2026-13"返回 `{"code":400,"message":"月份格式不正确,请使用 YYYY-MM 格式"}`(此前是500)。
+
+- [x] 16.3 **修复7项体验/健壮性问题(续签退租校验、退出登录二次确认、白名单重新启用、工作台报表并发请求局部失败、逾期/空置页点击跳转和空状态、支出管理编辑删除、租约详情交接记录UI)。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核+部署验证,2026-08-24): 分3批实现,每批改动范围精确对应设计——
+> 批次A:`leases.service.ts` 续签校验新到期日不能早于/等于起租日、退租校验退还押金不能超过实际押金;`Mine.vue` 退出登录加 `showConfirmDialog` 二次确认;`settings/Landlords.vue` 已禁用房东补"启用"按钮(后端接口早支持,前端一直没做入口)。
+> 批次B:`Home.vue`/`Reports.vue` 的 `Promise.all` 改成 `Promise.allSettled`,某个接口失败不再连累其余已成功的数据一起消失;`dashboard/Vacancy.vue`/`Overdue.vue` 补上 `van-empty` 空状态和点击跳转(分别跳房间详情/账单详情),体验对齐 `Expiring.vue`。
+> 批次C(范围最大):`Expenses.vue` 完整参照 `RoomTypes.vue` 的新增/编辑合一弹窗+delete-o二次确认删除模式补齐编辑/删除入口(后端 PUT/DELETE 接口早就支持);`leases/LeaseDetail.vue` 新增"交接记录"卡片组,对接此前只有后端接口、前端从未使用过的 `handover` 模块——展示交接记录列表(类型标签/时间/检查清单/备注),ACTIVE租约可"新增交接记录"(类型单选+动态检查项数组,参照 `NewLease.vue` 附加费用项的写法风格+备注)。
+>
+> 如何验证——`tsc --noEmit`/`vue-tsc -b`/`jest` 每批独立重跑通过,部署到 dev 后**已用真实浏览器验证界面正常**:支出记录点击打开编辑弹窗、字段正确回填、取消不改动真实数据;"退出登录"点击后正确弹出二次确认、取消不登出;空置看板/逾期看板房间和账单条目均可点击、正确跳转到对应详情页;租约详情页交接记录区块正确显示"暂无交接记录"+"新增交接记录"按钮(仅ACTIVE租约),新增弹窗类型单选、动态检查项行(项目+状况+删除)、"添加检查项"按钮均渲染正常,取消未提交改动真实历史租约。后端边界用curl在**专门新建的测试房间+测试租约**(而非真实历史租约)上验证:续签早于起租日的日期被拒绝(400)、合法日期续签成功、退租超额退还押金被拒绝(400)、合法金额退租成功,验证完清理了测试数据,核对数据库统计与基线一致。
+
 ## P2(暂不开工)
 微信支付自动销账、合同电子化
 
