@@ -25,6 +25,19 @@ model Landlord {
   @@map("landlords")
 }
 
+// ========== 公寓/园区 ==========
+model Property {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  sort      Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  buildings Building[]
+
+  @@map("properties")
+}
+
 // ========== 楼栋 ==========
 model Building {
   id        Int      @id @default(autoincrement())
@@ -33,6 +46,8 @@ model Building {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  propertyId Int?
+  property   Property? @relation(fields: [propertyId], references: [id])
   rooms    Room[]
   expenses Expense[] @relation("BuildingExpense")
 

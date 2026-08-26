@@ -1,4 +1,8 @@
 <template>
+  <div v-if="showTabbar" class="property-switcher" @click="showActionSheet = true">
+    <span>当前:{{ propertyLabel }}</span>
+    <van-icon name="arrow-down" />
+  </div>
   <div class="app-content" :class="{ 'with-tabbar': showTabbar }">
     <router-view v-slot="{ Component }">
       <keep-alive :include="['RoomList']">
@@ -17,14 +21,23 @@
     <van-tabbar-item to="/bills" icon="bill-o">账单</van-tabbar-item>
     <van-tabbar-item to="/mine" icon="user-o">我的</van-tabbar-item>
   </van-tabbar>
+  <van-action-sheet
+    v-model:show="showActionSheet"
+    :actions="propertyActions"
+    cancel-text="取消"
+    @select="onSelectProperty"
+  />
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
+import { usePropertyStore } from './stores/property';
 
 const route = useRoute();
+const propertyStore = usePropertyStore();
 const activeTab = ref(0);
+const showActionSheet = ref(false);
 
 const showTabbar = computed(() => {
   const hiddenRoutes = ['/login'];
@@ -32,12 +45,54 @@ const showTabbar = computed(() => {
 });
 
 const showIcpFooter = computed(() => route.path === '/mine');
+
+const propertyLabel = computed(() => {
+  if (propertyStore.currentPropertyId === null) {
+    return '全部公寓';
+  }
+  return propertyStore.properties.find((property) => property.id === propertyStore.currentPropertyId)?.name
+    || '全部公寓';
+});
+
+const propertyActions = computed(() => [
+  { name: '全部公寓' },
+  ...propertyStore.properties.map((property) => ({ name: property.name })),
+]);
+
+function onSelectProperty(_: any, index: number) {
+  if (index === 0) {
+    propertyStore.setCurrentProperty(null);
+  } else {
+    propertyStore.setCurrentProperty(propertyStore.properties[index - 1].id);
+  }
+  showActionSheet.value = false;
+}
+
+onMounted(() => {
+  propertyStore.fetchProperties();
+});
 </script>
 
 <style>
 body {
   margin: 0;
   background: #f7f8fa;
+}
+
+.property-switcher {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  color: #323233;
+  font-size: 14px;
+  background: #fff;
+  border-bottom: 1px solid #ebedf0;
+  box-sizing: border-box;
+  cursor: pointer;
 }
 
 .icp-footer {
