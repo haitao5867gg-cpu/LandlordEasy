@@ -8,9 +8,12 @@ export class PaymentsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /** 获取待确认的支付记录 */
-  async getPending() {
+  async getPending(propertyId?: number) {
     return this.prisma.payment.findMany({
-      where: { status: 'PENDING_CONFIRM' },
+      where: {
+        status: 'PENDING_CONFIRM',
+        ...(propertyId && { bill: { lease: { room: { building: { propertyId } } } } }),
+      },
       include: {
         bill: {
           include: { lease: { include: { room: { include: { building: true } }, tenant: true } } },

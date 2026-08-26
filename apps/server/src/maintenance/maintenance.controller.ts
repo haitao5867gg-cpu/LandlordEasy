@@ -11,8 +11,14 @@ export class MaintenanceController {
   constructor(private readonly maintenanceService: MaintenanceService) {}
 
   @Get()
-  findAll(@Query('roomId') roomId?: string) {
-    return this.maintenanceService.findAll(roomId ? parseInt(roomId) : undefined);
+  findAll(
+    @Query('roomId') roomId?: string,
+    @Query('propertyId') propertyId?: string,
+  ) {
+    return this.maintenanceService.findAll(
+      roomId ? parseInt(roomId) : undefined,
+      propertyId ? parseInt(propertyId) : undefined,
+    );
   }
 
   @Post()

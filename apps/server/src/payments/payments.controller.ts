@@ -23,8 +23,10 @@ export class PaymentsController {
   /** 房东:待确认列表 */
   @Get('pending')
   @UseGuards(LandlordGuard)
-  getPending() {
-    return this.paymentsService.getPending();
+  getPending(@Query('propertyId') propertyId?: string) {
+    return this.paymentsService.getPending(
+      propertyId ? parseInt(propertyId) : undefined,
+    );
   }
 
   /** 房东:确认或驳回 */

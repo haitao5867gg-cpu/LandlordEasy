@@ -41,10 +41,15 @@ export class BillsController {
   ) {}
 
   @Get()
-  findAll(@Query('leaseId') leaseId?: string, @Query('status') status?: string) {
+  findAll(
+    @Query('leaseId') leaseId?: string,
+    @Query('status') status?: string,
+    @Query('propertyId') propertyId?: string,
+  ) {
     return this.billsService.findAll(
       leaseId ? parseInt(leaseId) : undefined,
       status,
+      propertyId ? parseInt(propertyId) : undefined,
     );
   }
 

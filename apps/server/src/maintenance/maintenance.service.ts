@@ -6,8 +6,10 @@ import { CreateMaintenanceDto } from './maintenance.dto';
 export class MaintenanceService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(roomId?: number) {
-    const where = roomId ? { roomId } : {};
+  async findAll(roomId?: number, propertyId?: number) {
+    const where: Record<string, unknown> = {};
+    if (roomId) where.roomId = roomId;
+    if (propertyId) where.room = { building: { propertyId } };
     return this.prisma.maintenanceRecord.findMany({
       where,
       include: { room: { include: { building: true } } },

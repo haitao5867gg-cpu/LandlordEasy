@@ -7,10 +7,11 @@ export class RoomsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /** 按楼栋分组查询,支持状态筛选 */
-  async findAll(buildingId?: number, status?: string) {
+  async findAll(buildingId?: number, status?: string, propertyId?: number) {
     const where: Record<string, unknown> = {};
     if (buildingId) where.buildingId = buildingId;
     if (status) where.status = status;
+    if (propertyId) where.building = { propertyId };
 
     return this.prisma.room.findMany({
       where,

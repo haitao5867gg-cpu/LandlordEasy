@@ -5,10 +5,11 @@ import { PrismaService } from '../prisma/prisma.service';
 export class BillsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(leaseId?: number, status?: string) {
+  async findAll(leaseId?: number, status?: string, propertyId?: number) {
     const where: Record<string, unknown> = {};
     if (leaseId) where.leaseId = leaseId;
     if (status) where.status = status;
+    if (propertyId) where.lease = { room: { building: { propertyId } } };
 
     return this.prisma.bill.findMany({
       where,

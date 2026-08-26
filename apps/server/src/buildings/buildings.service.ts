@@ -5,8 +5,9 @@ import { PrismaService } from '../prisma/prisma.service';
 export class BuildingsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll() {
-    return this.prisma.building.findMany({ orderBy: { sort: 'asc' } });
+  async findAll(propertyId?: number) {
+    const where = propertyId ? { propertyId } : {};
+    return this.prisma.building.findMany({ where, orderBy: { sort: 'asc' } });
   }
 
   async findOne(id: number) {
