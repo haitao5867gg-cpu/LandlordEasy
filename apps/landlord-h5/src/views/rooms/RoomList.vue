@@ -38,14 +38,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onActivated } from 'vue';
+import { ref, onMounted, onActivated, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import http from '../../utils/http';
 import { roomStatusMap } from '../../utils/status';
+import { usePropertyStore } from '../../stores/property';
 
 defineOptions({ name: 'RoomList' });
 
 const router = useRouter();
+const propertyStore = usePropertyStore();
 const buildings = ref<any[]>([]);
 const rooms = ref<any[]>([]);
 const activeBuilding = ref(0);
@@ -75,12 +77,19 @@ function goDetail(roomId: number) {
   router.push(`/rooms/${roomId}`);
 }
 
+async function fetchBuildings() {
+  const params: Record<string, string> = {};
+  if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
+  buildings.value = await http.get('/buildings', { params }) as any;
+}
+
 async function fetchRooms() {
   loading.value = true;
   try {
     const params: Record<string, string> = {};
     if (activeBuilding.value) params.buildingId = String(activeBuilding.value);
     if (statusFilter.value) params.status = statusFilter.value;
+    if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
     rooms.value = await http.get('/rooms', { params }) as any;
   } finally {
     loading.value = false;
@@ -89,7 +98,7 @@ async function fetchRooms() {
 
 onMounted(async () => {
   if (!initialized.value) {
-    buildings.value = await http.get('/buildings') as any;
+    await fetchBuildings();
     await fetchRooms();
     initialized.value = true;
   }
@@ -100,6 +109,12 @@ onActivated(() => {
   if (initialized.value) {
     fetchRooms();
   }
+});
+
+watch(() => propertyStore.currentPropertyId, async () => {
+  await fetchBuildings();
+  activeBuilding.value = 0;
+  await fetchRooms();
 });
 </script>
 

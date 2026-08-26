@@ -57,8 +57,10 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../../utils/http';
+import { usePropertyStore } from '../../stores/property';
 
 const router = useRouter();
+const propertyStore = usePropertyStore();
 const buildings = ref<any[]>([]);
 const roomTypes = ref<any[]>([]);
 const loading = ref(false);
@@ -81,7 +83,9 @@ const selectedRoomTypeText = computed(
 );
 
 onMounted(async () => {
-  buildings.value = await http.get('/buildings') as any;
+  const params: Record<string, string> = {};
+  if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
+  buildings.value = await http.get('/buildings', { params }) as any;
   roomTypes.value = await http.get('/room-types') as any;
 });
 

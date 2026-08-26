@@ -33,10 +33,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, onMounted, watch } from 'vue';
 import { showToast, showConfirmDialog } from 'vant';
 import http from '../utils/http';
+import { usePropertyStore } from '../stores/property';
 
+const propertyStore = usePropertyStore();
 const list = ref<any[]>([]);
 const loading = ref(true);
 const showDialog = ref(false);
@@ -44,8 +46,16 @@ const isEdit = ref(false);
 const editId = ref<number | null>(null);
 const form = reactive({ date: '', category: '', name: '', amount: 0, remark: '' });
 
-async function fetchList() { list.value = await http.get('/expenses') as any; }
+async function fetchList() {
+  const params: Record<string, string> = {};
+  if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
+  list.value = await http.get('/expenses', { params }) as any;
+}
 onMounted(async () => { try { await fetchList(); } finally { loading.value = false; } });
+
+watch(() => propertyStore.currentPropertyId, () => {
+  fetchList();
+});
 
 function openAdd() {
   isEdit.value = false;
