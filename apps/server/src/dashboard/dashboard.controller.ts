@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { DashboardService } from './dashboard.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 
@@ -8,17 +8,17 @@ export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
 
   @Get('vacancy')
-  getVacancyBoard() {
-    return this.dashboardService.getVacancyBoard();
+  getVacancyBoard(@Query('propertyId') propertyId?: string) {
+    return this.dashboardService.getVacancyBoard(propertyId ? parseInt(propertyId) : undefined);
   }
 
   @Get('expiring')
-  getExpiringLeases() {
-    return this.dashboardService.getExpiringLeases();
+  getExpiringLeases(@Query('propertyId') propertyId?: string) {
+    return this.dashboardService.getExpiringLeases(propertyId ? parseInt(propertyId) : undefined);
   }
 
   @Get('overdue')
-  getOverdueBoard() {
-    return this.dashboardService.getOverdueBoard();
+  getOverdueBoard(@Query('propertyId') propertyId?: string) {
+    return this.dashboardService.getOverdueBoard(propertyId ? parseInt(propertyId) : undefined);
   }
 }

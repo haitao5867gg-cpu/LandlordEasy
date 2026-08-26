@@ -35,8 +35,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import http from '../utils/http';
+import { usePropertyStore } from '../stores/property';
+
+const propertyStore = usePropertyStore();
 const month = ref(new Date().toISOString().slice(0, 7));
 const report = ref<any>(null);
 const deposit = ref<any>(null);
@@ -44,14 +47,19 @@ const loading = ref(true);
 
 async function fetchReport() {
   loading.value = true;
+  const propertyParams: Record<string, string> = {};
+  if (propertyStore.currentPropertyId) propertyParams.propertyId = String(propertyStore.currentPropertyId);
   const [r, d] = await Promise.allSettled([
-    http.get('/dashboard/reports/monthly', { params: { month: month.value } }),
-    http.get('/dashboard/reports/deposit-summary'),
+    http.get('/dashboard/reports/monthly', { params: { month: month.value, ...propertyParams } }),
+    http.get('/dashboard/reports/deposit-summary', { params: propertyParams }),
   ]);
   if (r.status === 'fulfilled') report.value = r.value;
   if (d.status === 'fulfilled') deposit.value = d.value;
   loading.value = false;
 }
 onMounted(fetchReport);
+watch(() => propertyStore.currentPropertyId, () => {
+  fetchReport();
+});
 </script>
 <style scoped>.page-loading { display: flex; justify-content: center; padding: 60px; }</style>

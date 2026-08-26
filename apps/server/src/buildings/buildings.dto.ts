@@ -4,6 +4,9 @@ export class CreateBuildingDto {
   @IsString()
   name!: string;
 
+  @IsInt()
+  propertyId!: number;
+
   @IsOptional()
   @IsInt()
   @Min(0)
@@ -14,6 +17,10 @@ export class UpdateBuildingDto {
   @IsOptional()
   @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsInt()
+  propertyId?: number;
 
   @IsOptional()
   @IsInt()

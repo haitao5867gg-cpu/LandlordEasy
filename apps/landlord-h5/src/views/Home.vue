@@ -42,27 +42,37 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import http from '../utils/http';
+import { usePropertyStore } from '../stores/property';
 
+const propertyStore = usePropertyStore();
 const loading = ref(true);
 const vacantCount = ref(0);
 const expiringCount = ref(0);
 const overdueCount = ref(0);
 const pendingCount = ref(0);
 
-onMounted(async () => {
+async function fetchDashboard() {
+  loading.value = true;
+  const params: Record<string, string> = {};
+  if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
   const [vacancy, expiring, overdue, pending] = await Promise.allSettled([
-    http.get('/dashboard/vacancy'),
-    http.get('/dashboard/expiring'),
-    http.get('/dashboard/overdue'),
-    http.get('/payments/pending'),
+    http.get('/dashboard/vacancy', { params }),
+    http.get('/dashboard/expiring', { params }),
+    http.get('/dashboard/overdue', { params }),
+    http.get('/payments/pending', { params }),
   ]);
   if (vacancy.status === 'fulfilled') vacantCount.value = (vacancy.value as any).total || 0;
   if (expiring.status === 'fulfilled') expiringCount.value = Array.isArray(expiring.value) ? expiring.value.length : 0;
   if (overdue.status === 'fulfilled') overdueCount.value = (overdue.value as any).total || 0;
   if (pending.status === 'fulfilled') pendingCount.value = Array.isArray(pending.value) ? pending.value.length : 0;
   loading.value = false;
+}
+
+onMounted(fetchDashboard);
+watch(() => propertyStore.currentPropertyId, () => {
+  fetchDashboard();
 });
 </script>
 

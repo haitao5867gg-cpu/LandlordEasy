@@ -12,7 +12,7 @@ export class ReportsService {
    * - 净收益 = 实收 − 支出
    * - 空置率
    */
-  async getMonthlyReport(month: string, buildingId?: number) {
+  async getMonthlyReport(month: string, buildingId?: number, propertyId?: number) {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
       throw new BadRequestException('月份格式不正确,请使用 YYYY-MM 格式');
     }
@@ -27,6 +27,9 @@ export class ReportsService {
     };
     if (buildingId) {
       billsWhere.lease = { room: { buildingId } };
+    }
+    if (propertyId) {
+      billsWhere.lease = { room: { building: { propertyId } } };
     }
 
     const bills = await this.prisma.bill.findMany({
@@ -69,6 +72,9 @@ export class ReportsService {
       date: { gte: start, lt: end },
     };
     if (buildingId) expenseWhere.buildingId = buildingId;
+    if (propertyId) {
+      expenseWhere.building = { propertyId };
+    }
 
     const expenses = await this.prisma.expense.findMany({ where: expenseWhere });
     const totalExpense = expenses.reduce((sum, e) => sum + Number(e.amount), 0);
@@ -84,6 +90,9 @@ export class ReportsService {
     // 5. 空置率
     const roomFilter: Record<string, unknown> = {};
     if (buildingId) roomFilter.buildingId = buildingId;
+    if (propertyId) {
+      roomFilter.building = { propertyId };
+    }
 
     const totalRooms = await this.prisma.room.count({ where: roomFilter });
     const vacantRooms = await this.prisma.room.count({
@@ -116,8 +125,10 @@ export class ReportsService {
   }
 
   /** 押金总额 */
-  async getDepositSummary() {
-    const records = await this.prisma.depositRecord.findMany();
+  async getDepositSummary(propertyId?: number) {
+    const records = await this.prisma.depositRecord.findMany({
+      where: propertyId ? { lease: { room: { building: { propertyId } } } } : undefined,
+    });
 
     let totalReceived = 0;
     let totalRefunded = 0;

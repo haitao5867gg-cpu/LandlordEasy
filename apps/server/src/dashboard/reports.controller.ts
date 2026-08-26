@@ -13,13 +13,21 @@ export class ReportsController {
    * @param buildingId 可选,按楼栋筛选
    */
   @Get('monthly')
-  getMonthlyReport(@Query('month') month: string, @Query('buildingId') buildingId?: string) {
-    return this.reportsService.getMonthlyReport(month, buildingId ? parseInt(buildingId) : undefined);
+  getMonthlyReport(
+    @Query('month') month: string,
+    @Query('buildingId') buildingId?: string,
+    @Query('propertyId') propertyId?: string,
+  ) {
+    return this.reportsService.getMonthlyReport(
+      month,
+      buildingId ? parseInt(buildingId) : undefined,
+      propertyId ? parseInt(propertyId) : undefined,
+    );
   }
 
   /** 押金总额 */
   @Get('deposit-summary')
-  getDepositSummary() {
-    return this.reportsService.getDepositSummary();
+  getDepositSummary(@Query('propertyId') propertyId?: string) {
+    return this.reportsService.getDepositSummary(propertyId ? parseInt(propertyId) : undefined);
   }
 }

@@ -18,10 +18,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import http from '../../utils/http';
+import { usePropertyStore } from '../../stores/property';
+
+const propertyStore = usePropertyStore();
 const list = ref<any[]>([]);
 const loading = ref(true);
-onMounted(async () => { try { list.value = await http.get('/dashboard/expiring') as any; } finally { loading.value = false; } });
+
+async function fetchExpiring() {
+  loading.value = true;
+  const params: Record<string, string> = {};
+  if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
+  try {
+    list.value = await http.get('/dashboard/expiring', { params }) as any;
+  } finally {
+    loading.value = false;
+  }
+}
+
+onMounted(fetchExpiring);
+watch(() => propertyStore.currentPropertyId, () => {
+  fetchExpiring();
+});
 </script>
 <style scoped>.page-loading { display: flex; justify-content: center; padding: 60px; }</style>

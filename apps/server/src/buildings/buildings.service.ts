@@ -16,11 +16,11 @@ export class BuildingsService {
     return building;
   }
 
-  async create(data: { name: string; sort?: number }) {
+  async create(data: { name: string; sort?: number; propertyId: number }) {
     return this.prisma.building.create({ data });
   }
 
-  async update(id: number, data: { name?: string; sort?: number }) {
+  async update(id: number, data: { name?: string; sort?: number; propertyId?: number }) {
     await this.findOne(id);
     return this.prisma.building.update({ where: { id }, data });
   }
