@@ -718,10 +718,30 @@ async function importHistory(
     unassignedDepositEvents: 0,
   };
 
-  const buildingNames = ['Q栋', 'R栋', 'S栋', '明远公寓'];
-  await prisma.building.createMany({
-    data: buildingNames.map((name, sort) => ({ name, sort: sort + 1 })),
+  // 公寓/园区功能上线后(见 migrate-add-properties.ts)Building.propertyId 已是必填字段,这里补上
+  // 归属公寓。注意:本脚本后续逻辑(如 buildingByName 查找)多处依赖"明远公寓"这个楼栋名字本身
+  // 作为标识符,不能顺手改名成"1号楼"(那是 migrate-add-properties.ts 对现有数据做的一次性改名,
+  // 跟这里全新建库是两回事),否则会破坏脚本内部一致性。
+  const hongyiProperty = await prisma.property.upsert({
+    where: { name: '鸿翼人才公寓' },
+    update: {},
+    create: { name: '鸿翼人才公寓', sort: 1 },
   });
+  const mingyuanProperty = await prisma.property.upsert({
+    where: { name: '明远公寓' },
+    update: {},
+    create: { name: '明远公寓', sort: 2 },
+  });
+  const buildingDefs = [
+    { name: 'Q栋', propertyId: hongyiProperty.id },
+    { name: 'R栋', propertyId: hongyiProperty.id },
+    { name: 'S栋', propertyId: hongyiProperty.id },
+    { name: '明远公寓', propertyId: mingyuanProperty.id },
+  ];
+  await prisma.building.createMany({
+    data: buildingDefs.map((building, sort) => ({ ...building, sort: sort + 1 })),
+  });
+  const buildingNames = buildingDefs.map((building) => building.name);
   stats.buildings = buildingNames.length;
   const buildings = await prisma.building.findMany();
   const buildingByName = new Map(buildings.map((building) => [building.name, building]));

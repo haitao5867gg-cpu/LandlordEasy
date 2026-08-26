@@ -104,17 +104,6 @@ async function main(): Promise<void> {
     });
   });
 
-  const unassignedBuildings = await prisma.building.findMany({
-    where: { propertyId: null },
-    orderBy: { sort: 'asc' },
-    select: { name: true },
-  });
-  if (unassignedBuildings.length > 0) {
-    console.warn(
-      `⚠️ 仍有 ${unassignedBuildings.length} 栋楼未分配公寓：${unassignedBuildings.map((building) => building.name).join('、')}`,
-    );
-  }
-
   const properties = await prisma.property.findMany({
     where: { name: { in: [...PROPERTY_NAMES] } },
     orderBy: { sort: 'asc' },

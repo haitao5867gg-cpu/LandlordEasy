@@ -9,7 +9,6 @@
     "start:prod": "node dist/main",
     "lint": "eslint src/",
     "seed": "ts-node prisma/seed.ts",
-    "import:init": "ts-node src/scripts/import.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
