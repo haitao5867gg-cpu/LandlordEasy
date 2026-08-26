@@ -14,6 +14,7 @@
     </van-cell-group>
     <van-cell-group inset title="管理">
       <van-cell title="白名单管理" is-link @click="$router.push('/settings/landlords')" />
+      <van-cell title="公寓管理" is-link @click="$router.push('/settings/properties')" />
       <van-cell title="楼栋管理" is-link @click="$router.push('/settings/buildings')" />
     </van-cell-group>
   </div>
