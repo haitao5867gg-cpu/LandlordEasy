@@ -8,7 +8,7 @@ LandlordEasy 房屋收租系统。嘉定公寓,4~5 栋自建楼约 300 间房(�
 ## 协作方式
 - 用户(GasCan)只与 Claude 讨论;Claude 维护 specs/ 与 review/;Kiro(Windows, Opus 4.6)按 specs/tasks.md 开发并推送;疑问走 questions.md。规则详见 COLLABORATION.md
 - Claude 在 Cowork 中用仓库所有者的 fine-grained PAT 推拉(token 由用户每次会话提供,不入库);Kiro 走协作者邀请或另发 PAT
-- Claude 沙盒只通 github.com HTTPS,SSH/Gitee/api.github.com 均不通
+- ~~Claude 沙盒只通 github.com HTTPS,SSH/Gitee/api.github.com 均不通~~ ——**已过时,2026-08-27修正**:这条是更早期 Cowork 隔离云沙盒时代的记录,当时确实有出站限制。后来第220行已确认本机运行环境实际是 GasCan 自己的 Mac,不是隔离沙盒;2026-08-27 实测 github.com/api.github.com/gitee.com 的 HTTPS 均通(200),SSH 到 github.com:22 也通(能拿到 `Permission denied (publickey)` 这个协议层应答,说明网络层没被挡,只是没配对应 key)。目前 git remote 走 HTTPS+PAT,没有依赖 SSH 的必要,但如果未来需要用 SSH 也可以直接试,不用先入为主觉得不通。
 
 ## 基础设施(避免每次新会话重新问)
 - 生产服务器:腾讯云轻量应用服务器(上海),IP `111.229.167.29`,SSH 用户 `ubuntu`,密钥在 `/Users/gascan/LandLordEasy/LandLordEasy_SSHKey.pem`(不入库)。
