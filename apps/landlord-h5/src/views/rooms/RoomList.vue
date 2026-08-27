@@ -25,7 +25,6 @@
         v-for="room in rooms"
         :key="room.id"
         :title="`${room.roomNo}`"
-        :label="room.roomType?.name || ''"
         is-link
         @click="goDetail(room.id)"
       >
