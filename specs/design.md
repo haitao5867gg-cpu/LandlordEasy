@@ -72,8 +72,31 @@ packages/
 - 每日 09:00 定时任务:到期前3天 / 到期日 / 逾期每3天,调 WechatNotifyService,写 ReminderLog
 - 参数(3天等)放系统配置表或 .env,可调
 
-### 5.3 收款闭环(阶段一)
-租客点「我已付款」→ 创建 Payment(PENDING_CONFIRM, channel=QRCODE, 可传截图)→ 房东端待确认列表 → 确认后 Payment=CONFIRMED,账单实收累计 ≥ 应收则 Bill=PAID。房东也可直接为账单录入 CASH/TRANSFER 支付(直接 CONFIRMED)。
+### 5.3 收款闭环(2026-08-27更新:M18在线支付,取代原阶段一收款码流程)
+
+**保留不变**:房东手动记账入口(`POST /payments/manual`),直接创建 Payment(channel=CASH/TRANSFER, status=CONFIRMED),`checkBillPaid` 判断累计已确认金额 ≥ 应收则 Bill=PAID。这条路径完全不受本次改动影响。
+
+**下线**:原「我已付款」人工上报 + 房东确认流程(`channel=QRCODE`, `status=PENDING_CONFIRM` → 房东 `POST /payments/:id/confirm`)。租客端 `PayBill.vue` 的收款码/截图上传 UI 整体替换为下方在线支付流程。
+
+**新增:在线支付**
+- `Payment.channel` 新增 `ALIPAY`(`WECHATPAY` 已在原 schema 预留);新增 `outTradeNo`(系统生成的商户订单号,唯一索引,用于幂等)、`gatewayTradeNo`(网关返回的交易流水号,可空,回调时写入)
+- 只支持整单支付,创建订单时金额固定为 `bill.totalAmount`,不接受前端传入自定义金额
+- **PAYMENT_MODE(mock/real)**:仿照 `WECHAT_MODE` 的模式,新增环境变量 `PAYMENT_MODE=mock|real`。mock 模式下「创建订单」直接返回假的支付参数/二维码内容,不真实调用微信/支付宝接口;「模拟支付成功」提供一个仅 mock 模式可用的测试接口,直接触发回调处理逻辑,方便 dev 环境联调前端流程,不依赖真实商户资质。real 模式才真实调用微信/支付宝官方接口。
+
+**微信支付(JSAPI)**
+1. `POST /payments/wechat/create-order`:后端调微信统一下单 API(real 模式)或返回 mock 参数,创建 Payment(`channel=WECHATPAY`, `status=PENDING`, 记录 `outTradeNo`),返回前端拉起支付所需的 JSAPI 参数
+2. 前端调用 `WeixinJSBridge.invoke('getBrandWCPayRequest', ...)` 拉起微信支付弹窗
+3. `POST /payments/wechat/notify`:微信支付回调,验签后按 `outTradeNo` 查到对应 Payment,幂等更新为 `CONFIRMED`(同一 `outTradeNo` 只处理一次,重复回调直接返回成功不重复处理),`confirmedBy` 留空表示系统自动确认,随后走 `checkBillPaid`
+
+**支付宝(当面付,受微信内置浏览器拦截支付宝跳转限制,采用二维码方案)**
+1. `POST /payments/alipay/create-order`:调支付宝当面付预下单接口(`alipay.trade.precreate`,real 模式)或返回 mock 二维码内容,创建 Payment(`channel=ALIPAY`, `status=PENDING`),返回二维码图片内容(前端渲染为 `<van-image>` 展示,租客截图后用支付宝 App 扫码支付)
+2. `POST /payments/alipay/notify`:支付宝异步通知回调,验签(RSA)后按 `outTradeNo` 幂等更新 Payment 为 `CONFIRMED`,走 `checkBillPaid`
+
+**手动催缴(M18新增,与5.2自动催租提醒共用基础设施)**
+- `POST /bills/:id/remind`:单笔立即催,复用 `ReminderLog` 的当天防重复判断(同一账单当天已发送过则拒绝,提示"今天已经催过了")
+- `POST /bills/batch-remind`:批量催,传 billId 数组,逐个走上面同一逻辑,单笔失败不影响其他笔
+- 复用 5.2 已有的 `WechatNotifyService`(mock/real)和模板消息(`WECHAT_TEMPLATE_RENT_REMINDER`),不新增模板
+- `ReminderLog` 增加 `source` 字段(`AUTO`/`MANUAL`)区分触发来源,便于房东端展示催缴历史
 
 ### 5.4 滞纳金
 房东在逾期账单上一键「追加滞纳金」:新增 BillItem(type=LATE_FEE, amount 默认=该账单租金项金额, 可修改),更新 totalAmount。
