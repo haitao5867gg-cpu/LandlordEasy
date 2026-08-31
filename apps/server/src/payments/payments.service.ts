@@ -165,7 +165,7 @@ export class PaymentsService {
       description: `账单 #${billId}`,
       openid,
     });
-    return { outTradeNo, mode: this.paymentMode, wechatParams };
+    return { outTradeNo, mode: this.wechatPayMode, wechatParams };
   }
 
   async createAlipayOrder(
@@ -198,7 +198,7 @@ export class PaymentsService {
       margin: 2,
       errorCorrectionLevel: 'M',
     });
-    return { outTradeNo, mode: this.paymentMode, qrCodeImage };
+    return { outTradeNo, mode: this.alipayMode, qrCodeImage };
   }
 
   async handleWechatNotify(
@@ -207,7 +207,7 @@ export class PaymentsService {
     headers: NotifyHeaders = {},
   ) {
     let transaction = body;
-    if (this.paymentMode === 'real') {
+    if (this.wechatPayMode === 'real') {
       this.verifyWechatNotifyHeaders(headers, rawBody);
       transaction = this.decryptWechatResource(body);
     }
@@ -226,7 +226,7 @@ export class PaymentsService {
   }
 
   async handleAlipayNotify(body: AlipayNotifyBody) {
-    if (this.paymentMode === 'real') this.verifyAlipayNotify(body);
+    if (this.alipayMode === 'real') this.verifyAlipayNotify(body);
     if (
       body.trade_status &&
       !['TRADE_SUCCESS', 'TRADE_FINISHED'].includes(body.trade_status)
@@ -245,16 +245,18 @@ export class PaymentsService {
   }
 
   async simulateSuccess(outTradeNo: string) {
-    if (this.paymentMode !== 'mock') throw new NotFoundException();
     const payment = await this.prisma.payment.findUnique({
       where: { outTradeNo },
     });
     if (!payment) throw new NotFoundException('支付记录不存在');
-    if (payment.status !== 'PENDING') {
-      throw new BadRequestException('该支付记录不是待支付状态');
-    }
     if (!['WECHATPAY', 'ALIPAY'].includes(payment.channel)) {
       throw new BadRequestException('该支付记录不支持在线支付模拟');
+    }
+    const channelMode =
+      payment.channel === 'WECHATPAY' ? this.wechatPayMode : this.alipayMode;
+    if (channelMode !== 'mock') throw new NotFoundException();
+    if (payment.status !== 'PENDING') {
+      throw new BadRequestException('该支付记录不是待支付状态');
     }
     await this.confirmOnlinePayment(
       outTradeNo,
@@ -272,8 +274,12 @@ export class PaymentsService {
     });
   }
 
-  private get paymentMode(): string {
-    return process.env.PAYMENT_MODE || 'mock';
+  private get wechatPayMode(): string {
+    return process.env.WECHAT_PAY_MODE || process.env.PAYMENT_MODE || 'mock';
+  }
+
+  private get alipayMode(): string {
+    return process.env.ALIPAY_MODE || process.env.PAYMENT_MODE || 'mock';
   }
 
   private async getPayableTenantBill(

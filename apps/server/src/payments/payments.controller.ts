@@ -70,7 +70,13 @@ export class PaymentsController {
   /** 仅 mock 模式可见；real 模式必须表现为接口不存在。 */
   @Post('mock/simulate-success')
   mockSimulateSuccess(@Body() dto: MockSimulateSuccessDto) {
-    if ((process.env.PAYMENT_MODE || 'mock') !== 'mock') throw new NotFoundException();
+    const wechatPayMode =
+      process.env.WECHAT_PAY_MODE || process.env.PAYMENT_MODE || 'mock';
+    const alipayMode =
+      process.env.ALIPAY_MODE || process.env.PAYMENT_MODE || 'mock';
+    if (wechatPayMode === 'real' && alipayMode === 'real') {
+      throw new NotFoundException();
+    }
     return this.paymentsService.simulateSuccess(dto.outTradeNo);
   }
 

@@ -9,17 +9,20 @@ import { RealWechatPayService } from './gateways/real-wechat-pay.service';
 import { MockAlipayService } from './gateways/mock-alipay.service';
 import { RealAlipayService } from './gateways/real-alipay.service';
 
-const paymentMode = process.env.PAYMENT_MODE || 'mock';
+const wechatPayMode =
+  process.env.WECHAT_PAY_MODE || process.env.PAYMENT_MODE || 'mock';
+const alipayMode =
+  process.env.ALIPAY_MODE || process.env.PAYMENT_MODE || 'mock';
 
 const wechatPayProvider = {
   provide: WECHAT_PAY_SERVICE,
   useClass:
-    paymentMode === 'real' ? RealWechatPayService : MockWechatPayService,
+    wechatPayMode === 'real' ? RealWechatPayService : MockWechatPayService,
 };
 
 const alipayProvider = {
   provide: ALIPAY_SERVICE,
-  useClass: paymentMode === 'real' ? RealAlipayService : MockAlipayService,
+  useClass: alipayMode === 'real' ? RealAlipayService : MockAlipayService,
 };
 
 @Module({
