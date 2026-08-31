@@ -438,6 +438,7 @@
 ### 第二批:等 GasCan 申请到的商户资质到手后开工(当前阻塞,不要提前开始)
 
 - [ ] 18.7 **微信支付真实对接:PAYMENT_MODE切real,接入真实mch_id/APIv3密钥,调通统一下单API。**
+> 进度记录(2026-08-31,未勾选完成,真实下单联调还没跑,记录当前完成的前置工作): GasCan已完成微信支付商户号申请(mch_id=1117104714)+全部密钥材料准备(APIv3密钥/微信支付公钥+公钥ID/商户API证书私钥+序列号,共6项,全部已安全存入服务器`.env`和`.env.dev`,过程中排查确认从未落地到任何git提交或文档)+后台配置(AppID关联商户号、JSAPI支付授权目录)。补上了18.5遗留的已知缺口——`verifyWechatNotifyHeaders`原来只检查请求头是否存在,现已实现真正的"微信支付公钥"模式验签(微信2024年后推出的新机制,取代老式平台证书下载轮换方案,更简单):验签串按`${timestamp}\n${nonce}\n${rawBody}\n`构造,RSA-SHA256验证`Wechatpay-Signature`,`Wechatpay-Serial`必须匹配`WECHAT_PAY_PUBLIC_KEY_ID`否则拒绝(不支持老式平台证书模式,不静默降级)。为拿到验签必需的原始请求体字节,`main.ts`开启了NestJS官方的`rawBody:true`捕获,只影响`wechat/notify`这一个路由,其余接口不受影响。新增单测**现场生成真实RSA密钥对**签名+验签(不是mock掉crypto模块),覆盖正常验签通过、篡改body后签名不匹配被拒绝、Serial不匹配被拒绝三种场景,顺带完整跑通了AES-256-GCM解密链路。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(7套件53用例全过)。**下一步**:切dev环境`PAYMENT_MODE=real`,用刚配置好的真实材料做端到端联调,通了才勾选18.7完成。
 - [ ] 18.8 **支付宝真实对接:接入真实APPID/密钥,调通当面付预下单API,验签跑通。**
 - [ ] 18.9 **端到端真实小额资金验证(¥0.01~1):新建测试账单→真实扫码支付→确认回调自动销账→测试完成后原路退款给GasCan。**
 

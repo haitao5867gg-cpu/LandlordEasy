@@ -1,3 +1,8 @@
+import {
+  createCipheriv,
+  createSign,
+  generateKeyPairSync,
+} from 'crypto';
 import { PaymentsService } from './payments.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
@@ -10,6 +15,9 @@ describe('PaymentsService', () => {
   let wechatPayService: jest.Mocked<IWechatPayService>;
   let alipayService: jest.Mocked<IAlipayService>;
   const originalPaymentMode = process.env.PAYMENT_MODE;
+  const originalWechatPayPublicKey = process.env.WECHAT_PAY_PUBLIC_KEY;
+  const originalWechatPayPublicKeyId = process.env.WECHAT_PAY_PUBLIC_KEY_ID;
+  const originalWechatPayApiV3Key = process.env.WECHAT_PAY_APIV3_KEY;
 
   beforeEach(() => {
     delete process.env.PAYMENT_MODE;
@@ -38,6 +46,21 @@ describe('PaymentsService', () => {
   afterAll(() => {
     if (originalPaymentMode === undefined) delete process.env.PAYMENT_MODE;
     else process.env.PAYMENT_MODE = originalPaymentMode;
+    if (originalWechatPayPublicKey === undefined) {
+      delete process.env.WECHAT_PAY_PUBLIC_KEY;
+    } else {
+      process.env.WECHAT_PAY_PUBLIC_KEY = originalWechatPayPublicKey;
+    }
+    if (originalWechatPayPublicKeyId === undefined) {
+      delete process.env.WECHAT_PAY_PUBLIC_KEY_ID;
+    } else {
+      process.env.WECHAT_PAY_PUBLIC_KEY_ID = originalWechatPayPublicKeyId;
+    }
+    if (originalWechatPayApiV3Key === undefined) {
+      delete process.env.WECHAT_PAY_APIV3_KEY;
+    } else {
+      process.env.WECHAT_PAY_APIV3_KEY = originalWechatPayApiV3Key;
+    }
   });
 
   describe('confirmOrReject', () => {
@@ -422,6 +445,96 @@ describe('PaymentsService', () => {
         }),
       ).resolves.toEqual({ code: 'SUCCESS', message: '成功' });
       expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('微信支付回调公钥验签', () => {
+    const timestamp = '1725000000';
+    const nonce = 'wechat-notify-nonce';
+    const publicKeyId = 'PUB_KEY_ID_TEST';
+    const apiV3Key = '0123456789abcdef0123456789abcdef';
+    const resourceNonce = '0123456789ab';
+    const associatedData = 'transaction';
+    const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+    const cipher = createCipheriv(
+      'aes-256-gcm',
+      Buffer.from(apiV3Key, 'utf8'),
+      Buffer.from(resourceNonce, 'utf8'),
+    );
+    cipher.setAAD(Buffer.from(associatedData, 'utf8'));
+    const encryptedResource = Buffer.concat([
+      cipher.update(JSON.stringify({ trade_state: 'NOTPAY' }), 'utf8'),
+      cipher.final(),
+      cipher.getAuthTag(),
+    ]).toString('base64');
+    const body = {
+      id: 'notify-test',
+      resource: {
+        algorithm: 'AEAD_AES_256_GCM',
+        ciphertext: encryptedResource,
+        associated_data: associatedData,
+        nonce: resourceNonce,
+      },
+    };
+    const rawBody = Buffer.from(JSON.stringify(body), 'utf8');
+
+    const sign = (bodyToSign: Buffer) => {
+      const signer = createSign('RSA-SHA256');
+      signer.update(Buffer.from(`${timestamp}\n${nonce}\n`, 'utf8'));
+      signer.update(bodyToSign);
+      signer.update(Buffer.from('\n', 'utf8'));
+      signer.end();
+      return signer.sign(privateKey).toString('base64');
+    };
+
+    const headers = (bodyToSign: Buffer = rawBody) => ({
+      'wechatpay-timestamp': timestamp,
+      'wechatpay-nonce': nonce,
+      'wechatpay-signature': sign(bodyToSign),
+      'wechatpay-serial': publicKeyId,
+    });
+
+    beforeEach(() => {
+      process.env.PAYMENT_MODE = 'real';
+      process.env.WECHAT_PAY_PUBLIC_KEY = publicKey;
+      process.env.WECHAT_PAY_PUBLIC_KEY_ID = publicKeyId;
+      process.env.WECHAT_PAY_APIV3_KEY = apiV3Key;
+    });
+
+    it('使用真实 RSA 密钥对验证原始请求体签名', async () => {
+      await expect(
+        service.handleWechatNotify(body, rawBody, headers()),
+      ).resolves.toEqual({ code: 'SUCCESS', message: '成功' });
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('签名与原始请求体不匹配时拒绝回调', async () => {
+      const signedDifferentBody = Buffer.from('{"tampered":true}', 'utf8');
+
+      await expect(
+        service.handleWechatNotify(
+          body,
+          rawBody,
+          headers(signedDifferentBody),
+        ),
+      ).rejects.toThrow('微信回调签名无效');
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('Wechatpay-Serial 与配置的公钥 ID 不匹配时拒绝回调', async () => {
+      await expect(
+        service.handleWechatNotify(body, rawBody, {
+          ...headers(),
+          'wechatpay-serial': 'PUB_KEY_ID_OTHER',
+        }),
+      ).rejects.toThrow(
+        '微信回调 Wechatpay-Serial 与 WECHAT_PAY_PUBLIC_KEY_ID 不匹配',
+      );
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
     });
   });
 

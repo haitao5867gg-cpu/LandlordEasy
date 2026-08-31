@@ -8,6 +8,7 @@ import {
   ParseIntPipe,
   Post,
   Query,
+  RawBodyRequest,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -53,10 +54,11 @@ export class PaymentsController {
   /** 微信支付服务器公开回调，不使用 JWT Guard。 */
   @Post('wechat/notify')
   wechatNotify(
+    @Req() req: RawBodyRequest<Request>,
     @Body() body: WechatNotifyBody,
     @Headers() headers: Record<string, string | string[] | undefined>,
   ) {
-    return this.paymentsService.handleWechatNotify(body, headers);
+    return this.paymentsService.handleWechatNotify(body, req.rawBody, headers);
   }
 
   /** 支付宝服务器公开回调，不使用 JWT Guard。 */

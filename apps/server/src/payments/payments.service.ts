@@ -201,10 +201,14 @@ export class PaymentsService {
     return { outTradeNo, mode: this.paymentMode, qrCodeImage };
   }
 
-  async handleWechatNotify(body: WechatNotifyBody, headers: NotifyHeaders = {}) {
+  async handleWechatNotify(
+    body: WechatNotifyBody,
+    rawBody?: Buffer,
+    headers: NotifyHeaders = {},
+  ) {
     let transaction = body;
     if (this.paymentMode === 'real') {
-      this.verifyWechatNotifyHeaders(headers);
+      this.verifyWechatNotifyHeaders(headers, rawBody);
       transaction = this.decryptWechatResource(body);
     }
     if (transaction.trade_state && transaction.trade_state !== 'SUCCESS') {
@@ -323,17 +327,44 @@ export class PaymentsService {
     return { code: 'SUCCESS', message: '成功' };
   }
 
-  /**
-   * 第一批先校验微信回调签名头存在。正式启用 real 前，应接入微信平台证书，
-   * 使用原始请求体校验 Wechatpay-Signature；resource 解密已按 V3 规范实现。
-   */
-  private verifyWechatNotifyHeaders(headers: NotifyHeaders) {
-    const timestamp = headers['wechatpay-timestamp'];
-    const nonce = headers['wechatpay-nonce'];
-    const signature = headers['wechatpay-signature'];
-    const serial = headers['wechatpay-serial'];
+  /** 按微信支付公钥模式校验回调公钥 ID 和原始请求体签名。 */
+  private verifyWechatNotifyHeaders(
+    headers: NotifyHeaders,
+    rawBody: Buffer | undefined,
+  ) {
+    const readHeader = (name: string) => {
+      const value = headers[name];
+      return typeof value === 'string' ? value : undefined;
+    };
+    const timestamp = readHeader('wechatpay-timestamp');
+    const nonce = readHeader('wechatpay-nonce');
+    const signature = readHeader('wechatpay-signature');
+    const serial = readHeader('wechatpay-serial');
     if (!timestamp || !nonce || !signature || !serial) {
       throw new BadRequestException('微信回调签名头不完整');
+    }
+
+    const publicKeyId = process.env.WECHAT_PAY_PUBLIC_KEY_ID || '';
+    if (!publicKeyId) throw new Error('WECHAT_PAY_PUBLIC_KEY_ID 未配置');
+    if (serial !== publicKeyId) {
+      throw new BadRequestException(
+        '微信回调 Wechatpay-Serial 与 WECHAT_PAY_PUBLIC_KEY_ID 不匹配',
+      );
+    }
+    if (!rawBody) throw new BadRequestException('微信回调缺少原始请求体');
+
+    const verifier = createVerify('RSA-SHA256');
+    verifier.update(Buffer.from(`${timestamp}\n${nonce}\n`, 'utf8'));
+    verifier.update(rawBody);
+    verifier.update(Buffer.from('\n', 'utf8'));
+    verifier.end();
+    const publicKey = loadPemKey(
+      process.env.WECHAT_PAY_PUBLIC_KEY || '',
+      'WECHAT_PAY_PUBLIC_KEY',
+      'PUBLIC KEY',
+    );
+    if (!verifier.verify(publicKey, Buffer.from(signature, 'base64'))) {
+      throw new BadRequestException('微信回调签名无效');
     }
   }
 
