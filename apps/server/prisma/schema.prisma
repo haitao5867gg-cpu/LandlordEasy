@@ -181,7 +181,9 @@ model BillItem {
 model Payment {
   id          Int       @id @default(autoincrement())
   billId      Int
-  channel     String    // QRCODE / WECHATPAY / CASH / TRANSFER
+  channel     String    // QRCODE(废弃) / WECHATPAY / ALIPAY / CASH / TRANSFER
+  outTradeNo     String?   @unique @db.VarChar(64)
+  gatewayTradeNo String?   @db.VarChar(64)
   amount      Decimal   @db.Decimal(10, 2)
   status      String    @default("PENDING_CONFIRM") // PENDING_CONFIRM / CONFIRMED / REJECTED
   proofUrl    String?   @db.Text
@@ -255,6 +257,7 @@ model ReminderLog {
   type      String   // PRE / DUE / OVERDUE
   sentAt    DateTime @default(now())
   channel   String   @default("WECHAT")
+  source    String   @default("AUTO") @db.VarChar(10)
   success   Boolean  @default(true)
   createdAt DateTime @default(now())
 
