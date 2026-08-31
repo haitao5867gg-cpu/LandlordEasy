@@ -36,6 +36,7 @@ import { ref, onMounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../utils/http';
+import { createWechatRedirectUri } from '../utils/wechat-oauth';
 import { useAuthStore } from '../stores/auth';
 
 const router = useRouter();
@@ -86,7 +87,10 @@ async function handleLogin() {
 
 function redirectToWechat() {
   const appId = import.meta.env.VITE_WECHAT_APPID || '';
-  const redirectUri = encodeURIComponent(window.location.origin + '/login');
+  const redirectUri = createWechatRedirectUri(
+    window.location.origin,
+    import.meta.env.BASE_URL,
+  );
   const scope = 'snsapi_base';
   const url = `https://open.weixin.qq.com/connect/oauth2/authorize?appid=${appId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=tenant#wechat_redirect`;
   window.location.href = url;
