@@ -1,24 +1,76 @@
 import {
+  Body,
   Controller,
   Get,
-  Post,
+  Headers,
+  NotFoundException,
   Param,
-  Body,
-  Query,
-  UseGuards,
   ParseIntPipe,
+  Post,
+  Query,
   Req,
+  UseGuards,
 } from '@nestjs/common';
 import { Request } from 'express';
-import { PaymentsService } from './payments.service';
+import { PaymentsService, AlipayNotifyBody, WechatNotifyBody } from './payments.service';
+import {
+  ConfirmPaymentDto,
+  CreateOnlinePaymentDto,
+  ManualPaymentDto,
+  MockSimulateSuccessDto,
+  TenantReportPaymentDto,
+} from './payments.dto';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { TenantGuard } from '../auth/guards/tenant.guard';
-import { TenantReportPaymentDto, ManualPaymentDto, ConfirmPaymentDto } from './payments.dto';
 import { JwtPayload } from '../auth/auth.service';
 
 @Controller('payments')
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
+
+  @Post('wechat/create-order')
+  @UseGuards(TenantGuard)
+  createWechatOrder(@Body() dto: CreateOnlinePaymentDto, @Req() req: Request) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.paymentsService.createWechatOrder(
+      dto.billId,
+      user.tenantId,
+      user.openid,
+    );
+  }
+
+  @Post('alipay/create-order')
+  @UseGuards(TenantGuard)
+  createAlipayOrder(@Body() dto: CreateOnlinePaymentDto, @Req() req: Request) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.paymentsService.createAlipayOrder(
+      dto.billId,
+      user.tenantId,
+      user.openid,
+    );
+  }
+
+  /** 微信支付服务器公开回调，不使用 JWT Guard。 */
+  @Post('wechat/notify')
+  wechatNotify(
+    @Body() body: WechatNotifyBody,
+    @Headers() headers: Record<string, string | string[] | undefined>,
+  ) {
+    return this.paymentsService.handleWechatNotify(body, headers);
+  }
+
+  /** 支付宝服务器公开回调，不使用 JWT Guard。 */
+  @Post('alipay/notify')
+  alipayNotify(@Body() body: AlipayNotifyBody) {
+    return this.paymentsService.handleAlipayNotify(body);
+  }
+
+  /** 仅 mock 模式可见；real 模式必须表现为接口不存在。 */
+  @Post('mock/simulate-success')
+  mockSimulateSuccess(@Body() dto: MockSimulateSuccessDto) {
+    if ((process.env.PAYMENT_MODE || 'mock') !== 'mock') throw new NotFoundException();
+    return this.paymentsService.simulateSuccess(dto.outTradeNo);
+  }
 
   /** 房东:待确认列表 */
   @Get('pending')
