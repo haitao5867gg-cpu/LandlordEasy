@@ -1,12 +1,30 @@
+import {
+  createCipheriv,
+  createSign,
+  generateKeyPairSync,
+} from 'crypto';
 import { PaymentsService } from './payments.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { NotFoundException, BadRequestException } from '@nestjs/common';
+import { NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { IWechatPayService } from './gateways/wechat-pay.interface';
+import { IAlipayService } from './gateways/alipay.interface';
 
 describe('PaymentsService', () => {
   let service: PaymentsService;
   let prisma: jest.Mocked<PrismaService>;
+  let wechatPayService: jest.Mocked<IWechatPayService>;
+  let alipayService: jest.Mocked<IAlipayService>;
+  const originalPaymentMode = process.env.PAYMENT_MODE;
+  const originalWechatPayMode = process.env.WECHAT_PAY_MODE;
+  const originalAlipayMode = process.env.ALIPAY_MODE;
+  const originalWechatPayPublicKey = process.env.WECHAT_PAY_PUBLIC_KEY;
+  const originalWechatPayPublicKeyId = process.env.WECHAT_PAY_PUBLIC_KEY_ID;
+  const originalWechatPayApiV3Key = process.env.WECHAT_PAY_APIV3_KEY;
 
   beforeEach(() => {
+    delete process.env.PAYMENT_MODE;
+    delete process.env.WECHAT_PAY_MODE;
+    delete process.env.ALIPAY_MODE;
     prisma = {
       payment: {
         findUnique: jest.fn(),
@@ -20,7 +38,37 @@ describe('PaymentsService', () => {
       },
     } as unknown as jest.Mocked<PrismaService>;
 
-    service = new PaymentsService(prisma);
+    wechatPayService = {
+      createOrder: jest.fn(),
+    };
+    alipayService = {
+      createOrder: jest.fn(),
+    };
+    service = new PaymentsService(prisma, wechatPayService, alipayService);
+  });
+
+  afterAll(() => {
+    if (originalPaymentMode === undefined) delete process.env.PAYMENT_MODE;
+    else process.env.PAYMENT_MODE = originalPaymentMode;
+    if (originalWechatPayMode === undefined) delete process.env.WECHAT_PAY_MODE;
+    else process.env.WECHAT_PAY_MODE = originalWechatPayMode;
+    if (originalAlipayMode === undefined) delete process.env.ALIPAY_MODE;
+    else process.env.ALIPAY_MODE = originalAlipayMode;
+    if (originalWechatPayPublicKey === undefined) {
+      delete process.env.WECHAT_PAY_PUBLIC_KEY;
+    } else {
+      process.env.WECHAT_PAY_PUBLIC_KEY = originalWechatPayPublicKey;
+    }
+    if (originalWechatPayPublicKeyId === undefined) {
+      delete process.env.WECHAT_PAY_PUBLIC_KEY_ID;
+    } else {
+      process.env.WECHAT_PAY_PUBLIC_KEY_ID = originalWechatPayPublicKeyId;
+    }
+    if (originalWechatPayApiV3Key === undefined) {
+      delete process.env.WECHAT_PAY_APIV3_KEY;
+    } else {
+      process.env.WECHAT_PAY_APIV3_KEY = originalWechatPayApiV3Key;
+    }
   });
 
   describe('confirmOrReject', () => {
@@ -265,6 +313,370 @@ describe('PaymentsService', () => {
           }),
         }),
       );
+    });
+  });
+
+  describe('在线支付下单', () => {
+    const payableBill = {
+      id: 50,
+      status: 'PENDING',
+      totalAmount: 1288.5,
+      lease: { tenantId: 7 },
+    };
+
+    it('创建微信订单并保存 PENDING 支付记录', async () => {
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue(payableBill);
+      (prisma.payment.create as jest.Mock).mockResolvedValue({ id: 20 });
+      wechatPayService.createOrder.mockResolvedValue({
+        appId: 'mock-appid',
+        timeStamp: '123',
+        nonceStr: 'nonce',
+        package: 'prepay_id=mock',
+        signType: 'RSA',
+        paySign: 'sign',
+      });
+
+      const result = await service.createWechatOrder(50, 7, 'tenant-openid');
+
+      expect(result.mode).toBe('mock');
+      expect(result.outTradeNo).toMatch(/^WX50/);
+      expect(prisma.payment.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          billId: 50,
+          channel: 'WECHATPAY',
+          status: 'PENDING',
+          outTradeNo: result.outTradeNo,
+        }),
+      });
+      expect(wechatPayService.createOrder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outTradeNo: result.outTradeNo,
+          amount: 1288.5,
+          openid: 'tenant-openid',
+        }),
+      );
+    });
+
+    it('创建支付宝订单并在后端生成 PNG data URI', async () => {
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue({
+        ...payableBill,
+        status: 'OVERDUE',
+      });
+      (prisma.payment.create as jest.Mock).mockResolvedValue({ id: 21 });
+      alipayService.createOrder.mockResolvedValue('mock-alipay-qr-content');
+
+      const result = await service.createAlipayOrder(50, 7, 'tenant-openid');
+
+      expect(result.outTradeNo).toMatch(/^ALI50/);
+      expect(result.qrCodeImage).toMatch(/^data:image\/png;base64,/);
+      expect(prisma.payment.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          channel: 'ALIPAY',
+          status: 'PENDING',
+        }),
+      });
+    });
+
+    it('新变量未设置时两个渠道都回退到 PAYMENT_MODE', async () => {
+      process.env.PAYMENT_MODE = 'real';
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue(payableBill);
+      (prisma.payment.create as jest.Mock).mockResolvedValue({ id: 22 });
+      wechatPayService.createOrder.mockResolvedValue({
+        appId: 'real-appid',
+        timeStamp: '123',
+        nonceStr: 'nonce',
+        package: 'prepay_id=real',
+        signType: 'RSA',
+        paySign: 'sign',
+      });
+      alipayService.createOrder.mockResolvedValue('real-alipay-qr-content');
+
+      const wechatResult = await service.createWechatOrder(
+        50,
+        7,
+        'tenant-openid',
+      );
+      const alipayResult = await service.createAlipayOrder(
+        50,
+        7,
+        'tenant-openid',
+      );
+
+      expect(wechatResult.mode).toBe('real');
+      expect(alipayResult.mode).toBe('real');
+    });
+
+    it('禁止租客支付其他租客的账单', async () => {
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue(payableBill);
+      await expect(
+        service.createWechatOrder(50, 8, 'tenant-openid'),
+      ).rejects.toThrow(ForbiddenException);
+      expect(prisma.payment.create).not.toHaveBeenCalled();
+    });
+
+    it('已支付账单返回“该账单无需支付”', async () => {
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue({
+        ...payableBill,
+        status: 'PAID',
+      });
+      await expect(
+        service.createAlipayOrder(50, 7, 'tenant-openid'),
+      ).rejects.toThrow('该账单无需支付');
+      expect(prisma.payment.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('在线支付回调', () => {
+    it('微信成功回调确认支付，重复回调保持幂等', async () => {
+      const pendingPayment = {
+        id: 30,
+        billId: 60,
+        channel: 'WECHATPAY',
+        status: 'PENDING',
+        amount: 500,
+      };
+      (prisma.payment.findUnique as jest.Mock)
+        .mockResolvedValueOnce(pendingPayment)
+        .mockResolvedValueOnce({ ...pendingPayment, status: 'CONFIRMED' });
+      (prisma.payment.update as jest.Mock).mockResolvedValue({});
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue({
+        id: 60,
+        totalAmount: 500,
+      });
+      (prisma.payment.findMany as jest.Mock).mockResolvedValue([
+        { amount: 500, status: 'CONFIRMED' },
+      ]);
+      (prisma.bill.update as jest.Mock).mockResolvedValue({});
+
+      await service.handleWechatNotify({
+        out_trade_no: 'WX60TEST',
+        transaction_id: 'WX-GATEWAY-1',
+        trade_state: 'SUCCESS',
+      });
+      const repeated = await service.handleWechatNotify({
+        out_trade_no: 'WX60TEST',
+        transaction_id: 'WX-GATEWAY-1',
+        trade_state: 'SUCCESS',
+      });
+
+      expect(repeated).toEqual({ code: 'SUCCESS', message: '成功' });
+      expect(prisma.payment.update).toHaveBeenCalledTimes(1);
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 30 },
+        data: expect.objectContaining({
+          status: 'CONFIRMED',
+          gatewayTradeNo: 'WX-GATEWAY-1',
+          confirmedBy: null,
+        }),
+      });
+      expect(prisma.bill.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('找不到支付记录时仍向网关返回成功', async () => {
+      (prisma.payment.findUnique as jest.Mock).mockResolvedValue(null);
+      await expect(
+        service.handleAlipayNotify({
+          out_trade_no: 'UNKNOWN',
+          trade_no: 'ALI-GATEWAY-1',
+          trade_status: 'TRADE_SUCCESS',
+        }),
+      ).resolves.toEqual({ code: 'SUCCESS', message: '成功' });
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('微信支付回调公钥验签', () => {
+    const timestamp = '1725000000';
+    const nonce = 'wechat-notify-nonce';
+    const publicKeyId = 'PUB_KEY_ID_TEST';
+    const apiV3Key = '0123456789abcdef0123456789abcdef';
+    const resourceNonce = '0123456789ab';
+    const associatedData = 'transaction';
+    const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+    const cipher = createCipheriv(
+      'aes-256-gcm',
+      Buffer.from(apiV3Key, 'utf8'),
+      Buffer.from(resourceNonce, 'utf8'),
+    );
+    cipher.setAAD(Buffer.from(associatedData, 'utf8'));
+    const encryptedResource = Buffer.concat([
+      cipher.update(JSON.stringify({ trade_state: 'NOTPAY' }), 'utf8'),
+      cipher.final(),
+      cipher.getAuthTag(),
+    ]).toString('base64');
+    const body = {
+      id: 'notify-test',
+      resource: {
+        algorithm: 'AEAD_AES_256_GCM',
+        ciphertext: encryptedResource,
+        associated_data: associatedData,
+        nonce: resourceNonce,
+      },
+    };
+    const rawBody = Buffer.from(JSON.stringify(body), 'utf8');
+
+    const sign = (bodyToSign: Buffer) => {
+      const signer = createSign('RSA-SHA256');
+      signer.update(Buffer.from(`${timestamp}\n${nonce}\n`, 'utf8'));
+      signer.update(bodyToSign);
+      signer.update(Buffer.from('\n', 'utf8'));
+      signer.end();
+      return signer.sign(privateKey).toString('base64');
+    };
+
+    const headers = (bodyToSign: Buffer = rawBody) => ({
+      'wechatpay-timestamp': timestamp,
+      'wechatpay-nonce': nonce,
+      'wechatpay-signature': sign(bodyToSign),
+      'wechatpay-serial': publicKeyId,
+    });
+
+    beforeEach(() => {
+      process.env.PAYMENT_MODE = 'real';
+      process.env.WECHAT_PAY_PUBLIC_KEY = publicKey;
+      process.env.WECHAT_PAY_PUBLIC_KEY_ID = publicKeyId;
+      process.env.WECHAT_PAY_APIV3_KEY = apiV3Key;
+    });
+
+    it('使用真实 RSA 密钥对验证原始请求体签名', async () => {
+      await expect(
+        service.handleWechatNotify(body, rawBody, headers()),
+      ).resolves.toEqual({ code: 'SUCCESS', message: '成功' });
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('签名与原始请求体不匹配时拒绝回调', async () => {
+      const signedDifferentBody = Buffer.from('{"tampered":true}', 'utf8');
+
+      await expect(
+        service.handleWechatNotify(
+          body,
+          rawBody,
+          headers(signedDifferentBody),
+        ),
+      ).rejects.toThrow('微信回调签名无效');
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('Wechatpay-Serial 与配置的公钥 ID 不匹配时拒绝回调', async () => {
+      await expect(
+        service.handleWechatNotify(body, rawBody, {
+          ...headers(),
+          'wechatpay-serial': 'PUB_KEY_ID_OTHER',
+        }),
+      ).rejects.toThrow(
+        '微信回调 Wechatpay-Serial 与 WECHAT_PAY_PUBLIC_KEY_ID 不匹配',
+      );
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('mock 支付成功模拟', () => {
+    it('两个渠道都是 mock 时复用回调确认逻辑完成支付', async () => {
+      process.env.WECHAT_PAY_MODE = 'mock';
+      process.env.ALIPAY_MODE = 'mock';
+      const payment = {
+        id: 40,
+        billId: 70,
+        channel: 'ALIPAY',
+        status: 'PENDING',
+        amount: 300,
+      };
+      (prisma.payment.findUnique as jest.Mock)
+        .mockResolvedValueOnce(payment)
+        .mockResolvedValueOnce(payment);
+      (prisma.payment.update as jest.Mock).mockResolvedValue({});
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue({
+        id: 70,
+        totalAmount: 300,
+      });
+      (prisma.payment.findMany as jest.Mock).mockResolvedValue([
+        { amount: 300, status: 'CONFIRMED' },
+      ]);
+      (prisma.bill.update as jest.Mock).mockResolvedValue({});
+
+      await expect(service.simulateSuccess('ALI70TEST')).resolves.toEqual({
+        code: 'SUCCESS',
+        message: '成功',
+      });
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 40 },
+        data: expect.objectContaining({ status: 'CONFIRMED' }),
+      });
+    });
+
+    it('混合模式下允许模拟支付宝支付成功', async () => {
+      process.env.WECHAT_PAY_MODE = 'real';
+      process.env.ALIPAY_MODE = 'mock';
+      const payment = {
+        id: 41,
+        billId: 71,
+        channel: 'ALIPAY',
+        status: 'PENDING',
+        amount: 400,
+      };
+      (prisma.payment.findUnique as jest.Mock)
+        .mockResolvedValueOnce(payment)
+        .mockResolvedValueOnce(payment);
+      (prisma.payment.update as jest.Mock).mockResolvedValue({});
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue({
+        id: 71,
+        totalAmount: 400,
+      });
+      (prisma.payment.findMany as jest.Mock).mockResolvedValue([
+        { amount: 400, status: 'CONFIRMED' },
+      ]);
+      (prisma.bill.update as jest.Mock).mockResolvedValue({});
+
+      await expect(service.simulateSuccess('ALI71TEST')).resolves.toEqual({
+        code: 'SUCCESS',
+        message: '成功',
+      });
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 41 },
+        data: expect.objectContaining({ status: 'CONFIRMED' }),
+      });
+    });
+
+    it('混合模式下拒绝模拟微信支付成功', async () => {
+      process.env.WECHAT_PAY_MODE = 'real';
+      process.env.ALIPAY_MODE = 'mock';
+      (prisma.payment.findUnique as jest.Mock).mockResolvedValue({
+        id: 42,
+        billId: 72,
+        channel: 'WECHATPAY',
+        status: 'PENDING',
+        amount: 500,
+      });
+
+      await expect(service.simulateSuccess('WX72TEST')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+
+    it('安全性质：两个渠道都是 real 时查询渠道后必须 404 且不更新', async () => {
+      process.env.WECHAT_PAY_MODE = 'real';
+      process.env.ALIPAY_MODE = 'real';
+      (prisma.payment.findUnique as jest.Mock).mockResolvedValue({
+        id: 43,
+        billId: 73,
+        channel: 'WECHATPAY',
+        status: 'PENDING',
+        amount: 600,
+      });
+
+      await expect(service.simulateSuccess('WX73TEST')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prisma.payment.findUnique).toHaveBeenCalledWith({
+        where: { outTradeNo: 'WX73TEST' },
+      });
+      expect(prisma.payment.update).not.toHaveBeenCalled();
     });
   });
 });

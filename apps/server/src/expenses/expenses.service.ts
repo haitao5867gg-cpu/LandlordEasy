@@ -6,7 +6,7 @@ import { CreateExpenseDto, UpdateExpenseDto } from './expenses.dto';
 export class ExpensesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(month?: string, category?: string) {
+  async findAll(month?: string, category?: string, propertyId?: number) {
     const where: Record<string, unknown> = {};
     if (month) {
       // month = '2026-07'
@@ -16,6 +16,12 @@ export class ExpensesService {
       where.date = { gte: start, lt: end };
     }
     if (category) where.category = category;
+    if (propertyId) {
+      where.OR = [
+        { building: { propertyId } },
+        { room: { building: { propertyId } } },
+      ];
+    }
 
     return this.prisma.expense.findMany({
       where,

@@ -12,7 +12,7 @@ import {
 import { Request } from 'express';
 import { LeasesService } from './leases.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
-import { CreateLeaseDto, EndLeaseDto, RenewLeaseDto } from './leases.dto';
+import { CreateContractSigningTaskDto, CreateLeaseDto, EndLeaseDto, RenewLeaseDto } from './leases.dto';
 import { JwtPayload } from '../auth/auth.service';
 
 @Controller('leases')
@@ -37,6 +37,14 @@ export class LeasesController {
   create(@Body() dto: CreateLeaseDto, @Req() req: Request) {
     const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
     return this.leasesService.create(dto, user.sub);
+  }
+
+  @Post(':id/contract-signing-tasks')
+  createContractSigningTask(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateContractSigningTaskDto,
+  ) {
+    return this.leasesService.createContractSigningTask(id, dto);
   }
 
   @Post(':id/end')

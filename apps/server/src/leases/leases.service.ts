@@ -1,10 +1,24 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { randomInt } from 'crypto';
+import { Inject, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateLeaseDto, EndLeaseDto, RenewLeaseDto } from './leases.dto';
+import {
+  CreateContractSigningTaskDto,
+  CreateLeaseDto,
+  EndLeaseDto,
+  RenewLeaseDto,
+} from './leases.dto';
+import {
+  IWechatQrcodeService,
+  WECHAT_QRCODE_SERVICE,
+} from '../wechat/wechat-qrcode.interface';
 
 @Injectable()
 export class LeasesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(WECHAT_QRCODE_SERVICE) private readonly wechatQrcode: IWechatQrcodeService,
+  ) {}
 
   async findAll(roomId?: number, status?: string) {
     const where: Record<string, unknown> = {};
@@ -31,6 +45,55 @@ export class LeasesService {
     });
     if (!lease) throw new NotFoundException('租约不存在');
     return lease;
+  }
+
+  /** 创建电子签约任务并生成关注场景二维码 */
+  async createContractSigningTask(leaseId: number, dto: CreateContractSigningTaskDto) {
+    const lease = await this.prisma.lease.findUnique({
+      where: { id: leaseId },
+      select: { id: true },
+    });
+    if (!lease) throw new NotFoundException('租约不存在');
+
+    const task = await this.createContractSigningTaskRecord(leaseId, dto);
+    const { qrCodeImage } = await this.wechatQrcode.createSceneQrcode(task.sceneValue);
+
+    return this.prisma.contractSigningTask.update({
+      where: { id: task.id },
+      data: { qrCodeImage },
+    });
+  }
+
+  private async createContractSigningTaskRecord(
+    leaseId: number,
+    dto: CreateContractSigningTaskDto,
+  ) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.prisma.contractSigningTask.create({
+          data: {
+            leaseId,
+            type: dto.type,
+            sceneValue: randomInt(1, 2 ** 31),
+            waterMeterReading: dto.waterMeterReading,
+            electricityMeterReading: dto.electricityMeterReading,
+            gasMeterReading: dto.gasMeterReading,
+            facilities: dto.facilities
+              ? JSON.parse(JSON.stringify(dto.facilities))
+              : [],
+            status: 'PENDING_SCAN',
+          },
+        });
+      } catch (error) {
+        const shouldRetry =
+          attempt === 0 &&
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2002';
+        if (!shouldRetry) throw error;
+      }
+    }
+
+    throw new Error('无法生成唯一的微信场景值');
   }
 
   /** 新签租约 */

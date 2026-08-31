@@ -23,8 +23,16 @@ export class ExpensesController {
   constructor(private readonly expensesService: ExpensesService) {}
 
   @Get()
-  findAll(@Query('month') month?: string, @Query('category') category?: string) {
-    return this.expensesService.findAll(month, category);
+  findAll(
+    @Query('month') month?: string,
+    @Query('category') category?: string,
+    @Query('propertyId') propertyId?: string,
+  ) {
+    return this.expensesService.findAll(
+      month,
+      category,
+      propertyId ? parseInt(propertyId) : undefined,
+    );
   }
 
   @Post()

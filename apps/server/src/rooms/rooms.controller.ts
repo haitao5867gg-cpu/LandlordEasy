@@ -23,10 +23,12 @@ export class RoomsController {
   findAll(
     @Query('buildingId') buildingId?: string,
     @Query('status') status?: string,
+    @Query('propertyId') propertyId?: string,
   ) {
     return this.roomsService.findAll(
       buildingId ? parseInt(buildingId) : undefined,
       status,
+      propertyId ? parseInt(propertyId) : undefined,
     );
   }
 

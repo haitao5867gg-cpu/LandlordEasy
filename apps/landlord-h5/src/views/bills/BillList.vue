@@ -28,10 +28,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import http from '../../utils/http';
 import { billStatusMap } from '../../utils/status';
+import { usePropertyStore } from '../../stores/property';
 
+const propertyStore = usePropertyStore();
 const bills = ref<any[]>([]);
 const activeTab = ref('');
 const loading = ref(true);
@@ -48,11 +50,16 @@ async function fetchBills() {
   try {
     const params: Record<string, string> = {};
     if (activeTab.value) params.status = activeTab.value;
+    if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
     bills.value = await http.get('/bills', { params }) as any;
   } finally { loading.value = false; }
 }
 
 onMounted(fetchBills);
+
+watch(() => propertyStore.currentPropertyId, () => {
+  fetchBills();
+});
 </script>
 
 <style scoped>

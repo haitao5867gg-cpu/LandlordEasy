@@ -24,6 +24,7 @@ const router = createRouter({
     { path: '/settings', name: 'settings', component: () => import('../views/settings/Settings.vue') },
     { path: '/settings/landlords', name: 'landlords', component: () => import('../views/settings/Landlords.vue') },
     { path: '/settings/buildings', name: 'buildings', component: () => import('../views/settings/Buildings.vue') },
+    { path: '/settings/properties', name: 'properties', component: () => import('../views/settings/Properties.vue') },
     { path: '/settings/room-types', name: 'roomTypes', component: () => import('../views/settings/RoomTypes.vue') },
   ],
 });

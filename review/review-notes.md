@@ -516,6 +516,10 @@ GasCan 确认部署后,连服务器发现 `/opt/landlord-easy` 的 git HEAD 停�
 
 ### 遗留
 
-- 11.5:审核通过后必须手动关闭 `PUBLIC_REVIEW_MODE`,已在 tasks.md 标记高优先级待办
-- 11.6:`deploy.sh` 的 prisma migrate 步骤需要修
+- 11.5:审核通过后必须手动关闭 `PUBLIC_REVIEW_MODE`,已在 tasks.md 标记高优先级待办 —— **已解决**:审核通过后已于2026-08-20确认关闭并验证,见 `PROJECT_STATUS.md` 对应章节
+- 11.6:`deploy.sh` 的 prisma migrate 步骤需要修 —— 后续 `deploy.sh` 已多次迭代(含M15发现修复的PM2部署目录bug),此项本身状态未在本文件跟踪更新,以 `specs/tasks.md` 11.6 勾选状态为准
 - 服务器上的 stash 暂时保留,不阻塞,以后确认不需要了可以清理
+
+---
+
+> **说明(2026-08-27补记)**:本文件的独立 Review 记录停在 Review 14(2026-08-10)。此后 M12~M17 的所有改动审查,都改为直接写进 `specs/tasks.md` 对应任务下的 `> 完成说明:`(每条包含改了什么/如何验证/验证结果),不再单独写 Review 编号——这是 Claude Code 完全接手后的正常演进,不代表 2026-08-10 之后的工作没有被审查。**新会话如果想了解最近的审查细节,应该去看 `specs/tasks.md` 里 M12 及以后各任务的完成说明,以及 `PROJECT_STATUS.md` 文末各"最新状态"章节,而不是只看这个文件的最后一条 Review。**

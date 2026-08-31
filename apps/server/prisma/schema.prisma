@@ -25,6 +25,19 @@ model Landlord {
   @@map("landlords")
 }
 
+// ========== 公寓/园区 ==========
+model Property {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  sort      Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  buildings Building[]
+
+  @@map("properties")
+}
+
 // ========== 楼栋 ==========
 model Building {
   id        Int      @id @default(autoincrement())
@@ -33,6 +46,8 @@ model Building {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  propertyId Int
+  property   Property @relation(fields: [propertyId], references: [id])
   rooms    Room[]
   expenses Expense[] @relation("BuildingExpense")
 
@@ -117,13 +132,37 @@ model Lease {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
-  room            Room              @relation(fields: [roomId], references: [id])
-  tenant          Tenant            @relation(fields: [tenantId], references: [id])
-  bills           Bill[]
-  depositRecords  DepositRecord[]
-  handoverRecords HandoverRecord[]
+  room                 Room                  @relation(fields: [roomId], references: [id])
+  tenant               Tenant                @relation(fields: [tenantId], references: [id])
+  bills                Bill[]
+  depositRecords       DepositRecord[]
+  handoverRecords      HandoverRecord[]
+  contractSigningTasks ContractSigningTask[]
 
   @@map("leases")
+}
+
+// ========== 合同电子签约记录 ==========
+model ContractSigningTask {
+  id                      Int       @id @default(autoincrement())
+  leaseId                 Int
+  type                    String    // NEW / RENEW
+  sceneValue              Int       @unique
+  qrCodeImage             String?   @db.Text
+  waterMeterReading       Decimal?  @db.Decimal(10, 2)
+  electricityMeterReading Decimal?  @db.Decimal(10, 2)
+  gasMeterReading         Decimal?  @db.Decimal(10, 2)
+  facilities              Json?     // [{name, has}]
+  status                  String    @default("PENDING_SCAN") // PENDING_SCAN / CREATED / SIGNED / EXPIRED
+  tencentFlowId           String?
+  signedPdfUrl            String?   @db.Text
+  signedAt                DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  lease Lease @relation(fields: [leaseId], references: [id])
+
+  @@map("contract_signing_tasks")
 }
 
 // ========== 账单 ==========
@@ -166,7 +205,9 @@ model BillItem {
 model Payment {
   id          Int       @id @default(autoincrement())
   billId      Int
-  channel     String    // QRCODE / WECHATPAY / CASH / TRANSFER
+  channel     String    // QRCODE(废弃) / WECHATPAY / ALIPAY / CASH / TRANSFER
+  outTradeNo     String?   @unique @db.VarChar(64)
+  gatewayTradeNo String?   @db.VarChar(64)
   amount      Decimal   @db.Decimal(10, 2)
   status      String    @default("PENDING_CONFIRM") // PENDING_CONFIRM / CONFIRMED / REJECTED
   proofUrl    String?   @db.Text
@@ -240,6 +281,7 @@ model ReminderLog {
   type      String   // PRE / DUE / OVERDUE
   sentAt    DateTime @default(now())
   channel   String   @default("WECHAT")
+  source    String   @default("AUTO") @db.VarChar(10)
   success   Boolean  @default(true)
   createdAt DateTime @default(now())
 

@@ -32,8 +32,9 @@
       <div v-else-if="['PENDING','OVERDUE'].includes(bill.status)" style="padding:16px;">
         <van-button block @click="showAddItem = true">追加费用项</van-button>
       </div>
-      <div v-if="['PENDING','OVERDUE'].includes(bill.status)" style="padding:0 16px 16px;">
+      <div v-if="['PENDING','OVERDUE'].includes(bill.status)" class="bill-actions">
         <van-button block plain type="success" @click="showManualPay = true">手动记账(现金/转账)</van-button>
+        <van-button block type="primary" :loading="reminding" @click="handleRemind">📢催一下</van-button>
       </div>
     </template>
 
@@ -67,6 +68,7 @@ import { billStatusMap, paymentStatusMap, paymentChannelMap } from '../../utils/
 const route = useRoute();
 const bill = ref<any>(null);
 const loading = ref(true);
+const reminding = ref(false);
 const showAddItem = ref(false);
 const showManualPay = ref(false);
 const newItem = reactive({ name: '', amount: 0 });
@@ -105,6 +107,18 @@ async function handleLateFee() {
   await fetchBill();
 }
 
+async function handleRemind() {
+  reminding.value = true;
+  try {
+    await http.post(`/bills/${route.params.id}/remind`);
+    showToast('提醒已发送');
+  } catch {
+    // HTTP 拦截器统一展示后端返回的错误文案
+  } finally {
+    reminding.value = false;
+  }
+}
+
 async function handleManualPay() {
   const data = {
     billId: Number(route.params.id),
@@ -121,4 +135,5 @@ async function handleManualPay() {
 
 <style scoped>
 .page-loading { display: flex; justify-content: center; padding: 60px; }
+.bill-actions { padding: 0 16px 16px; display: flex; gap: 12px; }
 </style>

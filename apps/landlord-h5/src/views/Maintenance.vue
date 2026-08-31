@@ -19,16 +19,27 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, onMounted, watch } from 'vue';
 import { showToast } from 'vant';
 import http from '../utils/http';
+import { usePropertyStore } from '../stores/property';
+
+const propertyStore = usePropertyStore();
 const list = ref<any[]>([]);
 const loading = ref(true);
 const showAdd = ref(false);
 const form = reactive({ roomId: 0, date: '', content: '', cost: 0 });
 
-async function fetchList() { list.value = await http.get('/maintenance') as any; }
+async function fetchList() {
+  const params: Record<string, string> = {};
+  if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
+  list.value = await http.get('/maintenance', { params }) as any;
+}
 onMounted(async () => { try { await fetchList(); } finally { loading.value = false; } });
+
+watch(() => propertyStore.currentPropertyId, () => {
+  fetchList();
+});
 
 async function handleAdd() {
   await http.post('/maintenance', form);

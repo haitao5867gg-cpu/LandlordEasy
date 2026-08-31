@@ -24,10 +24,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import http from '../../utils/http';
+import { usePropertyStore } from '../../stores/property';
+
+const propertyStore = usePropertyStore();
 const data = ref<any>({ total: 0, buildings: {} });
 const loading = ref(true);
-onMounted(async () => { try { data.value = await http.get('/dashboard/vacancy') as any; } finally { loading.value = false; } });
+
+async function fetchVacancy() {
+  loading.value = true;
+  const params: Record<string, string> = {};
+  if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
+  try {
+    data.value = await http.get('/dashboard/vacancy', { params }) as any;
+  } finally {
+    loading.value = false;
+  }
+}
+
+onMounted(fetchVacancy);
+watch(() => propertyStore.currentPropertyId, () => {
+  fetchVacancy();
+});
 </script>
 <style scoped>.page-loading { display: flex; justify-content: center; padding: 60px; }</style>

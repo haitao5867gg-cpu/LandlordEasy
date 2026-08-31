@@ -5,8 +5,9 @@ import { PrismaService } from '../prisma/prisma.service';
 export class BuildingsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll() {
-    return this.prisma.building.findMany({ orderBy: { sort: 'asc' } });
+  async findAll(propertyId?: number) {
+    const where = propertyId ? { propertyId } : {};
+    return this.prisma.building.findMany({ where, orderBy: { sort: 'asc' } });
   }
 
   async findOne(id: number) {
@@ -15,11 +16,11 @@ export class BuildingsService {
     return building;
   }
 
-  async create(data: { name: string; sort?: number }) {
+  async create(data: { name: string; sort?: number; propertyId: number }) {
     return this.prisma.building.create({ data });
   }
 
-  async update(id: number, data: { name?: string; sort?: number }) {
+  async update(id: number, data: { name?: string; sort?: number; propertyId?: number }) {
     await this.findOne(id);
     return this.prisma.building.update({ where: { id }, data });
   }

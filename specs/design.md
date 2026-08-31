@@ -57,8 +57,9 @@ packages/
 - **ReminderLog** 提醒记录:id, billId, tenantId, type(PRE/DUE/OVERDUE), sentAt, channel, success
 - **Expense** 支出:id, date, category(自由文本或字典), name, amount, remark?, buildingId?, roomId?, operatorId
 - **AuditLog** 操作日志:id, operatorId, action, entityType, entityId, detail(JSON), createdAt
+- **ContractSigningTask** 电子签约记录(2026-08-31新增,M19):id, leaseId, type(NEW/RENEW), sceneValue(微信场景值,唯一,用于关注/扫描事件回调匹配), qrCodeImage(关注二维码图片,data URI或存储路径), waterMeterReading?/electricityMeterReading?/gasMeterReading?(Decimal,可选), facilities(JSON,固定12项设施的勾选状态,对应合同"屋内主要设施"栏), status(PENDING_SCAN/CREATED/SIGNED/EXPIRED), tencentFlowId?(腾讯电子签流程ID,场景值触发后才创建), signedPdfUrl?, signedAt?, createdAt
 
-关系要点:Room 1-N Lease(历史);Lease 1-N Bill;Bill 1-N Payment;Tenant 1-N Lease(可回头再租)。房间详情页聚合 = 按 roomId 串起以上所有表。
+关系要点:Room 1-N Lease(历史);Lease 1-N Bill;Bill 1-N Payment;Lease 1-N ContractSigningTask(每次新签/续签各一条,**不会互相覆盖**,即使 `renew` 直接 `update` 同一条 Lease 记录,签约记录本身独立留存);Tenant 1-N Lease(可回头再租)。房间详情页聚合 = 按 roomId 串起以上所有表,含 ContractSigningTask 历史。
 
 ## 5. 核心业务逻辑
 
@@ -72,14 +73,59 @@ packages/
 - 每日 09:00 定时任务:到期前3天 / 到期日 / 逾期每3天,调 WechatNotifyService,写 ReminderLog
 - 参数(3天等)放系统配置表或 .env,可调
 
-### 5.3 收款闭环(阶段一)
-租客点「我已付款」→ 创建 Payment(PENDING_CONFIRM, channel=QRCODE, 可传截图)→ 房东端待确认列表 → 确认后 Payment=CONFIRMED,账单实收累计 ≥ 应收则 Bill=PAID。房东也可直接为账单录入 CASH/TRANSFER 支付(直接 CONFIRMED)。
+### 5.3 收款闭环(2026-08-27更新:M18在线支付,取代原阶段一收款码流程)
+
+**保留不变**:房东手动记账入口(`POST /payments/manual`),直接创建 Payment(channel=CASH/TRANSFER, status=CONFIRMED),`checkBillPaid` 判断累计已确认金额 ≥ 应收则 Bill=PAID。这条路径完全不受本次改动影响。
+
+**下线**:原「我已付款」人工上报 + 房东确认流程(`channel=QRCODE`, `status=PENDING_CONFIRM` → 房东 `POST /payments/:id/confirm`)。租客端 `PayBill.vue` 的收款码/截图上传 UI 整体替换为下方在线支付流程。
+
+**新增:在线支付**
+- `Payment.channel` 新增 `ALIPAY`(`WECHATPAY` 已在原 schema 预留);新增 `outTradeNo`(系统生成的商户订单号,唯一索引,用于幂等)、`gatewayTradeNo`(网关返回的交易流水号,可空,回调时写入)
+- 只支持整单支付,创建订单时金额固定为 `bill.totalAmount`,不接受前端传入自定义金额
+- **PAYMENT_MODE(mock/real)**:仿照 `WECHAT_MODE` 的模式,新增环境变量 `PAYMENT_MODE=mock|real`。mock 模式下「创建订单」直接返回假的支付参数/二维码内容,不真实调用微信/支付宝接口;「模拟支付成功」提供一个仅 mock 模式可用的测试接口,直接触发回调处理逻辑,方便 dev 环境联调前端流程,不依赖真实商户资质。real 模式才真实调用微信/支付宝官方接口。
+
+**微信支付(JSAPI)**
+1. `POST /payments/wechat/create-order`:后端调微信统一下单 API(real 模式)或返回 mock 参数,创建 Payment(`channel=WECHATPAY`, `status=PENDING`, 记录 `outTradeNo`),返回前端拉起支付所需的 JSAPI 参数
+2. 前端调用 `WeixinJSBridge.invoke('getBrandWCPayRequest', ...)` 拉起微信支付弹窗
+3. `POST /payments/wechat/notify`:微信支付回调,验签后按 `outTradeNo` 查到对应 Payment,幂等更新为 `CONFIRMED`(同一 `outTradeNo` 只处理一次,重复回调直接返回成功不重复处理),`confirmedBy` 留空表示系统自动确认,随后走 `checkBillPaid`
+
+**支付宝(当面付,受微信内置浏览器拦截支付宝跳转限制,采用二维码方案)**
+1. `POST /payments/alipay/create-order`:调支付宝当面付预下单接口(`alipay.trade.precreate`,real 模式)或返回 mock 二维码内容,创建 Payment(`channel=ALIPAY`, `status=PENDING`),返回二维码图片内容(前端渲染为 `<van-image>` 展示,租客截图后用支付宝 App 扫码支付)
+2. `POST /payments/alipay/notify`:支付宝异步通知回调,验签(RSA)后按 `outTradeNo` 幂等更新 Payment 为 `CONFIRMED`,走 `checkBillPaid`
+
+**手动催缴(M18新增,与5.2自动催租提醒共用基础设施)**
+- `POST /bills/:id/remind`:单笔立即催,复用 `ReminderLog` 的当天防重复判断(同一账单当天已发送过则拒绝,提示"今天已经催过了")
+- `POST /bills/batch-remind`:批量催,传 billId 数组,逐个走上面同一逻辑,单笔失败不影响其他笔
+- 复用 5.2 已有的 `WechatNotifyService`(mock/real)和模板消息(`WECHAT_TEMPLATE_RENT_REMINDER`),不新增模板
+- `ReminderLog` 增加 `source` 字段(`AUTO`/`MANUAL`)区分触发来源,便于房东端展示催缴历史
 
 ### 5.4 滞纳金
 房东在逾期账单上一键「追加滞纳金」:新增 BillItem(type=LATE_FEE, amount 默认=该账单租金项金额, 可修改),更新 totalAmount。
 
 ### 5.5 租客端访问规则
 JWT 内含 tenantId;接口只返回该租客自己租约的数据。UI 按租约状态:ACTIVE→正常;ENDED 且有未结账单→仅展示可支付的未结账单;ENDED 且结清→只读历史。
+
+### 5.6 合同电子签约(2026-08-31新增,M19)
+
+**平台**:腾讯电子签(Essbasic基础版),密钥(TENCENT_ESIGN_SECRET_ID/TENCENT_ESIGN_SECRET_KEY)已配置在服务器 `.env`/`.env.dev`(子账号密钥,仅授予Essbasic全读写权限,不是主账号密钥)。合同模板需提前在腾讯电子签控制台建好(GasCan提供的现成合同文本,已识别字段清单,由 Claude Code 指导建模板)。
+
+**新增环境变量模式**:仿照 `WECHAT_MODE`/`PAYMENT_MODE`,新增 `ESIGN_MODE=mock|real`,mock模式下不真实调用腾讯API,方便dev环境联调。
+
+**触发流程**:
+1. 房东在租约详情页点「生成电子签约」,弹窗填写水电表底数(可选)+屋内设施勾选(12项固定选项:空调/冰箱/洗衣机/热水器/燃气灶/电视/淋浴器/油烟机/床/柜子/椅子/沙发,对应合同原文)——**这两项挂在 `ContractSigningTask` 上,不是 `Lease` 字段,不放进新签/续签表单**,提交后创建一条 `ContractSigningTask`(status=PENDING_SCAN),调微信「生成带参数二维码」接口(临时二维码,场景值关联这条记录的id或专用编号),返回二维码图片供房东截图转发。**这一步不调用腾讯电子签API,不消耗额度**。
+2. 微信「关注事件」/「扫描事件」webhook(新增,复用 `WechatModule` 的 mock/real 分层模式):收到事件后按场景值查到对应 `ContractSigningTask`,若状态仍是 PENDING_SCAN:
+   - 调腾讯电子签API创建正式签署流程(此时才消耗额度),把 Lease 的租金/期限/押金 + 该 ContractSigningTask 的水电表读数/设施清单,通过模板变量传入生成合同内容
+   - 更新 status=CREATED,记录 tencentFlowId
+   - 通过微信「客服消息」接口(新增)把继续签约的入口(链接或小程序码,取决于腾讯电子签返回的形式)推给这个用户
+   - 若该场景值未匹配任何 PENDING_SCAN 任务(已使用过/过期/普通关注无场景值),走默认欢迎语兜底,不创建腾讯任务
+3. 公众号原有「被添加为好友后自动回复」已由 GasCan 手动关闭,欢迎语/业务消息完全由上面这套代码逻辑接管
+4. 租客在腾讯电子签完成实名认证+签署(只需租客单方签字,「出租人」甲方信息固定写死,不做变量)
+5. 腾讯电子签签署完成回调(新增 `POST /contracts/tencent-esign/notify`,复用支付回调的幂等设计思路,按 tencentFlowId 查找+防重复处理):
+   - 更新 ContractSigningTask.status=SIGNED,存 signedPdfUrl、signedAt
+   - **自动绑定**:用这次关注/扫描事件里拿到的openid,写入该 Lease 关联 Tenant 的 openid 字段(复用现有 `bindInviteCode` 同等语义,但触发方式不同);若该 Tenant 已绑定其他 openid,不静默覆盖,记录异常留待房东人工核实,不做自动处理
+6. 房东端租约详情页展示签约进度(PENDING_SCAN/CREATED/SIGNED/EXPIRED),SIGNED 状态下提供在线预览(PDF)+下载入口
+
+**待确认**:腾讯电子签签署入口具体是H5链接还是小程序码(取决于是否需要跳出微信生态,GasCan正在跟腾讯销售经理确认),这决定第2步「客服消息」推送内容的具体形式,不阻塞先搭好上述框架,real模式下这一环节最后接。
 
 ## 6. API 约定
 

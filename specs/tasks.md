@@ -2,7 +2,7 @@
 
 ## Overview
 
-> 状态:P1 就绪,可开工。按顺序执行；疑问写 `questions.md`,不得自行假设。M6 前的所有任务不依赖任何微信凭证(见 design.md §3 mock 约定)。
+> 状态(2026-08-27更新):M9~M17 全部完成,已进入日常产品迭代阶段(不再是"P1就绪待开工"的项目早期状态)。当前进度和交接现状以 `PROJECT_STATUS.md` 文末"最新状态"章节为准。按顺序执行；疑问写 `questions.md`,不得自行假设。M6 前的所有任务不依赖任何微信凭证(见 design.md §3 mock 约定)。
 
 ### 全局交付标准
 
@@ -383,8 +383,106 @@
 >
 > 如何验证——`tsc --noEmit`/`vue-tsc -b`/`jest` 每批独立重跑通过,部署到 dev 后**已用真实浏览器验证界面正常**:支出记录点击打开编辑弹窗、字段正确回填、取消不改动真实数据;"退出登录"点击后正确弹出二次确认、取消不登出;空置看板/逾期看板房间和账单条目均可点击、正确跳转到对应详情页;租约详情页交接记录区块正确显示"暂无交接记录"+"新增交接记录"按钮(仅ACTIVE租约),新增弹窗类型单选、动态检查项行(项目+状况+删除)、"添加检查项"按钮均渲染正常,取消未提交改动真实历史租约。后端边界用curl在**专门新建的测试房间+测试租约**(而非真实历史租约)上验证:续签早于起租日的日期被拒绝(400)、合法日期续签成功、退租超额退还押金被拒绝(400)、合法金额退租成功,验证完清理了测试数据,核对数据库统计与基线一致。
 
+## M17 公寓/园区多物业隔离(2026-08-26)
+
+> 背景:GasCan 提出新需求——目前管理"鸿翼人才公寓"(Q/R/S三栋楼)和"明远公寓"(1栋楼)两个物业,希望在"楼栋"之上加一层"公寓/园区"归属,选中某个公寓后房间/账单/报表等全部数据都只看这个公寓的,互不混淆。确认设计要点:软隔离(不涉及账号权限,只是筛选/上下文切换)、明远公寓下的楼栋改名"1号楼"、账单/房间/维修/支出/报表全部要分开、需要"全部公寓"汇总视图、房型模板功能暂时隐藏入口不删除。GasCan 明确授权"自主模式去做,做完再看",并要求"指挥kiro-cli干活,Claude的token更珍贵"。
+
+- [x] 17.1 **数据模型:新增 Property(公寓/园区)模型,Building 挂靠 Property;一次性迁移历史数据。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核+执行数据库变更,2026-08-26): 改了什么——Prisma 新增 `Property` 模型(id/name/sort),`Building` 加 `propertyId` 外键。分两阶段处理必填收紧:先加成可选字段(避免过早收紧导致迁移前的其他写入路径失败),写一次性迁移脚本 `apps/server/src/scripts/migrate-add-properties.ts`(参照 `import-history-2026-08.ts` 的安全检查模式,白名单库名+`--confirm-target`强制确认,可安全重复执行)创建"鸿翼人才公寓"/"明远公寓"两条记录、把 Q/R/S 三栋楼归入鸿翼人才公寓、原"明远公寓"楼栋改名"1号楼"归入明远公寓这个 Property;确认本批(17.2/17.3)全部写入路径都已经要求 propertyId 之后,再把 schema 收紧成必填、对 dev 库执行 `prisma db push`。
+> 如何验证——本地/dev 两次独立核实(用 Prisma 脚本查询,不采信 Kiro/迁移脚本自己的打印输出):迁移后房间/租约/押金记录/租客总数与2026-08-21记录的历史真实数据基线完全一致(185/679/643/679),4栋楼全部正确归属到对应 Property,无遗漏。收紧成必填后重新跑 `tsc --noEmit` 暴露出2个历史一次性脚本的类型错误,逐一核实处理而非简单打补丁:`migrate-add-properties.ts` 里"检查未分配楼栋"的健全性检查在必填约束下变成永远不触发的死代码,删除;`import-history-2026-08.ts`(未来"数据重新初始化"时仍可能被使用)补上归属公寓关联,但特意**没有**把其中的"明远公寓"楼栋名改成"1号楼"——核实过脚本内部 `buildingByName` 等逻辑多处依赖这个名字做标识符,那是针对现有数据的一次性改名,跟这里全新建库是两回事,顺手改名会破坏脚本内部一致性;`import.ts` 核实其依赖的 CSV 数据源(`data/import/buildings.csv`等)已经不存在、功能早被前者取代,确认是真正的死代码后直接删除(含 `package.json` 里的 `import:init` 命令),不是简单打字类型补丁掩盖问题。
+
+- [x] 17.2 **公寓管理后端接口 + 全局"当前公寓"切换条(前端框架)。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-26): 新增 `properties` 模块(CRUD,完整参照 `buildings` 模块风格,删除前校验有没有楼栋关联)。前端新增 `stores/property.ts`(pinia,当前选中公寓id持久化到localStorage,null代表"全部公寓")和 `App.vue` 顶部全局切换条(除登录页外所有页面可见,点击 `van-action-sheet` 选择,不需要跳转/刷新页面)。
+> 如何验证——`tsc`/`vue-tsc`/`jest` 独立重跑通过;部署到 dev 后**已用真实浏览器验证界面正常**:切换条正确显示"全部公寓/鸿翼人才公寓/明远公寓"三个选项,点选后标题立即更新且不刷新页面,刷新浏览器后选择保持(localStorage生效)。
+
+- [x] 17.3 **房间/维修/支出/账单/待确认收款/工作台看板/经营报表,全部接入按当前选中公寓过滤;楼栋管理页支持选择归属公寓。**
+> 完成说明(Kiro CLI分5轮实现,Claude Code逐轮设计+复核+部署验证,2026-08-26): 后端给 `GET /rooms`、`/buildings`、`/maintenance`、`/expenses`、`/bills`、`/payments/pending`、`/dashboard/vacancy`、`/dashboard/expiring`、`/dashboard/overdue`、`/dashboard/reports/monthly`、`/dashboard/reports/deposit-summary` 共11个查询接口加可选 `propertyId` 参数(不传维持原有全量行为,向后兼容)。expenses 的过滤用 OR 覆盖"直接挂楼栋"和"挂具体房间"两种关联方式,两者都没挂的通用支出(如网费)选中具体公寓时不显示,只在"全部"视图可见——这是设计如此,已跟GasCan确认。前端对应页面(房间列表、批量建房楼栋选择器、维修记录、支出管理、账单列表、待确认收款、工作台四卡片、经营报表、空置/到期/逾期三个看板明细页)均接入当前选中公寓参数,并 `watch` 监听全局公寓切换——**用户在顶部切换公寓后,当前打开的页面立即刷新响应,不需要手动切页面**(这是保证"选了就要立刻看到效果"的关键交互点,不是事后补的)。房间列表切换公寓时楼栋Tab同步刷新并重置为"全部"。楼栋管理页新增/编辑楼栋必须选择归属公寓(选中具体公寓时默认预填,"全部公寓"视角下需手动选;列表在"全部公寓"视角额外显示每栋楼所属公寓名)。系统设置页按要求移除"房型模板管理"入口(功能保留,仅暂不放出)。
+> 如何验证——每一轮(5个批次的前后端组合)独立跑 `tsc`/`vue-tsc`/`jest` 全部通过后再进入下一轮;部署到 dev 后**已用真实浏览器逐一验证所有受影响页面**:切换到"鸿翼人才公寓"时房间列表楼栋Tab只剩Q/R/S(无1号楼)、账单列表只剩R/S/Q栋记录;切换到"明远公寓"时工作台四卡片数字从(空置11/到期138/逾期297)变为鸿翼(7/102/217)与明远的差值吻合、经营报表应收金额与"全部公寓"视角里1号楼那一行完全一致(¥57580)、空置看板房数(4间)与报表空置房数一致;楼栋管理页选中公寓时新建楼栋"归属公寓"字段正确默认预填、切到"全部公寓"视角时4栋楼正确显示各自所属公寓名;维修记录/支出管理/待确认收款/三个看板明细页均正常渲染无报错。全程用真实历史数据验证(未使用任何mock/route拦截),均为只读查询过滤验证,未产生任何测试脏数据。
+
+- [x] 17.4 **公寓管理页面(新增/编辑/删除)。**
+> 背景:17.1~17.3上线后GasCan问"如果要新增一个公寓怎么做",发现只有后端接口、前端一直没做管理入口(当时判断改名/新增公寓不是高频操作),GasCan明确要求补上专门的管理页面。
+> 完成说明(Kiro CLI实现,Claude Code设计+复核+部署验证,2026-08-27): 改了什么——新增 `apps/landlord-h5/src/views/settings/Properties.vue`,完整参照楼栋管理(`Buildings.vue`)的交互模式(新增/编辑合一弹窗、delete-o图标+二次确认删除),对接17.1已经就绪的 `properties` 后端CRUD接口,不需要改后端。`Settings.vue` "管理"分组新增"公寓管理"入口(排在"楼栋管理"前面),路由加 `/settings/properties`。关键细节:新增/编辑/删除成功后,除了刷新本页面列表,额外调用一次 `propertyStore.fetchProperties()`,让全局顶部"当前公寓"切换条立即感知变化,不需要用户手动刷新整个应用才能在切换条里看到新公寓。
+> 如何验证——`vue-tsc -b`独立重跑通过;部署到 dev 后**已用真实浏览器验证界面正常**:新增一个带 `E2E_QA_` 前缀的测试公寓,列表正确出现;打开顶部切换条**不刷新页面**就能立即选到这个新公寓(验证了 propertyStore 同步刷新的设计);点击删除图标弹出"确定删除「E2E_QA_测试公寓」吗?"二次确认,确认后正确删除、toast提示"已删除"。测试完成后已清理测试数据,列表恢复只有"鸿翼人才公寓"/"明远公寓"两条真实记录。
+
+- [x] 17.5 **补齐房型隐藏的3处遗漏(房间详情/房间列表/批量建房)。**
+> 背景:M16.3 只隐藏了系统设置页的"房型模板管理"入口,GasCan 实测房间详情页时发现"房型"字段还在展示,要求排查其余展示点一并隐藏。
+> 完成说明(Kiro CLI实现,Claude Code设计+复核+部署验证,2026-08-27): 全项目搜索确认还有3处遗漏——`RoomDetail.vue` 基本信息里的"房型"cell、`RoomList.vue` 每条房间记录下方的房型标签、`BatchCreate.vue` 的"房型(可选)"选择器。均已删除;`BatchCreate.vue` 顺带彻底清理了 `roomTypes`/`showRoomTypePicker`/`roomTypeColumns`/`selectedRoomTypeText`/`onRoomTypeConfirm` 等只服务于房型UI的变量和函数,不留死代码——房型是"先隐藏、以后再启用",git历史本身就是最好的暂存,不需要在代码里留开关。楼栋相关的选择逻辑完全没有触碰。后端 `room-types` 模块、数据模型、接口均未改动。
+> 如何验证——`vue-tsc -b` 独立重跑通过;部署到 dev 后**已用真实浏览器验证界面正常**:房间列表每条记录不再显示房型标签、房间详情"基本信息"里没有"房型"这一行、批量建房表单只剩楼栋/起始房号/结束房号三项。首次访问因浏览器缓存了旧构建产物一度仍看到房型信息,用 curl 核对服务器返回的构建产物哈希与本地最新构建完全一致确认部署无误,加时间戳参数强制绕过缓存后复验通过。
+
+## M18 房东-租客支付交互:手动催缴 + 微信支付/支付宝在线支付(2026-08-27立项)
+
+> 背景:GasCan 提出两个新需求——①房东可以手动催缴某个租客交房租(区别于现有每天9点的自动到期提醒);②租客在租客端可以自主选择微信支付或支付宝在线交房租,支付结果自动同步销账。设计过程中经多轮确认:微信支付走服务号JSAPI支付;支付宝因为微信内置浏览器会拦截跳转,改用页面内生成收款二维码、租客截图后用支付宝App扫码的方案;两个支付渠道商户号都走**对公**结算,由 GasCan 自行申请中(申请指引见对话记录,不重复存档);新的在线支付**完全替换**原「收款码+我已付款人工上报+房东确认」流程,但**房东手动记账(现金/转账)功能保留不变**;只支持整单支付不支持部分支付;手动催缴复用现有模板消息和防重复发送机制,单笔+批量两种入口都要,每张账单每天最多手动催1次。详细设计见 `specs/requirements.md` 5.3/6 节、`specs/design.md` 5.3 节。
+>
+> **重要:本里程碑分两批,第一批(18.1~18.6)不依赖任何外部商户资质,可以立即开工;第二批(18.7~18.9)必须等 GasCan 申请到的微信支付商户号/支付宝当面付资质到手才能验证到底,当前状态是"资质申请中"。**
+>
+> **第一批(18.1~18.6)已于2026-08-31全部完成并部署到dev环境,真实浏览器验证通过,详见下方各子任务完成说明。部署方式:`bash deploy/deploy.sh dev`,过程中 `prisma db push` 因新增 `Payment.outTradeNo` 唯一约束报"可能丢失数据"警告,核实是全新字段(历史记录该列必为NULL,MySQL唯一索引允许多NULL共存)后确认无风险,手动加 `--accept-data-loss` 通过。真实浏览器验证用的是dev库里已绑定测试用mock_openid的真实历史租客(Q103历史租客4,lease 42)的3张真实OVERDUE账单,验证完成后已清理全部测试产生的Payment/ReminderLog记录并把tenant.openid、bill.status还原回测试前状态,不影响dev历史数据基线。**
+
+### 第一批:不依赖商户资质,现在开工
+
+- [x] 18.1 **Prisma schema变更:Payment加ALIPAY渠道+订单追踪字段,ReminderLog加source字段。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`Payment.channel` 注释加 ALIPAY(字段仍是String,不改成真枚举,跟随项目既有约定);新增 `outTradeNo`(String? @unique,商户订单号,支付网关下单/回调幂等用)、`gatewayTradeNo`(String?,网关交易流水号,回调时写入)。`ReminderLog` 新增 `source`(String @default("AUTO"),区分自动/手动触发,default保证历史数据兼容)。只改了 `schema.prisma` 一个文件。
+> 如何验证——`prisma generate` 成功(Client类型确认包含新字段);`prisma validate` 因本地shell未设`DATABASE_URL`报错,与schema本身无关,generate通过已充分证明schema语法/语义正确;`git diff`确认改动范围精确对应设计,未连接任何数据库或服务器。
+
+- [x] 18.2 **后端:手动催缴接口(单笔立即催 `POST /bills/:id/remind` + 批量催 `POST /bills/batch-remind`),复用现有防重复发送逻辑。**
+- [x] 18.3 **房东端前端:账单详情页"催一下"按钮 + 逾期看板多选批量催入口。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`bills.service.ts` 新增 `remind`/`batchRemind`,公共校验+发送+写日志逻辑抽成私有方法 `sendManualReminder` 给单笔和批量共用:账单状态必须是PENDING/OVERDUE、当天已有`source=MANUAL`的ReminderLog则拒绝(复用现有"今天已发过"判断模式,不新写机制)、租客未绑定openid则拒绝、复用现有`WechatNotifyService`和模板消息(不新增模板)、发送后写`ReminderLog(source=MANUAL)`。`batchRemind`单笔失败不中断整体,返回`{succeeded, skipped:[{billId,reason}]}`。`bills.module.ts` 引入 `WechatModule`。前端:`BillDetail.vue` 账单状态PENDING/OVERDUE时新增"📢催一下"按钮,失败提示走现有http拦截器统一展示后端错误文案。`Overdue.vue` 新增"批量催"模式切换,进入后每行前面出现checkbox(点击行也可选中,不影响原有跳转逻辑),底部悬浮操作栏显示"催选中的N个",完成后toast展示"X条已发送,Y条跳过"并刷新列表;切换当前选中公寓时批量模式自动重置退出。
+> 如何验证——Kiro新增单元测试`bills.service.spec.ts`覆盖成功发送/状态拒绝/当天已催拒绝/未绑定微信拒绝/批量混合成功与跳过/账单不存在共6个场景,断言具体到调用参数和ReminderLog写入内容,不是空跑;Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(3套件21用例全过)、`pnpm --filter landlord-h5 exec vue-tsc -b`(0错误)均通过;逐行审查了service/controller/前端两个diff,确认路由无冲突(`/bills/batch-remind`与`/bills/:id/remind`路径深度不同不会误匹配)、错误处理路径合理。**已部署到dev环境并用真实浏览器验证生效**(2026-08-31,见M18背景段落补记):账单详情页"催一下"按钮真实点击验证了三条路径——租客未绑定openid返回400、成功发送返回201、同一账单当天重复点击返回400"今天已经催过了";逾期看板"批量催"模式真实操作了进入批量模式→勾选3条→点击底部"催选中的3个"→接口201响应→自动退出批量模式返回列表这一整套交互,均符合设计。
+- [x] 18.4 **后端:支付订单创建接口框架(`POST /payments/wechat/create-order`、`POST /payments/alipay/create-order`)+ `PAYMENT_MODE=mock/real` 模式(仿照现有WECHAT_MODE设计),mock模式下可完整走通下单流程不依赖真实商户号。**
+- [x] 18.5 **后端:支付回调接口框架(`POST /payments/wechat/notify`、`POST /payments/alipay/notify`)+ 幂等处理(按outTradeNo去重)+ 回调成功后自动更新Payment/Bill状态;mock模式配一个仅mock可用的"模拟支付成功"测试接口方便联调。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`payments/gateways/` 新增完整三件套(接口+Mock+Real实现),完全仿照 `wechat/` 模块的 `useClass` 按环境变量选择实现的模式(`payments.module.ts` 按 `PAYMENT_MODE` 选 Mock/RealWechatPayService、Mock/RealAlipayService)。`createWechatOrder`/`createAlipayOrder`:校验账单存在+`bill.lease.tenantId`必须等于JWT里的`user.tenantId`(不能付别人的账单,新加的所有权校验,老代码里`tenantReport`没做这个,这次按更高标准补上)+账单状态必须PENDING/OVERDUE,生成唯一`outTradeNo`,创建`status=PENDING`的Payment占位,支付宝二维码内容统一在后端用`qrcode`库转成`data:image/png;base64`图片返回,前端不需要任何二维码相关依赖。`handleWechatNotify`/`handleAlipayNotify`/`simulateSuccess`三个入口最终都收敛到私有方法`confirmOnlinePayment`:按`outTradeNo`查Payment,不存在或已是CONFIRMED直接幂等返回,不重复处理;额外加了渠道防串号校验(`payment.channel !== channel`时拒绝,防止微信回调误确认支付宝订单这类错位)。**最关键的安全设计**——`POST /payments/mock/simulate-success`在controller和service两处各自独立检查`PAYMENT_MODE`,任一处不是`mock`就在方法第一行直接抛`NotFoundException`(表现为接口不存在,不是"权限不足"这种会暴露接口存在的错误),双重拦截不依赖单点。真实模式:微信支付部分实现了V3 API完整的请求签名(`WECHATPAY2-SHA256-RSA2048`)和支付参数签名,支付宝部分实现了完整的RSA-SHA256回调验签;微信回调的`resource`解密(AES-256-GCM)已按V3规范实现,但**如实说明一个尚未完成的点**:微信回调的平台证书签名校验(`Wechatpay-Signature`头)目前只做了"签名头是否存在"的检查,没有做真正的证书验签,这需要18.7对接真实商户号后先跑通"下载微信支付平台证书"这个前置流程才能补全,Kiro在代码注释里如实标注了这个限制,不是遗漏、是主动记录的已知缺口。新增环境变量除设计里列的几个,Kiro额外发现并补上了`PAYMENT_NOTIFY_BASE_URL`(微信下单请求必须携带绝对回调地址,这是真实调用时缺一不可的参数,设计阶段没写全,Kiro自己补上是合理的)。
+> 如何验证——新增测试专门针对最关键的安全性质:`payments.controller.spec.ts`和`payments.service.spec.ts`里各有一条测试断言"PAYMENT_MODE=real时调mock/simulate-success必须404,且不会调用到实际处理逻辑/不会查询数据库",不是只做代码审查就采信。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(4套件30用例全过,含上面两条安全测试)。逐文件审查了gateways目录全部7个文件+service+controller+dto的完整diff,重点核对了WeChat V3签名字符串拼接格式、GCM解密的auth tag截取方式、支付宝待签名字符串拼接规则,均符合官方文档描述的格式(Real部分因缺真实密钥无法端到端跑通,这一步明确留给18.7)。**尚未部署到dev环境**,等18.6租客端前端做完后一起联调部署。
+- [x] 18.6 **租客端前端:`PayBill.vue` 改造,去掉收款码/截图上传UI,替换为"微信支付"按钮 + 支付宝收款二维码展示;mock模式下点击后模拟支付成功可以看到完整状态变化。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——彻底重写 `PayBill.vue`,删掉原来收款码图片(`GET /tenant/qrcode`)+截图上传+`POST /payments/report`人工上报那一整套,换成"微信支付/支付宝"两个按钮。点击后调对应`create-order`接口,`mode==='real'`时走标准 `WeixinJSBridge.invoke('getBrandWCPayRequest',...)` 拉起支付(含`WeixinJSBridgeReady`事件监听的标准写法,组件卸载时正确移除监听器不留泄漏);`mode==='mock'`时展示"模拟支付中..."+一个仅mock可见的"模拟支付成功(测试用)"按钮。支付宝走二维码展示(后端已经把内容转成`data:image/png;base64`图片,前端不需要任何二维码相关依赖,单纯当图片用)。两个方式共用同一套轮询逻辑(每3秒查一次账单状态,最多20次/1分钟超时),同一时间只能有一个支付方式处于进行中(点了一个另一个按钮自动disabled,防止同时开两笔订单搞混)。账单已经是PAID状态时直接显示"已付款",不展示支付入口。
+> 如何验证——Claude Code独立重跑(不采信Kiro自述)`pnpm --filter tenant-h5 exec vue-tsc -b`(0错误),并在此基础上追加了一轮全量回归:`pnpm --filter server exec tsc --noEmit`+`pnpm --filter server test`(4套件30用例)+`pnpm --filter landlord-h5 exec vue-tsc -b`+`pnpm --filter tenant-h5 exec vue-tsc -b`全部0错误/全过,确认这一批(18.1~18.6)加起来没有互相破坏。逐行审查了组件diff,确认状态管理和清理逻辑正确(轮询定时器、WeixinJSBridge事件监听器在组件卸载时都有对应清理,不会内存泄漏)。**已部署到dev环境并用真实浏览器验证生效**(2026-08-31,见M18背景段落补记):用dev库里一个已通过邀请码绑定测试openid的真实历史租客账号,完整走了两条支付路径——①点"微信支付"→正确识别mock模式展示"模拟支付中..."→点"模拟支付成功(测试用)"→3秒内轮询检测到状态变化→页面切换成"支付成功,账单已付款"绿色成功态;②另一张账单点"支付宝"→正确渲染出可扫描的二维码图片+"请截图后使用支付宝App扫一扫完成支付"提示文案→点"模拟支付成功(测试用)"→同样轮询检测成功→显示已付款。两次测试中另一个支付方式按钮均正确处于disabled状态,验证了"同一时间只能一个支付方式进行中"这条约束。验证完成后已清理测试产生的Payment记录,账单状态还原回OVERDUE,不留痕迹。
+
+### 第二批:等 GasCan 申请到的商户资质到手后开工(当前阻塞,不要提前开始)
+
+- [ ] 18.7 **微信支付真实对接:PAYMENT_MODE切real,接入真实mch_id/APIv3密钥,调通统一下单API。**
+> 进度记录(2026-08-31,未勾选完成,真实下单联调还没跑,记录当前完成的前置工作): GasCan已完成微信支付商户号申请(mch_id=1117104714)+全部密钥材料准备(APIv3密钥/微信支付公钥+公钥ID/商户API证书私钥+序列号,共6项,全部已安全存入服务器`.env`和`.env.dev`,过程中排查确认从未落地到任何git提交或文档)+后台配置(AppID关联商户号、JSAPI支付授权目录)。补上了18.5遗留的已知缺口——`verifyWechatNotifyHeaders`原来只检查请求头是否存在,现已实现真正的"微信支付公钥"模式验签(微信2024年后推出的新机制,取代老式平台证书下载轮换方案,更简单):验签串按`${timestamp}\n${nonce}\n${rawBody}\n`构造,RSA-SHA256验证`Wechatpay-Signature`,`Wechatpay-Serial`必须匹配`WECHAT_PAY_PUBLIC_KEY_ID`否则拒绝(不支持老式平台证书模式,不静默降级)。为拿到验签必需的原始请求体字节,`main.ts`开启了NestJS官方的`rawBody:true`捕获,只影响`wechat/notify`这一个路由,其余接口不受影响。新增单测**现场生成真实RSA密钥对**签名+验签(不是mock掉crypto模块),覆盖正常验签通过、篡改body后签名不匹配被拒绝、Serial不匹配被拒绝三种场景,顺带完整跑通了AES-256-GCM解密链路。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(7套件53用例全过)。**下一步更新(2026-08-31)**:GasCan确认真实测试直接在**生产环境**做(方案B,不是dev,因为JSAPI支付需要真实微信openid,而dev环境WECHAT_MODE一直是mock,生产环境才是真实登录)。开工前发现一个必须先处理的问题——原设计`PAYMENT_MODE`是单个开关同时控制微信支付和支付宝两个渠道,而支付宝审核还没批下来,贸然整体切real会导致生产环境真实用户点"支付宝"按钮时功能报错。已完成修复:拆成`WECHAT_PAY_MODE`和`ALIPAY_MODE`两个独立开关(不设置时向后兼容退到`PAYMENT_MODE`),`payments.module.ts`两个provider分别按各自开关选择实现,`payments.service.ts`的`simulateSuccess`(mock测试接口的安全拦截)改成先查出Payment的channel、再按对应渠道的模式判断拦截,不再是笼统一个全局判断;`payments.controller.ts`的controller层快速拦截只在两个渠道都是real时才提前拒绝,混合模式下放行给service层做出正确的按渠道判断。新增测试专门覆盖"微信real+支付宝mock"这种混合状态下两个渠道分别的行为。Claude Code独立重跑`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(7套件58用例全过)。
+> **下一步**:创建专用测试房源(不占用真实房源数据)→合并dev到main部署生产→生产环境设`WECHAT_PAY_MODE=real`(`ALIPAY_MODE`继续留空/mock)→GasCan本人用真实微信通过测试房源的邀请码走真实绑定→用真实小额资金(¥0.01)完成一次微信支付测试,验证回调触发+账单自动变已付→测试完成后原路退款+清理测试数据,18.7才勾选完成。
+- [ ] 18.8 **支付宝真实对接:接入真实APPID/密钥,调通当面付预下单API,验签跑通。**
+- [ ] 18.9 **端到端真实小额资金验证(¥0.01~1):新建测试账单→真实扫码支付→确认回调自动销账→测试完成后原路退款给GasCan。**
+
+## M19 合同电子签约 + 服务号关注引导(2026-08-31立项;**2026-08-31暂停,平台选型推翻重来**)
+
+> **⚠️ 当前状态:暂停开发,等GasCan确认新平台后再继续。** 19.1~19.4(数据模型/微信公众号能力/生成关注二维码)已完成且平台无关,不受影响,后续换平台可以直接复用。19.3(腾讯电子签API封装框架)大概率要作废重写——GasCan实测发现腾讯电子签、e签宝的API接入都要求购买"专业版",超出预算(¥2000以内),爱签要求先买2500份套餐(远超实际用量)解锁API,法大大早前已知年费门槛¥15000+。目前线索是"微签"(定位个人/小团队、微信内即用、计费友好),GasCan正在自行核实,确认平台前不要继续19.5/19.6/19.7/19.8/19.9/19.10。
+
+> 背景:GasCan 提出入住办理时让租客在线绑定电子签、完成合同签署,签署结果存储并绑定到对应房间方便追溯。经多轮问答设计确认:平台选定腾讯电子签(已完成企业认证、已开通服务、10份体验合同额度,子账号密钥已配置在服务器);触发方式基于GasCan现有的"中介转发二维码"线下习惯改造——房东生成微信关注场景二维码(免费,不消耗额度)→转发给中介→中介转租客→租客扫码顺带引导关注公众号(这个公众号未来承载全员公告/在线报修/交房租)→真实扫码/关注后才创建腾讯电子签正式合同任务(此时才消耗额度)→租客完成实名认证+单方签字(不要求房东同步签字,甲方"占秀英"个人名义写死)→签署完成自动绑定租客账号(不用再走邀请码)、结果PDF存档绑定房间/租约。新签+续签都要走,且每次都是独立永久记录(不会因为续签更新Lease而互相覆盖)。合同文本GasCan已提供,识别出的动态字段含水电表底数+屋内设施清单(合同原文有,系统之前没有对应字段,这次一并补上)。详细设计见 `specs/requirements.md` 4.5节、`specs/design.md` 5.6节。
+>
+> **过程中顺带发现并修复了两个独立的生产隐患(跟M19本身无关,但排查M19依赖时发现的)**:①生产服务器IP一直没加进公众号"IP白名单",导致 `cgi-bin/token` 接口被拒,现有催租提醒此前从未真正测试过发送环节全靠"0个真实租客绑定openid"侥幸没暴露,GasCan已加白名单验证修复;②`apps/server/.env.dev` 一直处于"未跟踪也未被gitignore排除"的危险状态,已修复(commit `61a7930`)。
+>
+> **本里程碑同样分两批**:第一批(19.1~19.7)不依赖"服务号内嵌vs小程序跳转"这个还在等腾讯销售经理确认的细节,可以先搭好框架(含mock模式下完整可跑通的业务编排);第二批(19.8~19.10)需要该细节确认后才能真正对接腾讯电子签"创建签署流程"接口,且需要GasCan先在腾讯电子签后台把提供的合同文本建成模板、拿到模板ID。
+
+### 第一批:不依赖"内嵌vs跳转"细节,现在开工
+
+- [x] 19.1 **Prisma schema变更:新增 ContractSigningTask 模型(签约记录,每次新签/续签独立一条,含水电表底数/设施清单/场景值/状态机字段)。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——新增 `ContractSigningTask` 模型,完整包含设计里的全部字段(leaseId/type/sceneValue唯一索引/qrCodeImage/三项水电表读数/facilities JSON/status状态机/tencentFlowId/signedPdfUrl/signedAt),`Lease` 加 `contractSigningTasks ContractSigningTask[]` 反向关系,命名风格(`@@map`表名、字段命名)跟现有模型保持一致。只改了 `schema.prisma` 一个文件。
+> 如何验证——`prisma generate` 独立重跑成功(0错误,Client正确生成含新模型类型);`git diff` 确认改动范围精确对应设计,未连接数据库、未执行db push、未部署。
+- [x] 19.2 **微信公众号能力扩展:带参数二维码生成接口 + 关注/扫描事件webhook处理框架 + 客服消息接口,复用现有 `WECHAT_MODE=mock|real`(这是微信平台自身能力,不是腾讯电子签,不需要新变量)。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`wechat/` 模块扩展三组接口+Mock+Real(`IWechatQrcodeService`带参数二维码/`IWechatEventService`事件解析/`IWechatCustomerServiceService`客服消息),完全复用现有 `useClass` 按 `WECHAT_MODE` 选实现的模式,`wechat.module.ts` 统一接线+导出。**主动做的一处重构(超出原始要求,是好的判断)**:把 access_token 获取+缓存逻辑从 `RealWechatNotifyService` 里抽成独立的 `WechatAccessTokenService` 共享给新的二维码/客服消息服务复用,不是第三次复制粘贴同一段逻辑,顺带在共享服务里加了并发去重(`pendingRequest`,防止同一时刻多个请求同时触发重复刷新token),这是原有分散实现没有的保护,`RealWechatNotifyService` 本身逻辑不变、只是改为注入这个共享服务。二维码创建:校验 `sceneValue` 必须是32位非零正整数,创建后自动下载ticket对应图片转成 `data:image/png;base64`,前端直接用。事件解析:用正则同时兼容CDATA和纯文本两种XML写法,大小写不敏感,`subscribe`事件从`qrscene_`前缀EventKey提取场景值,`SCAN`事件直接用EventKey本身,均做了`Number.isSafeInteger`校验。**如实标注的遗漏**:微信服务器URL接入验证(Token+签名校验那套,用于确认webhook请求真的来自微信官方)本次没做,这个不属于这次要求范围,但已注明。
+> 如何验证——Kiro新增单测覆盖access_token缓存/失效重试/未返回token报错/二维码创建含图片转换/token过期重试一次/mock不调用真实接口/subscribe与SCAN两种事件格式解析(断言到具体场景值123和456)/无法解析场景值时的边界情况/客服消息发送与重试/mock行为/RealWechatNotifyService用共享token服务后回归验证,共12个用例。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(5套件41用例全过)。逐文件审查了8个新文件+2个改动文件的完整diff,重点核对了微信官方API请求格式(二维码创建/客服消息发送)和XML事件解析的正则逻辑,均正确。
+- [x] 19.3 **腾讯电子签API封装框架:创建签署流程/查询状态/签署完成回调,新增 `ESIGN_MODE=mock|real` 双模式(这个才是腾讯电子签专属的开关),real部分按官方Essbasic API格式实现结构,暂不要求真实跑通(缺模板ID)。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——新建 `apps/server/src/tencent-esign/` 目录,接口+Mock+Real三件套,完全仿照wechat/payments gateways既有模式,`ESIGN_MODE` 独立于 `WECHAT_MODE` 控制(两者是不同外部平台)。**这次特意要求Kiro先去查真实的腾讯云官方文档而不是凭空编,Kiro确实这么做了**——完成说明里逐条列出了"官方已核实"(域名essbasic.tencentcloudapi.com/API版本2021-05-26/`CreateFlowsByTemplates`等5个接口名和字段/回调签名算法sha256=HMAC-SHA256(token,rawBody)/AES-256-CBC回调解密)和"仍需真实配置核对"(合同模板控件名ComponentName、租客角色RecipientId、Agent的AppId等主体信息,这些必须等GasCan真正建好模板才能填对)两类,不是笼统一句"已完成",附了9条官方文档链接作为来源。TC3-HMAC-SHA256签名算法(腾讯云API 3.0通用规范,这个我本身就有把握核对)逐行核对正确。**一个值得记录、Kiro自己完成说明里没单独点出的细节**:代码里硬编码了两个常量 `MINI_PROGRAM_APP_ID='wxa023b292fd19d41d'`/`MINI_PROGRAM_ORIGINAL_ID='gh_da88f6188665'`(腾讯电子签官方小程序自己的AppId/原始ID,格式合理但真实性未经我方独立核实),等19.6真实联调时需要单独确认这两个值对不对。签署完成回调正确处理了"FlowStatusChange本身不含PDF地址,需要另调DescribeResourceUrlsByFlows下载接口"这个不那么直观的真实API行为,没有为了省事编一个"回调直接带PDF链接"的简化假设。
+> 如何验证——Kiro新增单测覆盖TC3签名头构造、回调验签(含签名不匹配拒绝)、AES解密、mock创建/查询/回调状态流转、字段映射等。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(6套件47用例全过,确认tencent-esign.spec.ts真的跑了不是被漏掉)。逐行审查了TC3-HMAC-SHA256签名算法实现(canonicalRequest拼接顺序、密钥派生链路secretDate→secretService→secretSigning均正确)、回调验签用了`timingSafeEqual`防时序攻击。改动范围精确(只新增tencent-esign目录+改.env.example一个文件),未连接任何服务器,未发起真实API调用。
+- [x] 19.4 **后端:创建签约任务接口(`POST /leases/:id/contract-signing-tasks`),接收水电表底数+设施清单,创建ContractSigningTask(status=PENDING_SCAN)并调微信生成带参数二维码。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`leases.service.ts` 新增 `createContractSigningTask`,校验租约存在后,`sceneValue` 用 `randomInt(1, 2**31)` 生成,create时若命中唯一约束冲突(`Prisma.PrismaClientKnownRequestError` code P2002)重试一次(不是先查库判断是否存在,交给数据库唯一索引兜底,避免查完到插入之间的竞态)。创建记录后调 `WECHAT_QRCODE_SERVICE.createSceneQrcode` 拿二维码,再update写回 `qrCodeImage`。`leases.module.ts` 引入 `WechatModule`。**这部分是纯微信公众号能力(生成关注二维码),不依赖具体选哪家电子签平台,后续若更换电子签服务商这批工作不受影响。**
+> 如何验证——Kiro新增单测覆盖租约不存在报错、正常创建成功、sceneValue唯一约束冲突重试成功。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(7套件50用例全过)。
+- [ ] 19.5 **后端:微信关注/扫描事件webhook接口 + 业务编排——按场景值找到PENDING_SCAN的ContractSigningTask,调腾讯电子签`createSigningFlow`(mock模式下可完整测试)创建正式流程、status改CREATED、记录tencentFlowId,再通过客服消息推送继续签约入口;场景值未匹配时发默认欢迎语兜底。**
+- [ ] 19.6 **后端:腾讯电子签签署完成回调接口 + 业务编排——按tencentFlowId幂等更新ContractSigningTask为SIGNED、存signedPdfUrl,并用关注/扫描事件里存下的openid自动绑定对应Lease的Tenant(已绑定其他openid时不静默覆盖,记录异常)。**
+- [ ] 19.7 **房东端:租约详情页"生成电子签约"入口(弹窗填水电表底数+设施清单勾选→提交)+二维码展示+签约状态展示+已签署PDF在线预览/下载。**
+
+> 说明(2026-08-31修正,执行前调整,未浪费任何已完成工作):
+> 1. 原19.2"新签/续签表单补充水电表底数+设施清单"这个位置不对——这两项数据挂在 `ContractSigningTask` 上(每次签约独立一条),不是 `Lease` 字段,不该放进新签/续签表单里(会产生"填了但还没点生成电子签约"的悬空数据)。改为挪到"生成电子签约"这个动作本身(19.4/19.7),点击时才一起录入、一起创建签约记录,逻辑更干净。
+> 2. 原19.4只覆盖了"生成二维码"这一半,design.md 5.6节里"关注/扫描事件触发创建腾讯签署流程+推客服消息"和"签署完成回调+自动绑定"这两个后端环节漏掉了任务号,补成19.5/19.6,原19.5(房东端UI)顺延成19.7。这两个新增环节虽然最终会调 `ESIGN_MODE=real` 下的腾讯API,但mock模式下业务编排逻辑(webhook接口、状态流转、自动绑定)本身完全可以搭建并测试通,不依赖"内嵌vs跳转"这个还在等的细节,所以仍属于第一批范围,不用挪到第二批。
+
+### 第二批:等"内嵌vs跳转"确认 + 合同模板在腾讯电子签后台建好拿到模板ID后开工(当前阻塞)
+
+- [ ] 19.8 **真实对接:ESIGN_MODE切real,接入真实模板ID,调通腾讯电子签创建签署流程API,核对19.3遗留的两个硬编码小程序AppId/原始ID常量是否准确。**
+- [ ] 19.9 **签署完成回调真实验签 + 端到端确认自动绑定租客账号逻辑生效。**
+- [ ] 19.10 **真实场景验证:用腾讯电子签体验额度(10份中的1~2份)走一遍完整流程——生成二维码→真实扫码关注→收到继续签约推送→完成签署→回调触发→房东端能看到已签署PDF+租客自动绑定成功。**
+
 ## P2(暂不开工)
-微信支付自动销账、合同电子化
+(空)
 
 ## Notes
 

@@ -6,9 +6,9 @@ export class DashboardService {
   constructor(private readonly prisma: PrismaService) {}
 
   /** 空置看板:空置房+空置天数,按楼栋分组 */
-  async getVacancyBoard() {
+  async getVacancyBoard(propertyId?: number) {
     const vacantRooms = await this.prisma.room.findMany({
-      where: { status: 'VACANT' },
+      where: { status: 'VACANT', ...(propertyId && { building: { propertyId } }) },
       include: { building: true },
       orderBy: [{ buildingId: 'asc' }, { roomNo: 'asc' }],
     });
@@ -40,7 +40,7 @@ export class DashboardService {
   }
 
   /** 到期预警:30/15/7天内到期的租约 */
-  async getExpiringLeases() {
+  async getExpiringLeases(propertyId?: number) {
     const now = new Date();
     const in30Days = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
@@ -48,6 +48,7 @@ export class DashboardService {
       where: {
         status: 'ACTIVE',
         endDate: { lte: in30Days },
+        ...(propertyId && { room: { building: { propertyId } } }),
       },
       include: { room: { include: { building: true } }, tenant: true },
       orderBy: { endDate: 'asc' },
@@ -62,9 +63,12 @@ export class DashboardService {
   }
 
   /** 逾期看板:欠租人、欠租天数、金额,按楼栋分组 */
-  async getOverdueBoard() {
+  async getOverdueBoard(propertyId?: number) {
     const overdueBills = await this.prisma.bill.findMany({
-      where: { status: 'OVERDUE' },
+      where: {
+        status: 'OVERDUE',
+        ...(propertyId && { lease: { room: { building: { propertyId } } } }),
+      },
       include: {
         lease: { include: { room: { include: { building: true } }, tenant: true } },
       },

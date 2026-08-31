@@ -23,20 +23,30 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import { showToast, showImagePreview } from 'vant';
 import http from '../../utils/http';
+import { usePropertyStore } from '../../stores/property';
 
+const propertyStore = usePropertyStore();
 const list = ref<any[]>([]);
 const loading = ref(true);
 
 async function fetchList() {
   loading.value = true;
-  try { list.value = await http.get('/payments/pending') as any; }
+  try {
+    const params: Record<string, string> = {};
+    if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
+    list.value = await http.get('/payments/pending', { params }) as any;
+  }
   finally { loading.value = false; }
 }
 
 onMounted(fetchList);
+
+watch(() => propertyStore.currentPropertyId, () => {
+  fetchList();
+});
 
 async function handleConfirm(id: number, action: string) {
   await http.post(`/payments/${id}/confirm`, { action });

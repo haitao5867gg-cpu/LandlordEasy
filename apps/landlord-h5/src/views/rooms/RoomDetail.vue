@@ -11,7 +11,6 @@
         <van-cell title="楼栋" :value="room.building?.name" />
         <van-cell title="房号" :value="room.roomNo" />
         <van-cell title="楼层" :value="String(room.floor)" />
-        <van-cell title="房型" :value="room.roomType?.name || '未设置'" />
         <van-cell title="状态">
           <template #value>
             <van-tag :type="room.status === 'RENTED' ? 'success' : 'default'">{{ statusMap[room.status] || room.status }}</van-tag>

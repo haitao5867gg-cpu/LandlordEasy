@@ -9,6 +9,7 @@ import { HealthModule } from './health/health.module';
 import { WechatModule } from './wechat/wechat.module';
 import { AuthModule } from './auth/auth.module';
 import { BuildingsModule } from './buildings/buildings.module';
+import { PropertiesModule } from './properties/properties.module';
 import { RoomTypesModule } from './room-types/room-types.module';
 import { RoomsModule } from './rooms/rooms.module';
 import { DashboardModule } from './dashboard/dashboard.module';
@@ -36,6 +37,7 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
     WechatModule,
     AuthModule,
     BuildingsModule,
+    PropertiesModule,
     RoomTypesModule,
     RoomsModule,
     DashboardModule,

@@ -5,6 +5,8 @@ import {
   IsInt,
   IsDateString,
   IsArray,
+  IsBoolean,
+  IsIn,
   ValidateNested,
   Min,
 } from 'class-validator';
@@ -94,4 +96,35 @@ export class RenewLeaseDto {
   @IsNumber()
   @Min(0)
   newRent?: number;
+}
+
+class ContractSigningFacilityDto {
+  @IsString()
+  name!: string;
+
+  @IsBoolean()
+  has!: boolean;
+}
+
+export class CreateContractSigningTaskDto {
+  @IsIn(['NEW', 'RENEW'])
+  type!: 'NEW' | 'RENEW';
+
+  @IsOptional()
+  @IsNumber()
+  waterMeterReading?: number;
+
+  @IsOptional()
+  @IsNumber()
+  electricityMeterReading?: number;
+
+  @IsOptional()
+  @IsNumber()
+  gasMeterReading?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ContractSigningFacilityDto)
+  facilities?: ContractSigningFacilityDto[];
 }

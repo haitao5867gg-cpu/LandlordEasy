@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Param, Body, UseGuards, ParseIntPipe } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Param, Body, Query, UseGuards, ParseIntPipe } from '@nestjs/common';
 import { BuildingsService } from './buildings.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { CreateBuildingDto, UpdateBuildingDto } from './buildings.dto';
@@ -9,8 +9,10 @@ export class BuildingsController {
   constructor(private readonly buildingsService: BuildingsService) {}
 
   @Get()
-  findAll() {
-    return this.buildingsService.findAll();
+  findAll(@Query('propertyId') propertyId?: string) {
+    return this.buildingsService.findAll(
+      propertyId ? parseInt(propertyId) : undefined,
+    );
   }
 
   @Get(':id')
