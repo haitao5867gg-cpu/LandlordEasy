@@ -403,7 +403,7 @@ M9~M17 全部完成；M18第一批（18.1~18.6）全部完成，第二批（18.7
 
 ---
 
-## 最新状态：2026-08-31（M18.7/18.9微信支付真实对接+端到端¥0.01真实支付验证成功；M19暂停等平台确认；18.10已完成——这是当前最新的交接快照，新会话直接看这一节）
+## 最新状态：2026-08-31（M18.7/18.9微信支付真实对接+端到端¥0.01真实支付验证成功；M19暂停等平台确认；18.10已完成并推生产——这是当前最新的交接快照，新会话直接看这一节）
 
 > 这一节覆盖上方所有更早的状态。**上一节末尾"下一步"里提到的"合同电子签约选型已经聊过一部分，正在跟腾讯销售经理咨询腾讯电子签细节"这句已过时**：腾讯电子签、e签宝都要求购买专业版超预算，M19已改为调研"微签"平台并整体暂停，详见 `specs/tasks.md` M19章节。
 
@@ -433,7 +433,9 @@ GasCan 完成微信支付商户号申请（对公结算，mch_id=1117104714）�
 
 GasCan真实支付成功后反馈："我付完钱之后，租客端这里我想要再从列表点回去就没办法点到订单详情页了"，希望能看到付款金额/时间/构成/渠道。经"一问一答直到确认"的设计流程确认方案：**复用现有`/bills/:id/pay`路由**扩充展示内容（不新建独立详情页），展示费用明细+仅CONFIRMED状态的支付记录列表（渠道映射成中文），不展示确认人身份和失败尝试记录；后端`GET /tenant/bills`已经带出`items`和`payments`，不需要改动后端。
 
-Kiro CLI实现（只改`MyBills.vue`+`PayBill.vue`两个文件），Claude Code独立复核：`vue-tsc -b`+`build`独立重跑通过；用本地vite dev server+XHR拦截伪造`/tenant/bills`响应+真实浏览器`computer`点击（不是脚本模拟路由跳转）验证了4种场景——费用明细+CONFIRMED支付记录正确展示、PENDING测试记录被正确过滤、多笔历史现金支付全部列出不只显示一笔、PENDING未付款账单原有支付按钮流程未被破坏。已提交推送到`dev`分支（commit `e92bf27`）。顺带发现房东端`landlord-h5`的`paymentChannelMap`（`utils/status.ts`）缺了`ALIPAY`这一项映射，已用`spawn_task`单独记录，不阻塞本次交付，详见 `specs/tasks.md` 18.10完成说明。
+Kiro CLI实现（只改`MyBills.vue`+`PayBill.vue`两个文件），Claude Code独立复核：`vue-tsc -b`+`build`独立重跑通过；用本地vite dev server+XHR拦截伪造`/tenant/bills`响应+真实浏览器`computer`点击（不是脚本模拟路由跳转）验证了4种场景——费用明细+CONFIRMED支付记录正确展示、PENDING测试记录被正确过滤、多笔历史现金支付全部列出不只显示一笔、PENDING未付款账单原有支付按钮流程未被破坏。GasCan要求"先在kiro-cli测通了，再推"，又追加了一轮Kiro CLI独立全量回归+Playwright真实浏览器复测，同样全部通过。顺带发现房东端`landlord-h5`的`paymentChannelMap`（`utils/status.ts`）缺了`ALIPAY`这一项映射，已用`spawn_task`单独记录，不阻塞本次交付，详见 `specs/tasks.md` 18.10完成说明。
+
+**已推生产**：main worktree合并`dev`（3个commit，无schema变更）后独立重跑全量回归（server tsc/jest、两个前端vue-tsc）才push，`bash deploy/deploy.sh prod`部署成功。**部署过程中顺带处理了一个历史遗留安全隐患**：生产服务器`apps/server/.env.dev`（不该在prod目录出现的开发密钥文件）自8月20日起一直是`git add`过但从未提交的staged状态且未被`.gitignore`排除，有被未来某次无关commit意外带入main分支历史的风险，已用`git reset`撤销staged状态（现在正确被`.gitignore`忽略），没有改动文件内容。部署后验证：健康检查200，构建产物哈希核对一致，服务器上直接确认新构建的`PayBill-*.js`真的包含"费用明细"/"支付记录"字符串（不是文件名对上内容还是旧代码），真实浏览器访问`https://landlordeasy.cn/tenant/`控制台0错误、登录页正常渲染。**受限于生产环境走真实微信OAuth，无法自动化模拟真实登录**，GasCan本人点击查看那笔¥0.01已付款账单详情这一步，还需要GasCan自己用手机确认效果。
 
 ### 当前 `specs/tasks.md` 状态
 
