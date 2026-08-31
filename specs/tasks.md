@@ -454,8 +454,8 @@
 - [x] 19.1 **Prisma schema变更:新增 ContractSigningTask 模型(签约记录,每次新签/续签独立一条,含水电表底数/设施清单/场景值/状态机字段)。**
 > 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——新增 `ContractSigningTask` 模型,完整包含设计里的全部字段(leaseId/type/sceneValue唯一索引/qrCodeImage/三项水电表读数/facilities JSON/status状态机/tencentFlowId/signedPdfUrl/signedAt),`Lease` 加 `contractSigningTasks ContractSigningTask[]` 反向关系,命名风格(`@@map`表名、字段命名)跟现有模型保持一致。只改了 `schema.prisma` 一个文件。
 > 如何验证——`prisma generate` 独立重跑成功(0错误,Client正确生成含新模型类型);`git diff` 确认改动范围精确对应设计,未连接数据库、未执行db push、未部署。
-- [ ] 19.2 **微信公众号能力扩展:带参数二维码生成接口 + 关注/扫描事件webhook处理框架 + 客服消息接口,`ESIGN_MODE=mock|real` 双模式(仿照WECHAT_MODE/PAYMENT_MODE的分层模式)。**
-- [ ] 19.3 **腾讯电子签API封装框架:创建签署流程/查询状态/签署完成回调,mock/real双模式,real部分按官方Essbasic API格式实现结构,暂不要求真实跑通(缺模板ID)。**
+- [ ] 19.2 **微信公众号能力扩展:带参数二维码生成接口 + 关注/扫描事件webhook处理框架 + 客服消息接口,复用现有 `WECHAT_MODE=mock|real`(这是微信平台自身能力,不是腾讯电子签,不需要新变量)。**
+- [ ] 19.3 **腾讯电子签API封装框架:创建签署流程/查询状态/签署完成回调,新增 `ESIGN_MODE=mock|real` 双模式(这个才是腾讯电子签专属的开关),real部分按官方Essbasic API格式实现结构,暂不要求真实跑通(缺模板ID)。**
 - [ ] 19.4 **后端:创建签约任务接口(`POST /leases/:id/contract-signing-tasks`),接收水电表底数+设施清单,创建ContractSigningTask(status=PENDING_SCAN)并调微信生成带参数二维码。**
 - [ ] 19.5 **房东端:租约详情页"生成电子签约"入口(弹窗填水电表底数+设施清单勾选→提交)+二维码展示+签约状态展示+已签署PDF在线预览/下载。**
 
