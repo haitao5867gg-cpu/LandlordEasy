@@ -112,21 +112,20 @@ JWT 内含 tenantId;接口只返回该租客自己租约的数据。UI 按租约
 **新增环境变量模式**:仿照 `WECHAT_MODE`/`PAYMENT_MODE`,新增 `ESIGN_MODE=mock|real`,mock模式下不真实调用腾讯API,方便dev环境联调。
 
 **触发流程**:
-1. 房东新签/续签时,在表单里补充水电表底数(可选)+屋内设施勾选(12项固定选项:空调/冰箱/洗衣机/热水器/燃气灶/电视/淋浴器/油烟机/床/柜子/椅子/沙发,对应合同原文)
-2. 房东在租约详情页点「生成电子签约」:创建一条 `ContractSigningTask`(status=PENDING_SCAN),调微信「生成带参数二维码」接口(临时二维码,场景值关联这条记录的id或专用编号),返回二维码图片供房东截图转发。**这一步不调用腾讯电子签API,不消耗额度**。
-3. 微信「关注事件」/「扫描事件」webhook(新增,复用 `WechatModule` 的 mock/real 分层模式):收到事件后按场景值查到对应 `ContractSigningTask`,若状态仍是 PENDING_SCAN:
+1. 房东在租约详情页点「生成电子签约」,弹窗填写水电表底数(可选)+屋内设施勾选(12项固定选项:空调/冰箱/洗衣机/热水器/燃气灶/电视/淋浴器/油烟机/床/柜子/椅子/沙发,对应合同原文)——**这两项挂在 `ContractSigningTask` 上,不是 `Lease` 字段,不放进新签/续签表单**,提交后创建一条 `ContractSigningTask`(status=PENDING_SCAN),调微信「生成带参数二维码」接口(临时二维码,场景值关联这条记录的id或专用编号),返回二维码图片供房东截图转发。**这一步不调用腾讯电子签API,不消耗额度**。
+2. 微信「关注事件」/「扫描事件」webhook(新增,复用 `WechatModule` 的 mock/real 分层模式):收到事件后按场景值查到对应 `ContractSigningTask`,若状态仍是 PENDING_SCAN:
    - 调腾讯电子签API创建正式签署流程(此时才消耗额度),把 Lease 的租金/期限/押金 + 该 ContractSigningTask 的水电表读数/设施清单,通过模板变量传入生成合同内容
    - 更新 status=CREATED,记录 tencentFlowId
    - 通过微信「客服消息」接口(新增)把继续签约的入口(链接或小程序码,取决于腾讯电子签返回的形式)推给这个用户
    - 若该场景值未匹配任何 PENDING_SCAN 任务(已使用过/过期/普通关注无场景值),走默认欢迎语兜底,不创建腾讯任务
-4. 公众号原有「被添加为好友后自动回复」已由 GasCan 手动关闭,欢迎语/业务消息完全由上面这套代码逻辑接管
-5. 租客在腾讯电子签完成实名认证+签署(只需租客单方签字,「出租人」甲方信息固定写死,不做变量)
-6. 腾讯电子签签署完成回调(新增 `POST /contracts/tencent-esign/notify`,复用支付回调的幂等设计思路,按 tencentFlowId 查找+防重复处理):
+3. 公众号原有「被添加为好友后自动回复」已由 GasCan 手动关闭,欢迎语/业务消息完全由上面这套代码逻辑接管
+4. 租客在腾讯电子签完成实名认证+签署(只需租客单方签字,「出租人」甲方信息固定写死,不做变量)
+5. 腾讯电子签签署完成回调(新增 `POST /contracts/tencent-esign/notify`,复用支付回调的幂等设计思路,按 tencentFlowId 查找+防重复处理):
    - 更新 ContractSigningTask.status=SIGNED,存 signedPdfUrl、signedAt
    - **自动绑定**:用这次关注/扫描事件里拿到的openid,写入该 Lease 关联 Tenant 的 openid 字段(复用现有 `bindInviteCode` 同等语义,但触发方式不同);若该 Tenant 已绑定其他 openid,不静默覆盖,记录异常留待房东人工核实,不做自动处理
-7. 房东端租约详情页展示签约进度(PENDING_SCAN/CREATED/SIGNED/EXPIRED),SIGNED 状态下提供在线预览(PDF)+下载入口
+6. 房东端租约详情页展示签约进度(PENDING_SCAN/CREATED/SIGNED/EXPIRED),SIGNED 状态下提供在线预览(PDF)+下载入口
 
-**待确认**:腾讯电子签签署入口具体是H5链接还是小程序码(取决于是否需要跳出微信生态,GasCan正在跟腾讯销售经理确认),这决定第3步「客服消息」推送内容的具体形式,不阻塞先搭好上述框架,real模式下这一环节最后接。
+**待确认**:腾讯电子签签署入口具体是H5链接还是小程序码(取决于是否需要跳出微信生态,GasCan正在跟腾讯销售经理确认),这决定第2步「客服消息」推送内容的具体形式,不阻塞先搭好上述框架,real模式下这一环节最后接。
 
 ## 6. API 约定
 
