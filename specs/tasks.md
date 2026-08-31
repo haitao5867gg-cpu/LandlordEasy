@@ -417,9 +417,14 @@
 
 ### 第一批:不依赖商户资质,现在开工
 
-- [ ] 18.1 **Prisma schema变更:Payment加ALIPAY渠道+订单追踪字段,ReminderLog加source字段。**
-- [ ] 18.2 **后端:手动催缴接口(单笔立即催 `POST /bills/:id/remind` + 批量催 `POST /bills/batch-remind`),复用现有防重复发送逻辑。**
-- [ ] 18.3 **房东端前端:账单详情页"催一下"按钮 + 逾期看板多选批量催入口。**
+- [x] 18.1 **Prisma schema变更:Payment加ALIPAY渠道+订单追踪字段,ReminderLog加source字段。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`Payment.channel` 注释加 ALIPAY(字段仍是String,不改成真枚举,跟随项目既有约定);新增 `outTradeNo`(String? @unique,商户订单号,支付网关下单/回调幂等用)、`gatewayTradeNo`(String?,网关交易流水号,回调时写入)。`ReminderLog` 新增 `source`(String @default("AUTO"),区分自动/手动触发,default保证历史数据兼容)。只改了 `schema.prisma` 一个文件。
+> 如何验证——`prisma generate` 成功(Client类型确认包含新字段);`prisma validate` 因本地shell未设`DATABASE_URL`报错,与schema本身无关,generate通过已充分证明schema语法/语义正确;`git diff`确认改动范围精确对应设计,未连接任何数据库或服务器。
+
+- [x] 18.2 **后端:手动催缴接口(单笔立即催 `POST /bills/:id/remind` + 批量催 `POST /bills/batch-remind`),复用现有防重复发送逻辑。**
+- [x] 18.3 **房东端前端:账单详情页"催一下"按钮 + 逾期看板多选批量催入口。**
+> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`bills.service.ts` 新增 `remind`/`batchRemind`,公共校验+发送+写日志逻辑抽成私有方法 `sendManualReminder` 给单笔和批量共用:账单状态必须是PENDING/OVERDUE、当天已有`source=MANUAL`的ReminderLog则拒绝(复用现有"今天已发过"判断模式,不新写机制)、租客未绑定openid则拒绝、复用现有`WechatNotifyService`和模板消息(不新增模板)、发送后写`ReminderLog(source=MANUAL)`。`batchRemind`单笔失败不中断整体,返回`{succeeded, skipped:[{billId,reason}]}`。`bills.module.ts` 引入 `WechatModule`。前端:`BillDetail.vue` 账单状态PENDING/OVERDUE时新增"📢催一下"按钮,失败提示走现有http拦截器统一展示后端错误文案。`Overdue.vue` 新增"批量催"模式切换,进入后每行前面出现checkbox(点击行也可选中,不影响原有跳转逻辑),底部悬浮操作栏显示"催选中的N个",完成后toast展示"X条已发送,Y条跳过"并刷新列表;切换当前选中公寓时批量模式自动重置退出。
+> 如何验证——Kiro新增单元测试`bills.service.spec.ts`覆盖成功发送/状态拒绝/当天已催拒绝/未绑定微信拒绝/批量混合成功与跳过/账单不存在共6个场景,断言具体到调用参数和ReminderLog写入内容,不是空跑;Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(3套件21用例全过)、`pnpm --filter landlord-h5 exec vue-tsc -b`(0错误)均通过;逐行审查了service/controller/前端两个diff,确认路由无冲突(`/bills/batch-remind`与`/bills/:id/remind`路径深度不同不会误匹配)、错误处理路径合理。**尚未部署到dev环境做真实浏览器验证**,这一步等18.4~18.6全部做完后一起部署联调。
 - [ ] 18.4 **后端:支付订单创建接口框架(`POST /payments/wechat/create-order`、`POST /payments/alipay/create-order`)+ `PAYMENT_MODE=mock/real` 模式(仿照现有WECHAT_MODE设计),mock模式下可完整走通下单流程不依赖真实商户号。**
 - [ ] 18.5 **后端:支付回调接口框架(`POST /payments/wechat/notify`、`POST /payments/alipay/notify`)+ 幂等处理(按outTradeNo去重)+ 回调成功后自动更新Payment/Bill状态;mock模式配一个仅mock可用的"模拟支付成功"测试接口方便联调。**
 - [ ] 18.6 **租客端前端:`PayBill.vue` 改造,去掉收款码/截图上传UI,替换为"微信支付"按钮 + 支付宝收款二维码展示;mock模式下点击后模拟支付成功可以看到完整状态变化。**

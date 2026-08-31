@@ -11,7 +11,15 @@ import {
 import { BillsService } from './bills.service';
 import { BillEngineService } from './bill-engine.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
-import { IsString, IsNumber, IsOptional, Min } from 'class-validator';
+import {
+  ArrayNotEmpty,
+  IsArray,
+  IsInt,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+} from 'class-validator';
 
 class AddBillItemDto {
   @IsString()
@@ -30,6 +38,14 @@ class AddLateFeeDto {
   @IsNumber()
   @Min(0)
   amount?: number;
+}
+
+class BatchRemindDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  billIds!: number[];
 }
 
 @Controller('bills')
@@ -56,6 +72,16 @@ export class BillsController {
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.billsService.findOne(id);
+  }
+
+  @Post('batch-remind')
+  batchRemind(@Body() dto: BatchRemindDto) {
+    return this.billsService.batchRemind(dto.billIds);
+  }
+
+  @Post(':id/remind')
+  remind(@Param('id', ParseIntPipe) id: number) {
+    return this.billsService.remind(id);
   }
 
   @Post(':id/items')
