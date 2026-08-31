@@ -17,10 +17,32 @@
           </van-cell>
         </van-cell-group>
 
-        <div v-if="bill.status === 'PAID'" class="paid-state">
-          <van-icon name="checked" size="56" color="#07c160" />
-          <div>支付成功，账单已付款</div>
-        </div>
+        <template v-if="bill.status === 'PAID'">
+          <div class="paid-state">
+            <van-icon name="checked" size="56" color="#07c160" />
+            <div>支付成功，账单已付款</div>
+          </div>
+
+          <van-cell-group inset title="费用明细">
+            <van-cell
+              v-for="item in bill.items"
+              :key="item.id"
+              :title="item.name"
+              :value="`¥${item.amount}`"
+            />
+          </van-cell-group>
+
+          <van-cell-group inset title="支付记录">
+            <van-empty v-if="!confirmedPayments.length" description="暂无支付记录" />
+            <van-cell
+              v-for="payment in confirmedPayments"
+              :key="payment.id"
+              :title="channelLabel(payment.channel)"
+              :value="`¥${payment.amount}`"
+              :label="formatPaidAt(payment.paidAt)"
+            />
+          </van-cell-group>
+        </template>
 
         <template v-else>
           <div class="payment-actions">
@@ -70,7 +92,7 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../utils/http';
@@ -78,10 +100,26 @@ import http from '../utils/http';
 type PaymentMethod = 'wechat' | 'alipay';
 type PaymentMode = 'mock' | 'real';
 
+interface BillItem {
+  id: number;
+  name: string;
+  amount: string | number;
+}
+
+interface PaymentRecord {
+  id: number;
+  amount: string | number;
+  paidAt: string;
+  channel: string;
+  status: string;
+}
+
 interface Bill {
   id: number;
   totalAmount: string | number;
   status: string;
+  items: BillItem[];
+  payments: PaymentRecord[];
 }
 
 interface WechatParams {
@@ -132,6 +170,30 @@ const paymentMode = ref<PaymentMode | null>(null);
 const outTradeNo = ref('');
 const qrCodeImage = ref('');
 const simulating = ref(false);
+
+const paymentChannelMap: Record<string, string> = {
+  QRCODE: '收款码',
+  WECHATPAY: '微信支付',
+  ALIPAY: '支付宝',
+  CASH: '现金',
+  TRANSFER: '转账',
+};
+
+const confirmedPayments = computed(() =>
+  bill.value?.payments?.filter((payment) => payment.status === 'CONFIRMED') ?? [],
+);
+
+function channelLabel(channel: string) {
+  return paymentChannelMap[channel] || channel;
+}
+
+function formatPaidAt(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 const POLL_INTERVAL = 3_000;
 const MAX_POLL_COUNT = 20;

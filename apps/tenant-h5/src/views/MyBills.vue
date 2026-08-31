@@ -20,7 +20,7 @@
             :key="bill.id"
             :title="`${bill.periodStart?.split('T')[0]} ~ ${bill.periodEnd?.split('T')[0]}`"
             :value="`¥${bill.totalAmount}`"
-            :is-link="!currentLease.readonly && ['PENDING','OVERDUE'].includes(bill.status)"
+            :is-link="!currentLease.readonly"
             @click="goPay(bill)"
           >
             <template #label>
@@ -51,9 +51,7 @@ function tagType(s: string) { if (s === 'PAID') return 'success'; if (s === 'OVE
 
 function goPay(bill: any) {
   if (currentLease.value?.readonly) return;
-  if (['PENDING', 'OVERDUE'].includes(bill.status)) {
-    router.push(`/bills/${bill.id}/pay`);
-  }
+  router.push(`/bills/${bill.id}/pay`);
 }
 
 onMounted(async () => {
