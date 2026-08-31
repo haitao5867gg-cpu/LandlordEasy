@@ -1,91 +1,321 @@
 <template>
-  <div>
-    <van-nav-bar title="付款上报" left-arrow @click-left="$router.back()" />
+  <div class="pay-bill-page">
+    <van-nav-bar title="支付账单" left-arrow @click-left="$router.back()" />
+
     <van-loading v-if="loading" class="page-loading" />
     <template v-else>
-      <!-- 收款码 -->
-      <van-cell-group inset title="收款码">
-        <van-image v-if="qrcodeUrl" :src="qrcodeUrl" width="200" height="200" style="margin:16px auto;display:block;" />
-        <van-empty v-else description="收款码未设置,请联系房东" image="search" />
-      </van-cell-group>
-
-      <van-cell-group inset title="账单信息">
-        <van-cell title="应付金额" :value="`¥${bill?.totalAmount}`" />
-      </van-cell-group>
-
-      <van-form @submit="handleSubmit" v-if="!submitted">
-        <van-cell-group inset>
-          <van-field v-model.number="form.amount" label="实付金额" type="number" :placeholder="`${bill?.totalAmount}`" />
-          <van-field v-model="form.paidAt" label="付款日期" placeholder="YYYY-MM-DD" />
-          <van-uploader v-model="fileList" :max-count="1" accept="image/*">
-            <van-button size="small" plain style="margin:8px 16px;">上传截图(可选)</van-button>
-          </van-uploader>
+      <van-empty v-if="!bill" description="账单不存在" />
+      <template v-else>
+        <van-cell-group inset title="账单信息">
+          <van-cell title="应付金额" :value="`¥${bill.totalAmount}`" />
+          <van-cell title="账单状态">
+            <template #value>
+              <van-tag :type="bill.status === 'PAID' ? 'success' : 'warning'">
+                {{ bill.status === 'PAID' ? '已付款' : '待付款' }}
+              </van-tag>
+            </template>
+          </van-cell>
         </van-cell-group>
-        <div style="padding:16px;">
-          <van-button block type="primary" native-type="submit" :loading="submitting">我已付款</van-button>
-        </div>
-      </van-form>
 
-      <van-cell-group v-else inset>
-        <van-cell title="已提交" value="待房东确认" />
-      </van-cell-group>
+        <div v-if="bill.status === 'PAID'" class="paid-state">
+          <van-icon name="checked" size="56" color="#07c160" />
+          <div>支付成功，账单已付款</div>
+        </div>
+
+        <template v-else>
+          <div class="payment-actions">
+            <van-button
+              block
+              type="primary"
+              :loading="creatingMethod === 'wechat'"
+              :disabled="activeMethod !== null"
+              @click="handleWechatPay"
+            >
+              微信支付
+            </van-button>
+            <van-button
+              block
+              plain
+              :loading="creatingMethod === 'alipay'"
+              :disabled="activeMethod !== null"
+              @click="handleAlipayPay"
+            >
+              支付宝
+            </van-button>
+          </div>
+
+          <van-cell-group v-if="activeMethod" inset title="支付进度" class="payment-progress">
+            <div v-if="activeMethod === 'alipay' && qrCodeImage" class="alipay-qrcode">
+              <van-image :src="qrCodeImage" width="240" height="240" fit="contain" />
+              <p>请截图后使用支付宝 App 扫一扫完成支付</p>
+            </div>
+            <p v-if="paymentMode === 'mock'" class="mock-hint">模拟支付中...</p>
+            <van-loading class="confirm-loading" size="22">等待支付确认...</van-loading>
+            <van-button
+              v-if="paymentMode === 'mock' && outTradeNo"
+              block
+              type="warning"
+              plain
+              :loading="simulating"
+              :disabled="simulating"
+              @click="simulateSuccess"
+            >
+              模拟支付成功（测试用）
+            </van-button>
+          </van-cell-group>
+        </template>
+      </template>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../utils/http';
 
+type PaymentMethod = 'wechat' | 'alipay';
+type PaymentMode = 'mock' | 'real';
+
+interface Bill {
+  id: number;
+  totalAmount: string | number;
+  status: string;
+}
+
+interface WechatParams {
+  appId: string;
+  timeStamp: string;
+  nonceStr: string;
+  package: string;
+  signType: string;
+  paySign: string;
+}
+
+interface WechatOrderResponse {
+  outTradeNo: string;
+  mode: PaymentMode;
+  wechatParams: WechatParams;
+}
+
+interface AlipayOrderResponse {
+  outTradeNo: string;
+  mode: PaymentMode;
+  qrCodeImage: string;
+}
+
+interface WeixinJSBridge {
+  invoke(
+    method: 'getBrandWCPayRequest',
+    params: WechatParams,
+    callback: (result: { err_msg?: string }) => void,
+  ): void;
+}
+
+declare global {
+  interface Document {
+    WeixinJSBridge?: WeixinJSBridge;
+  }
+
+  interface Window {
+    WeixinJSBridge?: WeixinJSBridge;
+  }
+}
+
 const route = useRoute();
-const bill = ref<any>(null);
-const qrcodeUrl = ref('');
+const bill = ref<Bill | null>(null);
 const loading = ref(true);
-const submitting = ref(false);
-const submitted = ref(false);
-const fileList = ref<any[]>([]);
-const form = reactive({ amount: 0, paidAt: new Date().toISOString().slice(0, 10) });
+const activeMethod = ref<PaymentMethod | null>(null);
+const creatingMethod = ref<PaymentMethod | null>(null);
+const paymentMode = ref<PaymentMode | null>(null);
+const outTradeNo = ref('');
+const qrCodeImage = ref('');
+const simulating = ref(false);
+
+const POLL_INTERVAL = 3_000;
+const MAX_POLL_COUNT = 20;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let pollCount = 0;
+let bridgeReadyHandler: EventListener | null = null;
+
+function findCurrentBill(leases: any[]): Bill | null {
+  const billId = Number(route.params.id);
+  for (const lease of leases) {
+    const found = lease.bills?.find((item: Bill) => item.id === billId);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function refreshBill(): Promise<boolean> {
+  const leases = await http.get('/tenant/bills') as any[];
+  const currentBill = findCurrentBill(leases);
+  if (currentBill) bill.value = currentBill;
+  return currentBill?.status === 'PAID';
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function handlePaymentSuccess() {
+  stopPolling();
+  activeMethod.value = null;
+  creatingMethod.value = null;
+  paymentMode.value = null;
+  outTradeNo.value = '';
+  qrCodeImage.value = '';
+  showToast('支付成功');
+}
+
+function startPolling() {
+  stopPolling();
+  pollCount = 0;
+
+  const poll = async () => {
+    if (!activeMethod.value || bill.value?.status === 'PAID') return;
+
+    pollCount += 1;
+    try {
+      if (await refreshBill()) {
+        handlePaymentSuccess();
+        return;
+      }
+    } catch {
+      // 请求错误已由 HTTP 拦截器提示，后续轮询仍继续。
+    }
+
+    if (pollCount >= MAX_POLL_COUNT) {
+      activeMethod.value = null;
+      paymentMode.value = null;
+      outTradeNo.value = '';
+      qrCodeImage.value = '';
+      showToast('支付结果确认超时，请稍后查看账单');
+      return;
+    }
+    pollTimer = setTimeout(poll, POLL_INTERVAL);
+  };
+
+  pollTimer = setTimeout(poll, POLL_INTERVAL);
+}
+
+function invokeWechatPay(params: WechatParams) {
+  const invoke = () => {
+    const bridge = document.WeixinJSBridge ?? window.WeixinJSBridge;
+    if (!bridge) {
+      showToast('当前环境无法拉起微信支付');
+      return;
+    }
+    bridge.invoke('getBrandWCPayRequest', {
+      appId: params.appId,
+      timeStamp: params.timeStamp,
+      nonceStr: params.nonceStr,
+      package: params.package,
+      signType: params.signType,
+      paySign: params.paySign,
+    }, (result) => {
+      if (result.err_msg === 'get_brand_wcpay_request:cancel') {
+        showToast('已取消微信支付');
+      } else if (result.err_msg && result.err_msg !== 'get_brand_wcpay_request:ok') {
+        showToast('微信支付未完成，请重试');
+      }
+    });
+  };
+
+  if (document.WeixinJSBridge ?? window.WeixinJSBridge) {
+    invoke();
+    return;
+  }
+
+  bridgeReadyHandler = invoke;
+  document.addEventListener('WeixinJSBridgeReady', bridgeReadyHandler, { once: true });
+}
+
+async function handleWechatPay() {
+  if (!bill.value || activeMethod.value) return;
+
+  activeMethod.value = 'wechat';
+  creatingMethod.value = 'wechat';
+  qrCodeImage.value = '';
+  try {
+    const response = await http.post('/payments/wechat/create-order', {
+      billId: bill.value.id,
+    }) as WechatOrderResponse;
+    outTradeNo.value = response.outTradeNo;
+    paymentMode.value = response.mode;
+    startPolling();
+
+    if (response.mode === 'real') invokeWechatPay(response.wechatParams);
+  } catch {
+    activeMethod.value = null;
+  } finally {
+    creatingMethod.value = null;
+  }
+}
+
+async function handleAlipayPay() {
+  if (!bill.value || activeMethod.value) return;
+
+  activeMethod.value = 'alipay';
+  creatingMethod.value = 'alipay';
+  qrCodeImage.value = '';
+  try {
+    const response = await http.post('/payments/alipay/create-order', {
+      billId: bill.value.id,
+    }) as AlipayOrderResponse;
+    outTradeNo.value = response.outTradeNo;
+    paymentMode.value = response.mode;
+    qrCodeImage.value = response.qrCodeImage;
+    startPolling();
+  } catch {
+    activeMethod.value = null;
+  } finally {
+    creatingMethod.value = null;
+  }
+}
+
+async function simulateSuccess() {
+  if (!outTradeNo.value || paymentMode.value !== 'mock' || simulating.value) return;
+
+  simulating.value = true;
+  try {
+    await http.post('/payments/mock/simulate-success', {
+      outTradeNo: outTradeNo.value,
+    });
+    if (await refreshBill()) handlePaymentSuccess();
+  } finally {
+    simulating.value = false;
+  }
+}
 
 onMounted(async () => {
   try {
-    const [leasesData, qrRes]: [any, any] = await Promise.all([
-      http.get('/tenant/bills'),
-      http.get('/tenant/qrcode'),
-    ]);
-    // 从租客账单数据中查找对应 billId
-    const billId = Number(route.params.id);
-    const allLeases = leasesData as any[];
-    for (const lease of allLeases) {
-      const found = lease.bills?.find((b: any) => b.id === billId);
-      if (found) { bill.value = found; break; }
-    }
-    qrcodeUrl.value = (qrRes as any).qrcodeImageUrl || '';
-    form.amount = Number(bill.value?.totalAmount) || 0;
-
-    // 检查是否已有 PENDING_CONFIRM 的支付记录
-    const pendingPayment = bill.value?.payments?.find((p: any) => p.status === 'PENDING_CONFIRM');
-    if (pendingPayment) submitted.value = true;
-  } finally { loading.value = false; }
+    await refreshBill();
+  } finally {
+    loading.value = false;
+  }
 });
 
-async function handleSubmit() {
-  submitting.value = true;
-  try {
-    const data: any = {
-      billId: Number(route.params.id),
-      amount: form.amount || Number(bill.value?.totalAmount),
-      paidAt: form.paidAt,
-    };
-    // TODO: 上传截图获取 URL 后传入 proofUrl
-    await http.post('/payments/report', data);
-    showToast('已提交,等待房东确认');
-    submitted.value = true;
-  } finally { submitting.value = false; }
-}
+onBeforeUnmount(() => {
+  stopPolling();
+  if (bridgeReadyHandler) {
+    document.removeEventListener('WeixinJSBridgeReady', bridgeReadyHandler);
+  }
+});
 </script>
 
 <style scoped>
+.pay-bill-page { padding-bottom: 24px; }
 .page-loading { display: flex; justify-content: center; padding: 60px; }
+.payment-actions { display: grid; gap: 12px; padding: 20px 16px; }
+.payment-progress { padding: 16px; }
+.paid-state { display: grid; justify-items: center; gap: 12px; padding: 48px 16px; color: #07c160; }
+.alipay-qrcode { text-align: center; color: #646566; }
+.alipay-qrcode p { margin: 12px 0 20px; }
+.mock-hint { margin: 0 0 12px; text-align: center; color: #ed6a0c; }
+.confirm-loading { display: flex; justify-content: center; margin-bottom: 20px; }
 </style>
