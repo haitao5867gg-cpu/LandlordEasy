@@ -132,13 +132,37 @@ model Lease {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
-  room            Room              @relation(fields: [roomId], references: [id])
-  tenant          Tenant            @relation(fields: [tenantId], references: [id])
-  bills           Bill[]
-  depositRecords  DepositRecord[]
-  handoverRecords HandoverRecord[]
+  room                 Room                  @relation(fields: [roomId], references: [id])
+  tenant               Tenant                @relation(fields: [tenantId], references: [id])
+  bills                Bill[]
+  depositRecords       DepositRecord[]
+  handoverRecords      HandoverRecord[]
+  contractSigningTasks ContractSigningTask[]
 
   @@map("leases")
+}
+
+// ========== 合同电子签约记录 ==========
+model ContractSigningTask {
+  id                      Int       @id @default(autoincrement())
+  leaseId                 Int
+  type                    String    // NEW / RENEW
+  sceneValue              Int       @unique
+  qrCodeImage             String?   @db.Text
+  waterMeterReading       Decimal?  @db.Decimal(10, 2)
+  electricityMeterReading Decimal?  @db.Decimal(10, 2)
+  gasMeterReading         Decimal?  @db.Decimal(10, 2)
+  facilities              Json?     // [{name, has}]
+  status                  String    @default("PENDING_SCAN") // PENDING_SCAN / CREATED / SIGNED / EXPIRED
+  tencentFlowId           String?
+  signedPdfUrl            String?   @db.Text
+  signedAt                DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  lease Lease @relation(fields: [leaseId], references: [id])
+
+  @@map("contract_signing_tasks")
 }
 
 // ========== 账单 ==========
