@@ -113,14 +113,16 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../../utils/http';
 
 const route = useRoute();
+const router = useRouter();
 const loading = ref(false);
 const showResult = ref(false);
 const inviteCode = ref('');
+const newLeaseId = ref<number | null>(null);
 const showStartPicker = ref(false);
 
 const today = new Date();
@@ -209,6 +211,7 @@ async function handleSubmit() {
     if (form.feeItems.length) data.feeItems = form.feeItems.filter(i => i.name && i.amount);
     const res = await http.post('/leases', data) as any;
     inviteCode.value = res.inviteCode;
+    newLeaseId.value = res.id;
     showResult.value = true;
   } finally {
     loading.value = false;
@@ -222,6 +225,9 @@ function copyCode() {
 
 function closeResult() {
   showResult.value = false;
+  if (newLeaseId.value) {
+    router.push(`/leases/${newLeaseId.value}`);
+  }
 }
 </script>
 
