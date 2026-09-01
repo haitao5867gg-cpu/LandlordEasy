@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, BadRequestException } from '@nestjs/common';
 import { ValidationError } from 'class-validator';
+import { text } from 'express';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
@@ -43,6 +44,19 @@ function translateValidationError(error: ValidationError): string {
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
   app.setGlobalPrefix('api/v1');
+  // 微信公众号事件推送用 text/xml,NestJS 内置的 json/urlencoded parser 不认这个
+  // content-type,rawBody:true 全局开关对它不生效,req.rawBody 会一直是 undefined。
+  // 单独给这个路由挂一个 text() parser 补上(2026-09-01 用真实微信XML请求体格式
+  // 手动验证时发现 WechatController.event 一直拿到空字符串,才发现这个缺口)。
+  app.use(
+    '/api/v1/wechat/event',
+    text({
+      type: ['text/xml', 'application/xml'],
+      verify: (req: unknown, _res, buf) => {
+        (req as { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
   app.useGlobalFilters(new GlobalExceptionFilter());
   app.useGlobalInterceptors(new ResponseInterceptor());
   app.useGlobalPipes(
