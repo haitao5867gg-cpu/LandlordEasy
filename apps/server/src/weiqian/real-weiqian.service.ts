@@ -158,6 +158,9 @@ export class RealWeiQianService implements IWeiQianService {
     data: object,
   ): Promise<WeiQianResponse<T>> {
     const dataString = JSON.stringify(data);
+    this.logger.debug(
+      `微签 ${endpoint} 请求体(脱敏): ${this.redactForLog(dataString)}`,
+    );
     const response = await fetch(this.buildUrl(endpoint), {
       method: 'POST',
       headers: {
@@ -173,9 +176,13 @@ export class RealWeiQianService implements IWeiQianService {
     response: Response,
     endpoint: string,
   ): Promise<WeiQianResponse<T>> {
+    const rawText = await response.text();
+    this.logger.debug(
+      `微签 ${endpoint} 原始响应 (HTTP ${response.status}): ${rawText}`,
+    );
     let envelope: WeiQianResponse<T>;
     try {
-      envelope = (await response.json()) as WeiQianResponse<T>;
+      envelope = JSON.parse(rawText) as WeiQianResponse<T>;
     } catch {
       throw new BadGatewayException(
         `微签 ${endpoint} 响应格式无效 (HTTP ${response.status})`,
@@ -190,6 +197,31 @@ export class RealWeiQianService implements IWeiQianService {
       );
     }
     return envelope;
+  }
+
+  /** 打日志前把身份证号/手机号脱敏,避免租客隐私信息完整落进日志文件 */
+  private redactForLog(dataString: string): string {
+    try {
+      const parsed = JSON.parse(dataString);
+      if (Array.isArray(parsed.receiverDTOS)) {
+        parsed.receiverDTOS = parsed.receiverDTOS.map(
+          (r: Record<string, unknown>) => ({
+            ...r,
+            account:
+              typeof r.account === 'string'
+                ? r.account.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2')
+                : r.account,
+            idCard:
+              typeof r.idCard === 'string'
+                ? r.idCard.replace(/^(.{4}).*(.{2})$/, '$1***********$2')
+                : r.idCard,
+          }),
+        );
+      }
+      return JSON.stringify(parsed);
+    } catch {
+      return '(无法解析,原样跳过脱敏)';
+    }
   }
 
   private buildSignedHeaders(dataString?: string): Record<string, string> {
