@@ -467,17 +467,21 @@
 >
 > **已推生产(2026-08-31)**:dev领先main仅3个commit(2个docs+1个18.10功能commit,不涉及schema变更),在main worktree合并`origin/dev`后重新独立跑了一遍全量回归(server tsc 0错误、jest 7套件58用例全过、两个前端vue-tsc均0错误)才push。**部署过程中发现并处理了一个跟本次改动无关的历史遗留安全隐患**:生产服务器`/opt/landlord-easy/apps/server/.env.dev`(不该出现在prod目录的开发环境密钥文件)从8月20日起一直处于`git add`过但从未提交的staged状态,且未被`.gitignore`排除——如果将来有人在这台服务器上执行任何不相关的`git commit`而没先检查`git status`,会把这份开发环境密钥意外提交进main分支历史。已执行`git reset`撤销其staged状态(确认后变为`.gitignore`正确忽略,风险解除),没有修改文件内容,没有删除文件,是纯粹的index操作。部署本身(`bash deploy/deploy.sh prod`)顺利完成,健康检查`https://landlordeasy.cn/api/v1/health`返回200;核对`index.html`引用的构建产物哈希(`PayBill-DM7VRrPB.js`等)与本次构建输出一致,并直接在服务器上确认该文件内容真的包含"费用明细"/"支付记录"字符串(不是仅文件名对上、内容还是旧代码);真实浏览器访问`https://landlordeasy.cn/tenant/`控制台0错误、登录页正常渲染。**受限于生产环境走真实微信OAuth,无法用浏览器自动化模拟真实登录**,GasCan真实点击验证自己那笔¥0.01已付款账单详情这一步仍需GasCan本人用手机确认。
 
-## M19 合同电子签约 + 服务号关注引导(2026-08-31立项;**2026-08-31暂停,平台选型推翻重来**)
+## M19 合同电子签约 + 服务号关注引导(2026-08-31立项;2026-08-31暂停后于2026-09-01改用微签平台重新设计并开工)
 
-> **⚠️ 当前状态:暂停开发,等GasCan确认新平台后再继续。** 19.1~19.4(数据模型/微信公众号能力/生成关注二维码)已完成且平台无关,不受影响,后续换平台可以直接复用。19.3(腾讯电子签API封装框架)大概率要作废重写——GasCan实测发现腾讯电子签、e签宝的API接入都要求购买"专业版",超出预算(¥2000以内),爱签要求先买2500份套餐(远超实际用量)解锁API,法大大早前已知年费门槛¥15000+。目前线索是"微签"(定位个人/小团队、微信内即用、计费友好),GasCan正在自行核实,确认平台前不要继续19.5/19.6/19.7/19.8/19.9/19.10。
+> **⚠️ 平台变更记录**:最初选定腾讯电子签,深入设计后GasCan实测腾讯电子签/e签宝API接入都要求购买专业版超预算(¥2000以内),爱签要求先买2500份套餐,法大大年费¥15000+,都不满足。改用**微签**(上海复园电子科技,¥1.7/份),GasCan已用体验额度实测确认可用,并跟微签技术人员确认了关键机制(2026-09-01)。19.1/19.2/19.4(数据模型/微信公众号能力/生成关注二维码)已完成且平台无关,原样保留,不受影响。19.3(原腾讯电子签API封装)作废重写;原19.5~19.10按新设计重新拆分为19.5~19.10(见下方"第一批"),任务号沿用但内容替换,不是新增编号。API文档存档于 `docs/微签API文档.md`,合同固定条款结构(不含真实租客个人信息)存档于 `docs/合同模板结构.md`。详细设计见 `specs/requirements.md` 4.5节、`specs/design.md` 5.6节。
 
-> 背景:GasCan 提出入住办理时让租客在线绑定电子签、完成合同签署,签署结果存储并绑定到对应房间方便追溯。经多轮问答设计确认:平台选定腾讯电子签(已完成企业认证、已开通服务、10份体验合同额度,子账号密钥已配置在服务器);触发方式基于GasCan现有的"中介转发二维码"线下习惯改造——房东生成微信关注场景二维码(免费,不消耗额度)→转发给中介→中介转租客→租客扫码顺带引导关注公众号(这个公众号未来承载全员公告/在线报修/交房租)→真实扫码/关注后才创建腾讯电子签正式合同任务(此时才消耗额度)→租客完成实名认证+单方签字(不要求房东同步签字,甲方"占秀英"个人名义写死)→签署完成自动绑定租客账号(不用再走邀请码)、结果PDF存档绑定房间/租约。新签+续签都要走,且每次都是独立永久记录(不会因为续签更新Lease而互相覆盖)。合同文本GasCan已提供,识别出的动态字段含水电表底数+屋内设施清单(合同原文有,系统之前没有对应字段,这次一并补上)。详细设计见 `specs/requirements.md` 4.5节、`specs/design.md` 5.6节。
+> 背景:GasCan 提出入住办理时让租客在线绑定电子签、完成合同签署,签署结果存储并绑定到对应房间方便追溯。触发方式基于GasCan现有的"中介转发二维码"线下习惯改造——房东生成微信关注场景二维码(免费,不消耗额度)→转发给中介→中介转租客→租客扫码顺带引导关注公众号(这个公众号未来承载全员公告/在线报修/交房租)→**房东确认租客已关注后主动点「发起签署」(此时才消耗微签额度)**→租客完成实名认证+单方签字(不要求房东同步签字,房东侧走自动盖章)→签署完成自动绑定租客账号(不用再走邀请码)、结果PDF存档绑定房间/租约。新签+续签都要走,且每次都是独立永久记录。
 >
-> **过程中顺带发现并修复了两个独立的生产隐患(跟M19本身无关,但排查M19依赖时发现的)**:①生产服务器IP一直没加进公众号"IP白名单",导致 `cgi-bin/token` 接口被拒,现有催租提醒此前从未真正测试过发送环节全靠"0个真实租客绑定openid"侥幸没暴露,GasCan已加白名单验证修复;②`apps/server/.env.dev` 一直处于"未跟踪也未被gitignore排除"的危险状态,已修复(commit `61a7930`)。
+> **过程中顺带发现并修复了两个独立的生产隐患(跟M19本身无关,但排查M19依赖时发现的)**:①生产服务器IP一直没加进公众号"IP白名单",导致 `cgi-bin/token` 接口被拒,现有催租提醒此前从未真正测试过发送环节全靠"0个真实租客绑定openid"侥幸没暴露,GasCan已加白名单验证修复;②`apps/server/.env.dev` 一直处于"未跟踪也未被gitignore排除"的危险状态,已修复(commit `61a7930`)。**2026-09-01部署18.10时又发现一次类似问题**(生产服务器`/opt/landlord-easy/apps/server/.env.dev`,这个不该在prod目录出现的文件,staged过但从未提交、未被gitignore排除),已用`git reset`处理。
 >
-> **本里程碑同样分两批**:第一批(19.1~19.7)不依赖"服务号内嵌vs小程序跳转"这个还在等腾讯销售经理确认的细节,可以先搭好框架(含mock模式下完整可跑通的业务编排);第二批(19.8~19.10)需要该细节确认后才能真正对接腾讯电子签"创建签署流程"接口,且需要GasCan先在腾讯电子签后台把提供的合同文本建成模板、拿到模板ID。
+> **数据现状核查(2026-09-01,自主模式开工前)**:查了dev(679条)和生产(681条)历史Tenant记录,`idCard` **100%为NULL**——从未采集过真实身份证号,无法回填。这意味着 `Tenant.idCard` 不能在数据库层收紧为必填(会导致历史数据全部不合规),改为只在DTO+前端层面对新建租约强制必填+格式校验,数据库列维持 `String?`。这个发现记录在案,避免以后又走一遍"发现历史数据卡住"的弯路。
+>
+> **微签账号配置**(2026-09-01,体验额度测试用,已安全写入dev服务器 `.env.dev`,不落盘git):`WEIQIAN_MODE=mock`起步、`WEIQIAN_APP_ID`/`WEIQIAN_APP_SECRET`/`WEIQIAN_COMPANY_ID`(cId)/`WEIQIAN_SEAL_ID`(发起方自动盖章用的印章ID)、`WEIQIAN_API_BASE_URL`(测试环境)均已配置。
+>
+> **GasCan于2026-09-01 18:xx授权自主模式,开工后离线2小时**:本批实现全程在dev分支/dev环境完成,不合并main、不部署生产,等GasCan回来看过再决定是否推。
 
-### 第一批:不依赖"内嵌vs跳转"细节,现在开工
+### 第一批:核心闭环(mock模式下可完整测试)
 
 - [x] 19.1 **Prisma schema变更:新增 ContractSigningTask 模型(签约记录,每次新签/续签独立一条,含水电表底数/设施清单/场景值/状态机字段)。**
 > 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——新增 `ContractSigningTask` 模型,完整包含设计里的全部字段(leaseId/type/sceneValue唯一索引/qrCodeImage/三项水电表读数/facilities JSON/status状态机/tencentFlowId/signedPdfUrl/signedAt),`Lease` 加 `contractSigningTasks ContractSigningTask[]` 反向关系,命名风格(`@@map`表名、字段命名)跟现有模型保持一致。只改了 `schema.prisma` 一个文件。
@@ -485,25 +489,24 @@
 - [x] 19.2 **微信公众号能力扩展:带参数二维码生成接口 + 关注/扫描事件webhook处理框架 + 客服消息接口,复用现有 `WECHAT_MODE=mock|real`(这是微信平台自身能力,不是腾讯电子签,不需要新变量)。**
 > 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`wechat/` 模块扩展三组接口+Mock+Real(`IWechatQrcodeService`带参数二维码/`IWechatEventService`事件解析/`IWechatCustomerServiceService`客服消息),完全复用现有 `useClass` 按 `WECHAT_MODE` 选实现的模式,`wechat.module.ts` 统一接线+导出。**主动做的一处重构(超出原始要求,是好的判断)**:把 access_token 获取+缓存逻辑从 `RealWechatNotifyService` 里抽成独立的 `WechatAccessTokenService` 共享给新的二维码/客服消息服务复用,不是第三次复制粘贴同一段逻辑,顺带在共享服务里加了并发去重(`pendingRequest`,防止同一时刻多个请求同时触发重复刷新token),这是原有分散实现没有的保护,`RealWechatNotifyService` 本身逻辑不变、只是改为注入这个共享服务。二维码创建:校验 `sceneValue` 必须是32位非零正整数,创建后自动下载ticket对应图片转成 `data:image/png;base64`,前端直接用。事件解析:用正则同时兼容CDATA和纯文本两种XML写法,大小写不敏感,`subscribe`事件从`qrscene_`前缀EventKey提取场景值,`SCAN`事件直接用EventKey本身,均做了`Number.isSafeInteger`校验。**如实标注的遗漏**:微信服务器URL接入验证(Token+签名校验那套,用于确认webhook请求真的来自微信官方)本次没做,这个不属于这次要求范围,但已注明。
 > 如何验证——Kiro新增单测覆盖access_token缓存/失效重试/未返回token报错/二维码创建含图片转换/token过期重试一次/mock不调用真实接口/subscribe与SCAN两种事件格式解析(断言到具体场景值123和456)/无法解析场景值时的边界情况/客服消息发送与重试/mock行为/RealWechatNotifyService用共享token服务后回归验证,共12个用例。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(5套件41用例全过)。逐文件审查了8个新文件+2个改动文件的完整diff,重点核对了微信官方API请求格式(二维码创建/客服消息发送)和XML事件解析的正则逻辑,均正确。
-- [x] 19.3 **腾讯电子签API封装框架:创建签署流程/查询状态/签署完成回调,新增 `ESIGN_MODE=mock|real` 双模式(这个才是腾讯电子签专属的开关),real部分按官方Essbasic API格式实现结构,暂不要求真实跑通(缺模板ID)。**
-> 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——新建 `apps/server/src/tencent-esign/` 目录,接口+Mock+Real三件套,完全仿照wechat/payments gateways既有模式,`ESIGN_MODE` 独立于 `WECHAT_MODE` 控制(两者是不同外部平台)。**这次特意要求Kiro先去查真实的腾讯云官方文档而不是凭空编,Kiro确实这么做了**——完成说明里逐条列出了"官方已核实"(域名essbasic.tencentcloudapi.com/API版本2021-05-26/`CreateFlowsByTemplates`等5个接口名和字段/回调签名算法sha256=HMAC-SHA256(token,rawBody)/AES-256-CBC回调解密)和"仍需真实配置核对"(合同模板控件名ComponentName、租客角色RecipientId、Agent的AppId等主体信息,这些必须等GasCan真正建好模板才能填对)两类,不是笼统一句"已完成",附了9条官方文档链接作为来源。TC3-HMAC-SHA256签名算法(腾讯云API 3.0通用规范,这个我本身就有把握核对)逐行核对正确。**一个值得记录、Kiro自己完成说明里没单独点出的细节**:代码里硬编码了两个常量 `MINI_PROGRAM_APP_ID='wxa023b292fd19d41d'`/`MINI_PROGRAM_ORIGINAL_ID='gh_da88f6188665'`(腾讯电子签官方小程序自己的AppId/原始ID,格式合理但真实性未经我方独立核实),等19.6真实联调时需要单独确认这两个值对不对。签署完成回调正确处理了"FlowStatusChange本身不含PDF地址,需要另调DescribeResourceUrlsByFlows下载接口"这个不那么直观的真实API行为,没有为了省事编一个"回调直接带PDF链接"的简化假设。
-> 如何验证——Kiro新增单测覆盖TC3签名头构造、回调验签(含签名不匹配拒绝)、AES解密、mock创建/查询/回调状态流转、字段映射等。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(6套件47用例全过,确认tencent-esign.spec.ts真的跑了不是被漏掉)。逐行审查了TC3-HMAC-SHA256签名算法实现(canonicalRequest拼接顺序、密钥派生链路secretDate→secretService→secretSigning均正确)、回调验签用了`timingSafeEqual`防时序攻击。改动范围精确(只新增tencent-esign目录+改.env.example一个文件),未连接任何服务器,未发起真实API调用。
+- [x] ~~19.3 腾讯电子签API封装框架~~ **(2026-09-01作废,平台改用微签,原实现保留在 `apps/server/src/tencent-esign/` 目录不删除但不再使用,新实现见下方19.3微签版)**
+> 原完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31)保留存档:新建 `apps/server/src/tencent-esign/` 目录,TC3-HMAC-SHA256签名算法+回调验签(AES-256-CBC解密)完整实现,7套件47用例测试全过。因平台变更未投入使用,不再维护,不阻塞新实现。
+- [ ] 19.3 **微签API封装(替代腾讯电子签):互签文件上传/创建互签任务/下载已签文件三个核心接口,新增 `WEIQIAN_MODE=mock|real` 双模式,签名算法HMAC-SHA256+Base64(比腾讯TC3简单)。**
+> 设计要点(2026-09-01,`docs/微签API文档.md`):`eachSign/upload`(文件二进制流→bId)、`eachSign/create`(核心接口,`launcherSignRule`配置`sealId`让发起方自动盖章、`receiverDTOS`填租客手机号/姓名/身份证号+`authType=2`实名认证、`expiresTime`+`finishSignJumpPage`)、`eachSign/download`(下载已签文件,签署未完成时的返回行为未知,按"拿到有效文件就算完成、拿不到就继续等"这套容错逻辑处理,不依赖对方明确说明)。仿照wechat/payments gateways既有模式,接口+Mock+Real三件套。**mock模式下要能完整模拟"upload返回bId→create返回bId+shortCode→download返回一个假PDF"这条链路**,不依赖真实网络请求。
 - [x] 19.4 **后端:创建签约任务接口(`POST /leases/:id/contract-signing-tasks`),接收水电表底数+设施清单,创建ContractSigningTask(status=PENDING_SCAN)并调微信生成带参数二维码。**
 > 完成说明(Kiro CLI实现,Claude Code设计+复核,2026-08-31): 改了什么——`leases.service.ts` 新增 `createContractSigningTask`,校验租约存在后,`sceneValue` 用 `randomInt(1, 2**31)` 生成,create时若命中唯一约束冲突(`Prisma.PrismaClientKnownRequestError` code P2002)重试一次(不是先查库判断是否存在,交给数据库唯一索引兜底,避免查完到插入之间的竞态)。创建记录后调 `WECHAT_QRCODE_SERVICE.createSceneQrcode` 拿二维码,再update写回 `qrCodeImage`。`leases.module.ts` 引入 `WechatModule`。**这部分是纯微信公众号能力(生成关注二维码),不依赖具体选哪家电子签平台,后续若更换电子签服务商这批工作不受影响。**
 > 如何验证——Kiro新增单测覆盖租约不存在报错、正常创建成功、sceneValue唯一约束冲突重试成功。Claude Code独立重跑(不采信Kiro自述)`pnpm --filter server exec tsc --noEmit`(0错误)、`pnpm --filter server test`(7套件50用例全过)。
-- [ ] 19.5 **后端:微信关注/扫描事件webhook接口 + 业务编排——按场景值找到PENDING_SCAN的ContractSigningTask,调腾讯电子签`createSigningFlow`(mock模式下可完整测试)创建正式流程、status改CREATED、记录tencentFlowId,再通过客服消息推送继续签约入口;场景值未匹配时发默认欢迎语兜底。**
-- [ ] 19.6 **后端:腾讯电子签签署完成回调接口 + 业务编排——按tencentFlowId幂等更新ContractSigningTask为SIGNED、存signedPdfUrl,并用关注/扫描事件里存下的openid自动绑定对应Lease的Tenant(已绑定其他openid时不静默覆盖,记录异常)。**
-- [ ] 19.7 **房东端:租约详情页"生成电子签约"入口(弹窗填水电表底数+设施清单勾选→提交)+二维码展示+签约状态展示+已签署PDF在线预览/下载。**
+- [ ] 19.5 **Schema变更v2:新增 `ContractSettings` 单例配置表(甲方固定信息+四项默认条款数值);`ContractSigningTask` 加 `extraTerms`(补充条款自由文本)、`weiqianBId`/`weiqianShortCode`(替代`tencentFlowId`)、状态机加 `FOLLOWED`;后端DTO给 `tenantPhone` 加手机号格式校验、`tenantIdCard` 改必填+身份证格式校验(数据库列维持`String?`,只在应用层收紧,原因见本里程碑背景段落的"数据现状核查");前端 `NewLease.vue` 同步改必填+校验规则。**
+- [ ] 19.6 **合同PDF生成能力(新增,不依赖微签):Puppeteer按HTML模板+动态字段替换生成PDF,字段清单见 `docs/合同模板结构.md`;新增"数字转中文大写金额"工具函数;模板设计成固定版式(变长字段用固定高度容器,不能挤动微签盖章的固定坐标)。**
+- [ ] 19.7 **后端:微信关注/扫描事件业务编排调整——按场景值找到PENDING_SCAN的ContractSigningTask,只更新为 `FOLLOWED`(不再自动创建微签任务),客服消息提示"房东会尽快发起签约";场景值未匹配时发默认欢迎语兜底(这部分逻辑19.2已有基础设施,这次只是调整状态流转,不是从零做)。**
+- [ ] 19.8 **后端:发起签署接口(`POST /leases/contract-signing-tasks/:id/launch`,房东主动触发)——生成合同PDF(19.6)→调微签 `eachSign/upload`+`eachSign/create`(19.3,发起方自动盖章+接收方实名认证)→拿到`bId`/`shortCode`→组签署链接→微信客服消息+微签短信(`isSendSmsToReceiver`)两个渠道一起推给租客→状态改CREATED。**
+- [ ] 19.9 **后端:签署状态确认——`finishSignJumpPage`跳转落地页接口,收到即触发调 `eachSign/download` 核实;新增定时任务(参考`BillEngineService`模式)对超时未确认的CREATED任务定期轮询兜底;核实拿到有效文件后更新SIGNED+下载存档到`uploads`目录+记录`signedPdfUrl`/`signedAt`,并用关注事件里存下的openid自动绑定对应Lease的Tenant(已绑定其他openid时不静默覆盖,记录异常)。**
+- [ ] 19.10 **房东端UI:①系统设置页新增"合同签约设置"表单(配置`ContractSettings`:甲方姓名/身份证号/电话+四项默认条款数值);②租约详情页"生成电子签约"入口(弹窗填水电表底数+设施清单+补充条款+四项条款数值,预填默认值可覆盖→提交)+二维码展示+签约状态展示(PENDING_SCAN/FOLLOWED/CREATED/SIGNED四态)+FOLLOWED状态下的"发起签署"按钮+已签署PDF在线预览/下载。**
 
-> 说明(2026-08-31修正,执行前调整,未浪费任何已完成工作):
-> 1. 原19.2"新签/续签表单补充水电表底数+设施清单"这个位置不对——这两项数据挂在 `ContractSigningTask` 上(每次签约独立一条),不是 `Lease` 字段,不该放进新签/续签表单里(会产生"填了但还没点生成电子签约"的悬空数据)。改为挪到"生成电子签约"这个动作本身(19.4/19.7),点击时才一起录入、一起创建签约记录,逻辑更干净。
-> 2. 原19.4只覆盖了"生成二维码"这一半,design.md 5.6节里"关注/扫描事件触发创建腾讯签署流程+推客服消息"和"签署完成回调+自动绑定"这两个后端环节漏掉了任务号,补成19.5/19.6,原19.5(房东端UI)顺延成19.7。这两个新增环节虽然最终会调 `ESIGN_MODE=real` 下的腾讯API,但mock模式下业务编排逻辑(webhook接口、状态流转、自动绑定)本身完全可以搭建并测试通,不依赖"内嵌vs跳转"这个还在等的细节,所以仍属于第一批范围,不用挪到第二批。
+### 第二批:真实联调(有体验额度,不阻塞,但要等第一批mock模式跑通)
 
-### 第二批:等"内嵌vs跳转"确认 + 合同模板在腾讯电子签后台建好拿到模板ID后开工(当前阻塞)
-
-- [ ] 19.8 **真实对接:ESIGN_MODE切real,接入真实模板ID,调通腾讯电子签创建签署流程API,核对19.3遗留的两个硬编码小程序AppId/原始ID常量是否准确。**
-- [ ] 19.9 **签署完成回调真实验签 + 端到端确认自动绑定租客账号逻辑生效。**
-- [ ] 19.10 **真实场景验证:用腾讯电子签体验额度(10份中的1~2份)走一遍完整流程——生成二维码→真实扫码关注→收到继续签约推送→完成签署→回调触发→房东端能看到已签署PDF+租客自动绑定成功。**
+- [ ] 19.11 **真实对接:`WEIQIAN_MODE`切real,用GasCan已配置好的体验额度账号(AppId/AppSecret/cId/sealId均已就绪),调通完整链路。**
+- [ ] 19.12 **真实场景验证:用微签体验额度走一遍完整流程——生成二维码→真实扫码关注→房东发起签署→租客收到微信客服消息+短信→完成实名认证签署→跳转/轮询核实到位→房东端看到已签署PDF+租客自动绑定成功。**
 
 ## P2(暂不开工)
 (空)
