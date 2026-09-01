@@ -170,6 +170,7 @@ model ContractSigningTask {
   facilities              Json?     // [{name, has}]
   extraTerms              String?   @db.Text
   status                  String    @default("PENDING_SCAN") // PENDING_SCAN / FOLLOWED / CREATED / SIGNED / EXPIRED
+  followerOpenid          String?
   weiqianBId              String?
   weiqianShortCode        String?
   signedPdfUrl            String?   @db.Text

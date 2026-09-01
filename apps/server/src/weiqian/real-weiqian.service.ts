@@ -82,6 +82,9 @@ export class RealWeiQianService implements IWeiQianService {
           sealId: process.env.WEIQIAN_SEAL_ID,
         },
       ],
+      ...(params.sendSmsToReceiver === undefined
+        ? {}
+        : { isSendSmsToReceiver: params.sendSmsToReceiver }),
       ...(params.expiresTime === undefined
         ? {}
         : { expiresTime: params.expiresTime }),

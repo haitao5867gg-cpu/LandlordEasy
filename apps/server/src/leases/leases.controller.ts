@@ -12,7 +12,13 @@ import {
 import { Request } from 'express';
 import { LeasesService } from './leases.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
-import { CreateContractSigningTaskDto, CreateLeaseDto, EndLeaseDto, RenewLeaseDto } from './leases.dto';
+import {
+  CreateContractSigningTaskDto,
+  CreateLeaseDto,
+  EndLeaseDto,
+  LaunchContractSigningTaskDto,
+  RenewLeaseDto,
+} from './leases.dto';
 import { JwtPayload } from '../auth/auth.service';
 
 @Controller('leases')
@@ -45,6 +51,14 @@ export class LeasesController {
     @Body() dto: CreateContractSigningTaskDto,
   ) {
     return this.leasesService.createContractSigningTask(id, dto);
+  }
+
+  @Post('contract-signing-tasks/:id/launch')
+  launchContractSigningTask(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: LaunchContractSigningTaskDto,
+  ) {
+    return this.leasesService.launchContractSigningTask(id, dto);
   }
 
   @Post(':id/end')

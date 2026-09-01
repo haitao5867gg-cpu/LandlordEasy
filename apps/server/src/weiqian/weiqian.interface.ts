@@ -12,6 +12,7 @@ export interface CreateEachSignTaskParams {
   receiverName: string;
   receiverIdCard: string;
   expiresTime?: number;
+  sendSmsToReceiver?: boolean;
   finishSignJumpPage?: string;
   parm?: string;
 }

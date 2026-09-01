@@ -108,6 +108,28 @@ class ContractSigningFacilityDto {
   has!: boolean;
 }
 
+export class LaunchContractSigningTaskDto {
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  penaltyMonths?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  overdueToleranceDays?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  cleaningFee?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  renewalNoticeDays?: number;
+}
+
 export class CreateContractSigningTaskDto {
   @IsIn(['NEW', 'RENEW'])
   type!: 'NEW' | 'RENEW';
@@ -129,4 +151,8 @@ export class CreateContractSigningTaskDto {
   @ValidateNested({ each: true })
   @Type(() => ContractSigningFacilityDto)
   facilities?: ContractSigningFacilityDto[];
+
+  @IsOptional()
+  @IsString()
+  extraTerms?: string;
 }
