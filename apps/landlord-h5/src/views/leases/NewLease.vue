@@ -4,8 +4,24 @@
     <van-form @submit="handleSubmit">
       <van-cell-group inset title="租客信息">
         <van-field v-model="form.tenantName" label="姓名" placeholder="租客姓名" :rules="[{ required: true, message: '请填写姓名' }]" />
-        <van-field v-model="form.tenantPhone" label="手机号" placeholder="手机号" :rules="[{ required: true, message: '请填写手机号' }]" />
-        <van-field v-model="form.tenantIdCard" label="身份证" placeholder="可选" />
+        <van-field
+          v-model="form.tenantPhone"
+          label="手机号"
+          placeholder="手机号"
+          :rules="[
+            { required: true, message: '请填写手机号' },
+            { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确' },
+          ]"
+        />
+        <van-field
+          v-model="form.tenantIdCard"
+          label="身份证"
+          placeholder="身份证号"
+          :rules="[
+            { required: true, message: '请填写身份证号' },
+            { pattern: /^\d{17}[\dXx]$|^\d{15}$/, message: '身份证号格式不正确' },
+          ]"
+        />
       </van-cell-group>
 
       <van-cell-group inset title="租约信息">

@@ -9,6 +9,7 @@ import {
   IsIn,
   ValidateNested,
   Min,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -30,11 +31,12 @@ export class CreateLeaseDto {
   tenantName!: string;
 
   @IsString()
+  @Matches(/^1[3-9]\d{9}$/, { message: '手机号格式不正确' })
   tenantPhone!: string;
 
-  @IsOptional()
   @IsString()
-  tenantIdCard?: string;
+  @Matches(/^\d{17}[\dXx]$|^\d{15}$/, { message: '身份证号格式不正确' })
+  tenantIdCard!: string;
 
   @IsDateString()
   startDate!: string;
