@@ -57,7 +57,8 @@ packages/
 - **ReminderLog** 提醒记录:id, billId, tenantId, type(PRE/DUE/OVERDUE), sentAt, channel, success
 - **Expense** 支出:id, date, category(自由文本或字典), name, amount, remark?, buildingId?, roomId?, operatorId
 - **AuditLog** 操作日志:id, operatorId, action, entityType, entityId, detail(JSON), createdAt
-- **ContractSigningTask** 电子签约记录(2026-08-31新增,M19):id, leaseId, type(NEW/RENEW), sceneValue(微信场景值,唯一,用于关注/扫描事件回调匹配), qrCodeImage(关注二维码图片,data URI或存储路径), waterMeterReading?/electricityMeterReading?/gasMeterReading?(Decimal,可选), facilities(JSON,固定12项设施的勾选状态,对应合同"屋内主要设施"栏), status(PENDING_SCAN/CREATED/SIGNED/EXPIRED), tencentFlowId?(腾讯电子签流程ID,场景值触发后才创建), signedPdfUrl?, signedAt?, createdAt
+- **ContractSigningTask** 电子签约记录(2026-08-31新增,2026-09-01改为微签平台调整字段,M19):id, leaseId, type(NEW/RENEW), sceneValue(微信场景值,唯一,用于关注/扫描事件回调匹配), qrCodeImage(关注二维码图片,data URI或存储路径), waterMeterReading?/electricityMeterReading?/gasMeterReading?(Decimal,可选), facilities(JSON,固定12项设施的勾选状态,对应合同"屋内主要设施"栏), extraTerms?(补充条款自由文本), status(PENDING_SCAN/FOLLOWED/CREATED/SIGNED/EXPIRED), weiqianBId?(微签互签业务ID,发起签署后才有), weiqianShortCode?(微签互签短链码,组签署链接用), signedPdfUrl?, signedAt?, createdAt
+- **ContractSettings** 合同签约全局配置(2026-09-01新增,单例表,M19):id, landlordName, landlordIdCard, landlordPhone(合同甲方固定信息,不因租约而变), defaultPenaltyMonths(默认违约金月数), defaultOverdueDays(默认逾期容忍天数), defaultCleaningFee(默认退房清洁费), defaultRenewNoticeDays(默认续租提前通知天数), updatedAt
 
 关系要点:Room 1-N Lease(历史);Lease 1-N Bill;Bill 1-N Payment;Lease 1-N ContractSigningTask(每次新签/续签各一条,**不会互相覆盖**,即使 `renew` 直接 `update` 同一条 Lease 记录,签约记录本身独立留存);Tenant 1-N Lease(可回头再租)。房间详情页聚合 = 按 roomId 串起以上所有表,含 ContractSigningTask 历史。
 
@@ -105,27 +106,41 @@ packages/
 ### 5.5 租客端访问规则
 JWT 内含 tenantId;接口只返回该租客自己租约的数据。UI 按租约状态:ACTIVE→正常;ENDED 且有未结账单→仅展示可支付的未结账单;ENDED 且结清→只读历史。
 
-### 5.6 合同电子签约(2026-08-31新增,M19)
+### 5.6 合同电子签约(2026-08-31立项,2026-09-01改用微签平台重新设计)
 
-**平台**:腾讯电子签(Essbasic基础版),密钥(TENCENT_ESIGN_SECRET_ID/TENCENT_ESIGN_SECRET_KEY)已配置在服务器 `.env`/`.env.dev`(子账号密钥,仅授予Essbasic全读写权限,不是主账号密钥)。合同模板需提前在腾讯电子签控制台建好(GasCan提供的现成合同文本,已识别字段清单,由 Claude Code 指导建模板)。
+> **平台变更记录**:最初选定腾讯电子签,深入设计后发现API接入需购买专业版超预算,e签宝/爱签/法大大逐一排查也都不满足预算(¥2000以内)。改用**微签**(上海复园电子科技有限公司,`www.weiqian.com.cn`,按份计费¥1.7/份),GasCan已用体验额度实测确认可用。API文档存档于 `docs/微签API文档.md`(**这份是从聊天附件转存的,原始.doc不入库**);合同模板结构(不含真实租客个人信息)存档于 `docs/合同模板结构.md`。下面的设计基于这两份文档 + 与微签技术人员的问答确认(2026-09-01)。
 
-**新增环境变量模式**:仿照 `WECHAT_MODE`/`PAYMENT_MODE`,新增 `ESIGN_MODE=mock|real`,mock模式下不真实调用腾讯API,方便dev环境联调。
+**平台**:微签,密钥(`WEIQIAN_APP_ID`/`WEIQIAN_APP_SECRET`/`WEIQIAN_COMPANY_ID`/`WEIQIAN_SEAL_ID`)已配置在dev服务器 `.env.dev`(体验额度测试用,`WEIQIAN_MODE=mock`起步)。签名算法:公共参数(不含Sign、不含文件流)按参数名ASCII升序排序拼接成`Key=Value&...`,用`AppSecret`做`HMAC-SHA256`再`Base64`编码,放进请求头`Sign`;`AppId`/`Timestamp`(毫秒级,15分钟有效)/`AuthMode`(固定`Signature`)一并放请求头,业务参数放`Data`(JSON字符串)。测试环境 `http://forwave.picp.net:8888/openapi/v1/`,正式环境 `https://www.weiqian.com.cn:8887/openapi/v1/`。
+
+**新增环境变量模式**:仿照 `WECHAT_MODE`/`PAYMENT_MODE`,新增 `WEIQIAN_MODE=mock|real`。
+
+**数据模型变更**:
+- `Tenant.idCard` **维持 `String?` 可空**——查过dev(679条)和生产(681条)历史Tenant记录,idCard 100%为NULL,这是从未采集过的历史数据,无法回填真实身份证号,收紧成数据库层必填既不可行也没必要。改为只在**应用层**(DTO + 前端表单)对新建/编辑租约强制必填+格式校验(11位手机号、15或18位身份证号含X),对历史数据不做追溯要求。
+- 新增 `ContractSettings` 单例配置表:甲方(出租人)姓名/身份证号/电话(合同上甲方信息固定不变,不因租约而变) + 违约金月数/逾期容忍天数/清洁费/续租提前通知天数四项默认值(系统设置页配置,发起签约时可按需覆盖)
+- `ContractSigningTask` 新增 `extraTerms`(补充条款自由文本,可空)
+- `ContractSigningTask.status` 状态机在 PENDING_SCAN 和 CREATED 之间补一个 **FOLLOWED**(已关注公众号,待房东发起签署)——原设计是"一关注就自动创建签署任务",但这次 GasCan 描述的是"我可以发起签署"这个主动动作,所以拆成两步:关注只是解锁"发起签署"按钮(避免二维码生成了没人扫、白白占坑),真正调用微签(消耗额度)由房东主动点击触发
+- 房屋用途字段合同上写死"住宅",不建模
+
+**合同PDF生成**(新增能力,`docs/合同模板结构.md` 记录了完整字段清单):按 HTML 模板 + 动态字段替换生成,用 **Puppeteer** 渲染成 PDF——选它不是因为轻,是因为微签的接收方/发起方盖章都是**固定坐标**(0-1000区间,不支持关键字定位),模板必须像素级可复现,HTML/CSS 在固定 viewport 下渲染是最容易保证这一点的方式。模板设计要点:所有变长字段(姓名/地址/金额大写等)必须用固定高度容器,不能让内容溢出挤动后续元素坐标。金额需要"数字转中文大写"工具函数(新增)。
 
 **触发流程**:
-1. 房东在租约详情页点「生成电子签约」,弹窗填写水电表底数(可选)+屋内设施勾选(12项固定选项:空调/冰箱/洗衣机/热水器/燃气灶/电视/淋浴器/油烟机/床/柜子/椅子/沙发,对应合同原文)——**这两项挂在 `ContractSigningTask` 上,不是 `Lease` 字段,不放进新签/续签表单**,提交后创建一条 `ContractSigningTask`(status=PENDING_SCAN),调微信「生成带参数二维码」接口(临时二维码,场景值关联这条记录的id或专用编号),返回二维码图片供房东截图转发。**这一步不调用腾讯电子签API,不消耗额度**。
-2. 微信「关注事件」/「扫描事件」webhook(新增,复用 `WechatModule` 的 mock/real 分层模式):收到事件后按场景值查到对应 `ContractSigningTask`,若状态仍是 PENDING_SCAN:
-   - 调腾讯电子签API创建正式签署流程(此时才消耗额度),把 Lease 的租金/期限/押金 + 该 ContractSigningTask 的水电表读数/设施清单,通过模板变量传入生成合同内容
-   - 更新 status=CREATED,记录 tencentFlowId
-   - 通过微信「客服消息」接口(新增)把继续签约的入口(链接或小程序码,取决于腾讯电子签返回的形式)推给这个用户
-   - 若该场景值未匹配任何 PENDING_SCAN 任务(已使用过/过期/普通关注无场景值),走默认欢迎语兜底,不创建腾讯任务
-3. 公众号原有「被添加为好友后自动回复」已由 GasCan 手动关闭,欢迎语/业务消息完全由上面这套代码逻辑接管
-4. 租客在腾讯电子签完成实名认证+签署(只需租客单方签字,「出租人」甲方信息固定写死,不做变量)
-5. 腾讯电子签签署完成回调(新增 `POST /contracts/tencent-esign/notify`,复用支付回调的幂等设计思路,按 tencentFlowId 查找+防重复处理):
-   - 更新 ContractSigningTask.status=SIGNED,存 signedPdfUrl、signedAt
-   - **自动绑定**:用这次关注/扫描事件里拿到的openid,写入该 Lease 关联 Tenant 的 openid 字段(复用现有 `bindInviteCode` 同等语义,但触发方式不同);若该 Tenant 已绑定其他 openid,不静默覆盖,记录异常留待房东人工核实,不做自动处理
-6. 房东端租约详情页展示签约进度(PENDING_SCAN/CREATED/SIGNED/EXPIRED),SIGNED 状态下提供在线预览(PDF)+下载入口
+1. 房东在租约详情页点「生成电子签约」,弹窗填写水电表底数(可选)+屋内设施勾选(12项固定选项,对应合同原文)+补充条款(可选自由文本)+四项默认条款数值(预填 `ContractSettings` 默认值,可覆盖)——**水电表/设施/补充条款挂在 `ContractSigningTask` 上,不是 `Lease` 字段**,提交后创建一条 `ContractSigningTask`(status=PENDING_SCAN),调微信「生成带参数二维码」接口(复用19.2已有能力,场景值关联这条记录),返回二维码图片供房东截图转发。**这一步不调用微签API,不消耗额度**。
+2. 微信「关注事件」/「扫描事件」webhook(复用19.2已有的 mock/real 分层):按场景值查到对应 `ContractSigningTask`,若状态是 PENDING_SCAN → 更新为 **FOLLOWED**,通过「客服消息」提示租客"房东会尽快发起签约,请留意后续消息";若场景值未匹配(已用过/过期/普通关注无场景值),走默认欢迎语兜底。
+3. 房东在租约详情页看到状态变 FOLLOWED 后,点「发起签署」:
+   - 系统按模板生成合同PDF(Puppeteer)
+   - 调微签 `eachSign/upload` 上传PDF拿 `bId`
+   - 调微签 `eachSign/create` 创建互签任务:`launcherSignRule` 配置好 `sealId` 让发起方(我方/房东)自动盖章,不需要人工操作;`receiverDTOS` 填租客手机号(`account`)+姓名+身份证号,`authType=2`(实名认证,微签确认过法律效力更高);`expiresTime` 设合理有效期;`finishSignJumpPage` 指向tenant-h5的签约完成页
+   - 拿到 `shortCode`,组出签署链接;通过微信「客服消息」+ 微签 `isSendSmsToReceiver` 短信**两个渠道一起发**给租客
+   - 更新 status=CREATED,记录 `weiqianBId`/`weiqianShortCode`
+4. 租客打开链接完成实名认证+签署(只需租客单方签字,出租人甲方信息固定不变,不做变量)
+5. **签署状态确认**(微签没有真正的服务端webhook,只有客户端跳转带参数,不能当作唯一凭证,做法参考支付回调的"不轻信客户端参数、服务端主动核实"原则):
+   - 租客签完浏览器跳转到 `finishSignJumpPage` → 后端立即尝试调 `eachSign/download` 核实文件是否已生成
+   - 同时有后台定时轮询兜底(类似 `BillEngineService` 的定时任务模式),对所有还处于CREATED状态、超过一定时间没有确认完成的任务,定期重试 `download`
+   - 核实拿到有效PDF后:更新 `ContractSigningTask.status=SIGNED`,下载文件存到系统 `uploads` 目录(不依赖每次都去微签取),记录 `signedPdfUrl`、`signedAt`
+   - **自动绑定**:用关注/扫描事件里拿到的openid写入该 Lease 关联 Tenant 的 openid 字段;若该 Tenant 已绑定其他openid,不静默覆盖,记录异常留待房东人工核实
+6. 房东端租约详情页展示签约进度(PENDING_SCAN/FOLLOWED/CREATED/SIGNED),SIGNED 状态下提供在线预览(PDF)+下载入口
 
-**待确认**:腾讯电子签签署入口具体是H5链接还是小程序码(取决于是否需要跳出微信生态,GasCan正在跟腾讯销售经理确认),这决定第2步「客服消息」推送内容的具体形式,不阻塞先搭好上述框架,real模式下这一环节最后接。
+**本轮范围**:先做成功路径最小可用版本;租客拒签、签署链接过期、房东撤销重新发起这几个边界状态本轮不做,留待下一轮迭代。
 
 ## 6. API 约定
 
