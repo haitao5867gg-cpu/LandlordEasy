@@ -528,6 +528,14 @@
 
 两处改完后**跑通了一次完整的端到端流程验证**(独立脚本,用NestJS `createApplicationContext`直接调用service方法,不经过HTTP认证,白名单库名`landlordeasy_dev`防误操作):创建测试租约(专用测试公寓/楼栋/房间/租客,验证完已清理)→`createContractSigningTask`创建签约任务(status=PENDING_SCAN,二维码生成)→构造真实XML调`WechatController.event`模拟微信关注事件(status→FOLLOWED,`followerOpenid`正确记录)→`launchContractSigningTask`发起签署(**真实生成PDF**+调MockWeiQianService,status→CREATED,`weiqianBId`/`weiqianShortCode`正确返回)→`tryConfirmSigned`核实签署(status→SIGNED,已签署PDF文件真实落盘且`%PDF-`文件头正确)→验证租客`openid`自动绑定成功。**全部7个环节一次性验证通过,没有出现需要二次修复的逻辑错误**(只是环境配置缺口,代码逻辑本身是对的)。测试数据(含误留的测试用`ContractSettings`"测试甲方"和测试用`Property`"M19测试公寓")验证完已全部清理。
 
+**真实浏览器完整走查(2026-09-01,GasCan要求"带我过一遍",发现并修复3个独立脚本验证完全没测出来的严重bug)**:上面的独立脚本验证走的是`createApplicationContext`直接调service方法,绕过了真实HTTP层;这次改用真实浏览器(mock openid登录dev环境landlord-h5)+真实HTTP请求(curl模拟微信webhook/微签落地页跳转),完整走了一遍系统设置配置甲方信息→新建租约(身份证必填生效)→生成电子签约→模拟关注→发起签署→模拟签署完成→查看已签署PDF这条链路,过程中连续暴露3个此前所有验证方式(单元测试/独立脚本/Kiro的Playwright测试)都没测出来的真实缺口:
+
+1. **微信XML事件webhook收不到body**:`NestFactory.create(AppModule,{rawBody:true})`这个全局开关只对NestJS默认注册的json/urlencoded这两个body-parser生效,微信推送关注/扫描事件用的`text/xml` content-type完全不匹配,导致`req.rawBody`一直是`undefined`,`WechatController.event()`拿到空字符串解析不出任何字段,永远走"other"事件分支——**如果不修,真实微信服务器推送事件时会同样失效,是M19"扫码关注自动转FOLLOWED"这个核心自动化完全不工作的严重问题**。单元测试测不出来是因为测试直接构造fake request对象注入`rawBody`,没有经过真实的Express body-parser链路。修复:`main.ts`单独给`/api/v1/wechat/event`路由挂一个`express.text()`parser匹配`text/xml`/`application/xml`。
+2. **`express`未列为直接依赖,pnpm严格隔离下服务器真实部署直接崩溃**:上面的修复引入了`import { text } from 'express'`,但`express`只是`@nestjs/platform-express`的间接依赖,pnpm的严格node_modules隔离不允许应用代码直接require间接依赖。本地`tsc`(只做类型检查)和`jest`(从不会真正执行`main.ts`的`bootstrap()`更不会启动编译后的`dist/main.js`)都测不出来,直到部署到服务器PM2真正尝试启动才第一次报`MODULE_NOT_FOUND`崩溃。**这是本地验证流程的一个盲区,记录下来:以后改动`main.ts`这类涉及依赖解析的改动,必须额外做一次真实build+boot验证(哪怕连不上数据库,只要能确认模块加载阶段不报错)**。修复:`express`加进`apps/server/package.json`直接依赖。
+3. **dev环境nginx从一开始就没配`/uploads/`规则**:点击"查看/下载合同"链接时,请求命中了SPA的`try_files ... /index.html`兜底规则,返回房东端首页HTML不是真实文件——这条规则prod环境一直有,dev环境从建立以来就漏配了,只是之前从没有功能在dev环境真正测过完整的uploads文件访问链路才一直没暴露。修复:`deploy/nginx.conf`补上dev server block的`/uploads/`规则(存档进仓库),并同步手动更新了服务器`/etc/nginx/sites-enabled/landlord-easy`实际生效配置(改前用时间戳备份,校验语法后reload)。
+
+三处修复后重新在真实浏览器里走了一遍完整4态(PENDING_SCAN二维码生成→FOLLOWED租客关注→CREATED发起签署真实生成PDF→SIGNED核实签署完成),`curl`下载"查看/下载合同"链接确认返回的确实是`file`命令识别出的`PDF document, version 1.4`,不再是HTML兜底页面。**这次真实走查证明了"用真实HTTP+真实浏览器"比"独立脚本直调service方法"能测出多得多的真实问题**,值得作为以后验证大功能的标准做法记下来。演示产生的测试租约/租客/签约任务/PDF文件均已清理,`ContractSettings`"开发演示甲方"配置保留供后续继续测试用。
+
 ### 第二批:真实联调(有体验额度,不阻塞,但要等第一批mock模式跑通)
 
 - [ ] 19.11 **真实对接:`WEIQIAN_MODE`切real,用GasCan已配置好的体验额度账号(AppId/AppSecret/cId/sealId均已就绪),调通完整链路。**
