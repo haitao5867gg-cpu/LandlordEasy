@@ -440,3 +440,44 @@ Kiro CLI实现（只改`MyBills.vue`+`PayBill.vue`两个文件），Claude Code�
 ### 当前 `specs/tasks.md` 状态
 
 M9~M17全部完成；M18.1~18.7、18.9、18.10全部完成（真实支付已上线并验证成功，租客可查看已付款详情）；18.8（支付宝）阻塞等资质。M19（合同电子签约）暂停，等GasCan确认新平台（微签）细节。
+
+---
+
+## 最新状态：2026-09-01（M19合同电子签约改用微签平台，第一批19.1~19.10全部完成并部署dev验证中——这是当前最新的交接快照，新会话直接看这一节）
+
+### 这次做的事：M19从"暂停"重新设计并自主实施
+
+GasCan确认微签可用（体验额度实测通过）并提供了微签API文档+账号配置（AppId/AppSecret/cId/sealId，已安全存入dev服务器`.env.dev`）+一份含真实租客个人信息的合同PDF样本（**原始PDF不入库**，只整理了不含PII的固定条款结构存进`docs/合同模板结构.md`；微签API文档存进`docs/微签API文档.md`）。经"一问一答直到清楚"的设计过程确认了完整方案（详见`specs/design.md` 5.6节），**GasCan随后明确说"开工吧，进入自主模式，接下来2小时没法回复"**，本轮M19实施全程在这个自主模式下完成。
+
+**关键设计决策**（均已跟GasCan确认）：
+- `Tenant.idCard`维持数据库可空（查过dev/生产两边历史数据，idCard 100%为NULL，无法回填），只在应用层（DTO+前端表单）对新建租约强制必填+格式校验
+- `ContractSigningTask`状态机补一个`FOLLOWED`中间态，把"关注公众号"和"房东主动发起签署"拆成两个动作（避免自动消耗微签额度）
+- 新增`ContractSettings`单例配置表存甲方固定信息+四项默认条款数值（违约金月数/逾期容忍天数/清洁费/续租提前通知天数），系统设置页可配置，发起签约时可临时覆盖
+- 合同PDF用**Puppeteer**按HTML模板生成（微签盖章是固定坐标不支持关键字定位，需要像素级可复现的渲染方式）
+- 签署状态确认走"客户端跳转触发即时核实 + 后台定时轮询兜底"（微签没有真正的服务端webhook，不能只信客户端跳转参数，这个教训来自微信支付回调的经验）
+
+**实施内容**（19.1/19.2/19.4是之前腾讯电子签阶段做的、平台无关、直接复用；19.3/19.5~19.10这次全部重新实现）：
+- 19.3 微签API封装（Mock+Real，签名算法HMAC-SHA256+Base64）
+- 19.5 Schema v2（ContractSettings表+状态机+租客信息校验）
+- 19.6 合同PDF生成能力——**GasCan中途回来看了一眼，指出本机已经装了Chrome不需要重复下载完整Chromium，Claude Code当场把依赖从`puppeteer`换成`puppeteer-core`+可配置Chrome路径**（本地Mac自动探测，服务器需要显式配置）
+- 19.7~19.9 业务编排：关注事件webhook（转FOLLOWED）、发起签署接口（生成PDF+调微签+双通道推送）、签署状态确认（跳转落地页+10分钟轮询兜底）
+- 19.10 房东端UI：合同签约设置页+租约详情页电子签约卡片（四态展示）——**Claude Code复核时发现并修正了一处Kiro实现的架构缺口**：四项条款覆盖值原本被Kiro用localStorage暂存绕过DTO限制，改成直接持久化到`ContractSigningTask`记录本身，删除了脆弱的localStorage依赖
+
+**验证方式**：每一批Kiro CLI实现完，Claude Code都独立重跑`tsc`/`jest`/`vue-tsc`/`build`（不采信Kiro自述），19.10还用真实浏览器（XHR拦截伪造后端响应）复核了架构修正后的请求体确实携带四项覆盖值。最终全量回归：server tsc 0错误、jest **11套件86用例全过**、两个前端vue-tsc 0错误、landlord-h5 build成功。
+
+**部署**：dev服务器`git pull`+`prisma db push`（新表+多个可空字段，无数据丢失警告）+`deploy/deploy.sh dev`全部成功，PM2重启、Nginx reload正常，健康检查200。
+
+**发现的问题，如实记录**：
+1. 合同模板里"第四条""第五条"和附件《安全责任承诺书》9条承诺不是原合同扫描件的逐字文本（`docs/合同模板结构.md`当初只整理了摘要），Kiro按摘要扩写成正式条款，含义一致但措辞不是原文，**正式使用前必须拿原合同核对逐字文本重写这几段**
+2. dev服务器上还没装Chromium，`launchContractSigningTask`真正调用PDF生成会报错——**正在处理中**（用`@puppeteer/browsers`下载独立Chrome for Testing二进制，不依赖Ubuntu 24.04已经snap化的`chromium-browser`包，避免snap在轻量服务器上的复杂性）
+
+### 下一步
+
+- Chrome for Testing下载完成后配置`PDF_CHROME_EXECUTABLE_PATH`，跑一遍mock模式下的端到端流程验证（创建签约任务→模拟关注事件→发起签署→模拟签署完成回调）
+- 合同模板第四/五条+附件的逐字文本需要GasCan配合核对
+- M19第二批（19.11真实WEIQIAN_MODE=real联调、19.12真实场景验证）还没开始，等第一批dev验证完、GasCan确认后再继续
+- **本轮全部工作只在`dev`分支/dev环境，未合并main、未部署生产**，等GasCan回来看过再决定下一步
+
+### 当前 `specs/tasks.md` 状态
+
+M9~M18全部完成（18.8支付宝仍阻塞资质）。M19第一批19.1~19.10全部完成，已部署dev环境，端到端mock验证进行中。M19第二批（真实联调）未开始。
