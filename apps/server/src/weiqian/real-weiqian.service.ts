@@ -29,6 +29,13 @@ const DEFAULT_LAUNCHER_SIGN_RULE = {
   x: 700,
   y: 850,
 } as const;
+/** 接收方盖章/签字位置,占位坐标(跟发起方x=700错开避免重叠),
+ * 等真实合同模板版式定下来后需要再精调,让它落在乙方签字栏 */
+const DEFAULT_RECEIVER_POSITION = {
+  x: 200,
+  y: 850,
+  pageNum: 1,
+} as const;
 
 @Injectable()
 export class RealWeiQianService implements IWeiQianService {
@@ -76,6 +83,7 @@ export class RealWeiQianService implements IWeiQianService {
           idCard: params.receiverIdCard,
         },
       ],
+      positionDTOS: [params.receiverPosition ?? DEFAULT_RECEIVER_POSITION],
       launcherSignRule: [
         {
           ...DEFAULT_LAUNCHER_SIGN_RULE,

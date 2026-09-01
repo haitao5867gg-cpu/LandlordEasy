@@ -165,6 +165,7 @@ describe('RealWeiQianService', () => {
           idCard: '310000000000000000',
         },
       ],
+      positionDTOS: [{ x: 200, y: 850, pageNum: 1 }],
       launcherSignRule: [
         {
           autosealType: 1,
