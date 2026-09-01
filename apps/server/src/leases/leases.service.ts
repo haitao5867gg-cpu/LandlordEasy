@@ -89,6 +89,7 @@ export class LeasesService {
         bills: { include: { items: true, payments: true }, orderBy: { periodStart: 'desc' } },
         depositRecords: true,
         handoverRecords: true,
+        contractSigningTasks: { orderBy: { createdAt: 'desc' } },
       },
     });
     if (!lease) throw new NotFoundException('租约不存在');
@@ -130,6 +131,10 @@ export class LeasesService {
               ? JSON.parse(JSON.stringify(dto.facilities))
               : [],
             ...(dto.extraTerms === undefined ? {} : { extraTerms: dto.extraTerms }),
+            penaltyMonths: dto.penaltyMonths,
+            overdueToleranceDays: dto.overdueToleranceDays,
+            cleaningFee: dto.cleaningFee,
+            renewalNoticeDays: dto.renewalNoticeDays,
             status: 'PENDING_SCAN',
           },
         });
@@ -207,12 +212,19 @@ export class LeasesService {
       monthlyRent: Number(task.lease.rent),
       paymentCycle: this.formatPaymentCycle(task.lease.payCycle),
       depositAmount: Number(task.lease.deposit),
-      penaltyMonths: dto.penaltyMonths ?? settings.defaultPenaltyMonths,
+      penaltyMonths:
+        dto.penaltyMonths ?? task.penaltyMonths ?? settings.defaultPenaltyMonths,
       overdueToleranceDays:
-        dto.overdueToleranceDays ?? settings.defaultOverdueDays,
-      cleaningFee: Number(dto.cleaningFee ?? settings.defaultCleaningFee),
+        dto.overdueToleranceDays ??
+        task.overdueToleranceDays ??
+        settings.defaultOverdueDays,
+      cleaningFee: Number(
+        dto.cleaningFee ?? task.cleaningFee ?? settings.defaultCleaningFee,
+      ),
       renewalNoticeDays:
-        dto.renewalNoticeDays ?? settings.defaultRenewNoticeDays,
+        dto.renewalNoticeDays ??
+        task.renewalNoticeDays ??
+        settings.defaultRenewNoticeDays,
       waterMeterReading:
         task.waterMeterReading === null
           ? undefined

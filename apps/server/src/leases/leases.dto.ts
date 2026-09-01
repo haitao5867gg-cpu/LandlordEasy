@@ -155,4 +155,24 @@ export class CreateContractSigningTaskDto {
   @IsOptional()
   @IsString()
   extraTerms?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  penaltyMonths?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  overdueToleranceDays?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  cleaningFee?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  renewalNoticeDays?: number;
 }

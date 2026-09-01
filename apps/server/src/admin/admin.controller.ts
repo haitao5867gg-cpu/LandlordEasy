@@ -14,7 +14,16 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
-import { IsString, IsOptional, IsBoolean, IsNumber } from 'class-validator';
+import {
+  IsBoolean,
+  IsInt,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Matches,
+  Min,
+} from 'class-validator';
 import { AdminService } from './admin.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { JwtPayload } from '../auth/auth.service';
@@ -49,6 +58,42 @@ class UpdateSettingsDto {
   @IsOptional()
   @IsString()
   qrcodeImageUrl?: string;
+}
+
+class UpdateContractSettingsDto {
+  @IsString()
+  @IsNotEmpty()
+  landlordName!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^\d{17}[\dXx]$|^\d{15}$/)
+  landlordIdCard!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^1[3-9]\d{9}$/)
+  landlordPhone!: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  defaultPenaltyMonths?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  defaultOverdueDays?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  defaultCleaningFee?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  defaultRenewNoticeDays?: number;
 }
 
 @Controller('admin')
@@ -89,6 +134,18 @@ export class AdminController {
   @Put('settings')
   updateSettings(@Body() dto: UpdateSettingsDto) {
     return this.adminService.updateSettings(dto);
+  }
+
+  // === 合同签约设置 ===
+
+  @Get('contract-settings')
+  getContractSettings() {
+    return this.adminService.getContractSettings();
+  }
+
+  @Put('contract-settings')
+  updateContractSettings(@Body() dto: UpdateContractSettingsDto) {
+    return this.adminService.updateContractSettings(dto);
   }
 
   // === 收款码图片上传 ===

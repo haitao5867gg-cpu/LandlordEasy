@@ -169,6 +169,10 @@ model ContractSigningTask {
   gasMeterReading         Decimal?  @db.Decimal(10, 2)
   facilities              Json?     // [{name, has}]
   extraTerms              String?   @db.Text
+  penaltyMonths           Int?
+  overdueToleranceDays    Int?
+  cleaningFee             Decimal?  @db.Decimal(10, 2)
+  renewalNoticeDays       Int?
   status                  String    @default("PENDING_SCAN") // PENDING_SCAN / FOLLOWED / CREATED / SIGNED / EXPIRED
   followerOpenid          String?
   weiqianBId              String?

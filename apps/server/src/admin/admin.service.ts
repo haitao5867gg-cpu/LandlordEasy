@@ -10,6 +10,23 @@ export interface SystemSettings {
   qrcodeImageUrl: string;
 }
 
+export interface ContractSettingsInput {
+  landlordName: string;
+  landlordIdCard: string;
+  landlordPhone: string;
+  defaultPenaltyMonths?: number;
+  defaultOverdueDays?: number;
+  defaultCleaningFee?: number;
+  defaultRenewNoticeDays?: number;
+}
+
+const DEFAULT_CONTRACT_SETTINGS = {
+  defaultPenaltyMonths: 1,
+  defaultOverdueDays: 5,
+  defaultCleaningFee: 110,
+  defaultRenewNoticeDays: 30,
+};
+
 const SETTINGS_FILE = path.join(process.cwd(), 'data/settings.json');
 const UPLOAD_DIR = path.join(process.cwd(), 'data/uploads');
 
@@ -59,6 +76,49 @@ export class AdminService {
     Object.assign(settings, updates);
     this.saveSettings(settings);
     return settings;
+  }
+
+  // === 合同签约设置(数据库单例) ===
+
+  async getContractSettings() {
+    const settings = await this.prisma.contractSettings.findFirst({
+      orderBy: { id: 'asc' },
+    });
+    return settings ?? {
+      id: null,
+      landlordName: '',
+      landlordIdCard: '',
+      landlordPhone: '',
+      ...DEFAULT_CONTRACT_SETTINGS,
+      updatedAt: null,
+    };
+  }
+
+  async updateContractSettings(input: ContractSettingsInput) {
+    const existing = await this.prisma.contractSettings.findFirst({
+      orderBy: { id: 'asc' },
+    });
+    const data = {
+      landlordName: input.landlordName,
+      landlordIdCard: input.landlordIdCard,
+      landlordPhone: input.landlordPhone,
+      ...(input.defaultPenaltyMonths === undefined
+        ? {}
+        : { defaultPenaltyMonths: input.defaultPenaltyMonths }),
+      ...(input.defaultOverdueDays === undefined
+        ? {}
+        : { defaultOverdueDays: input.defaultOverdueDays }),
+      ...(input.defaultCleaningFee === undefined
+        ? {}
+        : { defaultCleaningFee: input.defaultCleaningFee }),
+      ...(input.defaultRenewNoticeDays === undefined
+        ? {}
+        : { defaultRenewNoticeDays: input.defaultRenewNoticeDays }),
+    };
+
+    return existing
+      ? this.prisma.contractSettings.update({ where: { id: existing.id }, data })
+      : this.prisma.contractSettings.create({ data });
   }
 
   // === 收款码图片上传 ===
