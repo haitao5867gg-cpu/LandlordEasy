@@ -467,17 +467,20 @@ GasCan确认微签可用（体验额度实测通过）并提供了微签API文�
 
 **部署**：dev服务器`git pull`+`prisma db push`（新表+多个可空字段，无数据丢失警告）+`deploy/deploy.sh dev`全部成功，PM2重启、Nginx reload正常，健康检查200。
 
-**发现的问题，如实记录**：
-1. 合同模板里"第四条""第五条"和附件《安全责任承诺书》9条承诺不是原合同扫描件的逐字文本（`docs/合同模板结构.md`当初只整理了摘要），Kiro按摘要扩写成正式条款，含义一致但措辞不是原文，**正式使用前必须拿原合同核对逐字文本重写这几段**
-2. dev服务器上还没装Chromium，`launchContractSigningTask`真正调用PDF生成会报错——**正在处理中**（用`@puppeteer/browsers`下载独立Chrome for Testing二进制，不依赖Ubuntu 24.04已经snap化的`chromium-browser`包，避免snap在轻量服务器上的复杂性）
+**dev服务器补装了两处环境依赖**（都记进了`.env.example`注释，生产部署时要重复做一遍）：
+1. dev服务器原本完全没有Chrome/Chromium。Ubuntu 24.04的`chromium-browser`已经变成snap过渡包，不想引入snap复杂性，改用`@puppeteer/browsers`下载独立Chrome for Testing二进制（不依赖apt/snap），又补了一批headless Chrome运行时依赖库（`libatk`/`libcairo`/`libpango`/`libgbm`等12个），`ldd`确认全部解析成功后跑通冒烟测试（真实生成PDF，`%PDF-`文件头正确）。
+2. `SERVER_PUBLIC_BASE_URL`此前只在`.env.example`留了占位符没配真实值，补上`https://dev.landlordeasy.cn/api/v1`。
+
+**端到端验证：全部通过**。用独立脚本（NestJS `createApplicationContext`直接调service方法，不走HTTP认证，白名单库名防误操作）完整跑了一遍：创建签约任务→构造真实XML模拟微信关注事件（webhook正确转FOLLOWED）→发起签署（**真实生成PDF**+调mock微签，转CREATED）→核实签署（转SIGNED，PDF真实落盘）→租客openid自动绑定成功。**7个环节一次性全部通过，没有出现代码逻辑问题**，只是环境配置缺口（已修复）。测试数据（含测试用的假`ContractSettings`/`Property`）已全部清理干净，dev库不留痕迹。
+
+**如实记录一个内容缺口**：合同模板里"第四条""第五条"和附件《安全责任承诺书》9条承诺不是原合同扫描件的逐字文本（`docs/合同模板结构.md`当初只整理了摘要），Kiro按摘要扩写成正式条款，含义一致但措辞不是原文，**正式使用前必须拿原合同核对逐字文本重写这几段**——这是内容问题不是技术问题，不影响系统本身是否work。
 
 ### 下一步
 
-- Chrome for Testing下载完成后配置`PDF_CHROME_EXECUTABLE_PATH`，跑一遍mock模式下的端到端流程验证（创建签约任务→模拟关注事件→发起签署→模拟签署完成回调）
-- 合同模板第四/五条+附件的逐字文本需要GasCan配合核对
-- M19第二批（19.11真实WEIQIAN_MODE=real联调、19.12真实场景验证）还没开始，等第一批dev验证完、GasCan确认后再继续
-- **本轮全部工作只在`dev`分支/dev环境，未合并main、未部署生产**，等GasCan回来看过再决定下一步
+- 合同模板第四/五条+附件的逐字文本需要GasCan配合核对（正式使用前必做，技术联调不受影响）
+- M19第二批（19.11真实WEIQIAN_MODE=real联调、19.12真实场景验证）还没开始，需要GasCan确认后再继续（涉及真实调用微签消耗额度）
+- **本轮全部工作只在`dev`分支/dev环境，未合并main、未部署生产**，等GasCan回来看过再决定下一步；推生产时记得重复"补装Chrome依赖+配置SERVER_PUBLIC_BASE_URL"这两步（步骤已写进`apps/server/.env.example`注释）
 
 ### 当前 `specs/tasks.md` 状态
 
-M9~M18全部完成（18.8支付宝仍阻塞资质）。M19第一批19.1~19.10全部完成，已部署dev环境，端到端mock验证进行中。M19第二批（真实联调）未开始。
+M9~M18全部完成（18.8支付宝仍阻塞资质）。M19第一批19.1~19.10全部完成，已部署dev环境并完整端到端验证通过（mock模式）。M19第二批（真实联调）未开始，等GasCan确认。
