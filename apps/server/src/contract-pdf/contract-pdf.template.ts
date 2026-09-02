@@ -86,8 +86,8 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   body { color: #111; font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 9.2px; line-height: 1.38; }
   .page { position: relative; width: 210mm; height: 297mm; padding: 8mm 11mm; overflow: hidden; break-after: page; page-break-after: always; background: #fff; }
   .page:last-child { break-after: auto; page-break-after: auto; }
-  h1 { height: 11mm; margin: 0; text-align: center; font-family: SimSun, "Songti SC", serif; font-size: 20px; letter-spacing: 4px; line-height: 11mm; }
-  h2 { height: 14mm; margin: 0; text-align: center; font-family: SimSun, "Songti SC", serif; font-size: 19px; letter-spacing: 2px; line-height: 14mm; }
+  h1 { height: 11mm; margin: 0; text-align: center; font-family: SimSun, "Songti SC", "Noto Serif CJK SC", serif; font-size: 20px; letter-spacing: 4px; line-height: 11mm; }
+  h2 { height: 14mm; margin: 0; text-align: center; font-family: SimSun, "Songti SC", "Noto Serif CJK SC", serif; font-size: 19px; letter-spacing: 2px; line-height: 14mm; }
   .contract-no { position: absolute; top: 8mm; right: 11mm; width: 48mm; height: 6mm; overflow: hidden; white-space: nowrap; text-align: right; font-size: 9px; }
   .field { display: inline-block; height: 4.5mm; line-height: 4.5mm; padding: 0 1mm; overflow: hidden; white-space: nowrap; text-overflow: clip; vertical-align: bottom; border-bottom: .25mm solid #333; }
   .party { height: 6mm; overflow: hidden; white-space: nowrap; }
