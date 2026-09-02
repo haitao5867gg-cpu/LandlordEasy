@@ -593,6 +593,21 @@ GasCan拍板的方案:
 
 > 顺带修复(2026-09-01,GasCan自己在dev环境真实操作M19演示流程时发现): `NewLease.vue` 新签租约成功后点"完成"按钮只是关闭弹窗(`closeResult` 只置 `showResult=false`),没有做任何路由跳转,停留在空白的新签表单页,容易让人误以为流程没走完。**这是既有代码的问题,不属于M19本次改动范围**,但既然实测发现直接修了:`handleSubmit` 保存创建成功返回的 `res.id`,`closeResult` 关闭弹窗后 `router.push` 到 `/leases/:id`,直接看到刚创建的租约详情(含M19"生成电子签约"入口)。真实浏览器验证(XHR拦截伪造`/leases`的POST/GET响应,完整点击"确认签约"→"完成"):`location.pathname` 确认正确跳转,详情页内容正确渲染。`vue-tsc`(0错误)、`build`(成功)。已部署dev环境,健康检查+PM2稳定运行确认。
 
+## M20 租客账号绑定改用扫码关注(替代邀请码,2026-09-02立项+完成)
+
+> 背景:GasCan看到M19电子签约的"扫码关注公众号"机制后提出——既然租客可以扫码关注,那 tenant-h5 的邀请码绑定是不是也可以用同一套方式替代,更方便。经"一问一答直到确认"的设计过程确认方案:①跟电子签约现有关注二维码完全独立、新增一套单独机制(不合并,零回归风险);②邀请码直接下线(不保留兜底);③绑定二维码在"建租约成功后"自动生成,同时租约详情页也保留"按需生成"入口,覆盖已有的历史导入租约(嘉定公寓Q/R/S三栋约130间房,这些旧租约没有走过"建租约成功"这一步,靠详情页入口补齐)。
+
+- [x] 20.1 **扫码关注即自动绑定 tenant-h5,替代邀请码。**
+> 完成说明(2026-09-02):
+> - **Schema**:`Tenant`新增`bindSceneValue Int? @unique`(新表字段,历史行全为NULL,MySQL唯一索引允许多NULL共存,`prisma db push --accept-data-loss`确认安全,同类操作此前M18的`Payment.outTradeNo`已有先例)。`Lease.inviteCode`字段本身保留不动(仍在`create()`内部生成,只是不再对外展示/使用),不碰这个必填唯一字段的迁移,历史数据零风险。
+> - **后端**:`leases.service.ts`新增`getOrCreateTenantBindQrcode`(惰性生成/复用`bindSceneValue`,复用`createContractSigningTaskRecord`同款P2002冲突重试模式;调用现有`wechatQrcode.createSceneQrcode`,返回值除`qrCodeImage`外也带上`sceneValue`——这跟已有的`createContractSigningTask`接口把`sceneValue`原样返回是同一惯例,不是新的信息暴露)。新增`POST /leases/:id/bind-qrcode`。`wechat.controller.ts`的`event()`webhook新增`tryBindTenant`分支:场景值匹配到某租客的`bindSceneValue`时直接绑定openid,已绑定其他openid时不覆盖(复用`tryConfirmSigned`已有的同款冲突保护逻辑+log warning),推送客服消息附tenant-h5链接(从已有的`SERVER_PUBLIC_BASE_URL`派生,没有新增环境变量)。移除`POST /tenant/bind`+`bindInviteCode`。
+> - **前端**:`tenant-h5`的`Login.vue`去掉邀请码输入框,未绑定时只显示提示文案(正常流程下不会走到这里,因为绑定在关注那一步已经完成)。`landlord-h5`的`NewLease.vue`签约成功弹窗、`LeaseDetail.vue`租约详情页均把邀请码展示换成二维码/绑定状态展示,`LeaseDetail.vue`额外提供"生成绑定二维码"按钮覆盖历史租约按需生成的场景。
+> - **本轮由Claude Code直接实现,未走Kiro CLI**(继19.11之后同一会话内,`kiro-cli`网络异常仍未恢复)。
+> - **静态验证**:`pnpm --filter server exec tsc --noEmit`0错误;`pnpm --filter server test`10套件90用例全过(新增3个针对`tryBindTenant`场景值匹配/冲突分支+`getOrCreateTenantBindQrcode`惰性生成/复用分支的用例,原有用例零回归);`pnpm --filter landlord-h5 exec vue-tsc -b`、`pnpm --filter tenant-h5 exec vue-tsc -b`均0错误;server/landlord-h5/tenant-h5三个包均真实build成功。
+> - **同步更新了`e2e/tests`下引用邀请码的两个Playwright回归用例**(`core-flow.spec.ts`/`landlord-lease-bill-payment.spec.ts`),改用构造微信关注XML事件模拟扫码代替原邀请码绑定步骤——**如实说明:本次未在本地跑通完整Playwright套件**(需要本地MySQL(端口3307)+Node20工具链,本session未搭建,`landlord-lease-bill-payment.spec.ts`虽然实际打的是`https://dev.landlordeasy.cn`但仍需要本地server/前端dev server才能跑通页面交互部分),已按现有测试的写法和惯例仔细改写,但没有实际执行验证。这是一个已知的验证缺口,如实记录。
+> - **部署+启动验证**:已推送`dev`分支(commit `fbf9fb3`),SSH部署到dev环境成功(含上面的schema迁移),PM2重启后`status=online`、`unstable restarts=0`,`/api/v1/health`200。
+> - **真实浏览器端到端验证(dev环境,真实HTTP,非mock拦截)**:新建测试租约(lease 976,房间R栋205,测试完已清理+房间状态恢复VACANT)→"新签租约"弹窗自动带出二维码(网络面板确认`bind-qrcode`接口自动触发返回`sceneValue`)→租约详情页"租客账号绑定"区块正确显示"未绑定"+"生成绑定二维码"按钮→点击按钮确认复用同一个`sceneValue`(不重新生成)→构造微信关注XML事件POST到`/wechat/event`模拟扫码→查库确认`tenant.openid`已绑定→详情页刷新后正确显示"已绑定"→新开tab用`mock_openid`访问`tenant-h5`登录页,**未经过任何绑定步骤直接跳转到"我的账单"页**(验证了`bound:true`自动登录效果)。**额外验证了历史导入租约覆盖场景**:随机抽查一条真实历史租约(leaseId=326,S栋202,租客openid本来就是null),详情页正确显示"未绑定"+"生成绑定二维码"按钮,证实~130间历史房源不会因为这次改动被邀请码下线锁死。测试数据(lease 976/tenant 972及关联记录)已清理,真实历史数据(leaseId=326等)未被修改。
+
 ## P2(暂不开工)
 (空)
 
