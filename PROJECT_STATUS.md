@@ -539,3 +539,32 @@ M9~M18全部完成（18.8支付宝仍阻塞资质）。M19第一批19.1~19.10全
 ### 当前 `specs/tasks.md` 状态
 
 M9~M18全部完成（18.8支付宝仍阻塞资质）。M19第一批19.1~19.10全部完成。M19第二批：19.11（真实对接）核心链路已验证成功，签署完成判定方案已排查清楚并经GasCan拍板（去轮询+房东手动确认），待下次会话实施；19.12（端到端场景验证）等19.11实施完成后一起确认。
+
+---
+
+## 最新状态：2026-09-02（19.11方案已实施+部署dev+接口层验证通过，卡在真实浏览器成功路径验证——这是当前最新的交接快照，新会话直接看这一节）
+
+### 这次做的事
+
+开工第一件事按上一节交代先查了taskId=5（leaseId=974），**证实它确实已经被10分钟轮询误判成SIGNED**：`signedAt`比`createdAt`恰好晚10分钟，下载对应PDF人工核对，甲方/乙方签字栏均空白——这是真实发生的误判案例，不是理论推测，记进了`specs/tasks.md` 19.11。
+
+随后按GasCan已拍板的方案实施：删除`ContractSigningPollerService`（+其spec+`leases.module.ts`引用），新增`POST /leases/contract-signing-tasks/:id/preview-signed-file`（房东预览当前微签文件，不改状态）+`POST /leases/contract-signing-tasks/:id/confirm-signed`（复用现有`tryConfirmSigned`，房东肉眼核实后手动确认），`LeaseDetail.vue`的CREATED状态区块加了对应两个按钮（确认前有二次确认弹窗）。`GET /wechat/contract-sign-callback`跳转触发路径未改动。
+
+**本轮代码由Claude Code直接实现，没有走Kiro CLI**：`kiro-cli chat`需要连的`runtime.us-east-1.kiro.dev`当时被DNS解析到`198.18.0.91`（换了Google的8.8.8.8等多个DNS服务器结果一致，同时段`google.com`和SSH到腾讯云服务器都正常，判断是网络层面针对这个域名的干扰，不是账号或本机通用网络问题），`kiro-cli chat --help`这类最基本调用都连不上，所以这次没有等，直接自己写了——改动范围本来就已经设计清楚，不大。这不代表以后默认这样做，只是这次的环境异常记录一下。
+
+**验证情况**：
+- `tsc --noEmit`/`jest`（10套件85用例，比删除前少1套件1用例，正好对应删掉的poller spec）/`vue-tsc -b`/`nest build`/`vite build` 全部通过
+- 已推送`dev`分支+SSH部署到dev环境，PM2重启后`status=online`、`unstable restarts=0`，健康检查200
+- 用真实HTTP请求（mock登录拿房东JWT）验证了三条guard路径：对已经是SIGNED的taskId=5调`preview`/`confirm`都正确返回400（对应提示语符合设计），对不存在的taskId返回404
+
+**⚠️ 卡住的地方**：dev库现存的两条签约记录（taskId=4/5）都已经是SIGNED状态，两个新按钮只在CREATED状态下渲染，没有可测的真实数据。要造一条CREATED状态的测试记录，正常流程需要调用真实微签`eachSign/create`（dev当前`WEIQIAN_MODE=real`，真实额度联调专用），会消耗一份真实付费额度。尝试临时切换`WEIQIAN_MODE=mock`测一轮再切回（过去验证M18支付等功能用过的标准做法，零额度成本）时，被Claude Code自动模式的权限分类器拦下了（判定为修改服务器实时配置），没有强行绕过。**"点击后成功预览/确认"这条成功路径还没有真实浏览器验证**，19.11暂不能勾选完成。
+
+### 下一步
+
+- **GasCan回来后先决定**：①同意临时切一次`WEIQIAN_MODE=mock`测完立刻切回（零真实额度成本）；②直接用真实额度走一遍（相当于顺带做了19.12）；③其他方式。决定后下次会话直接按此完成最后的真实浏览器验证
+- 决定方式定下来后，剩余步骤很简单：造一条CREATED状态测试记录→真实浏览器点"下载查看签署进度"确认能拿到文件→点"确认已签署"确认状态真的转SIGNED+PDF落盘→清理测试数据→`specs/tasks.md` 19.11正式勾选完成
+- 全程仍只在`dev`分支/dev环境，未合并main、未部署生产
+
+### 当前 `specs/tasks.md` 状态
+
+M9~M18全部完成（18.8支付宝仍阻塞资质）。M19第一批19.1~19.10全部完成。M19第二批：19.11去轮询+手动确认方案已实施完成并部署dev，静态验证+接口层guard验证均通过，唯独成功路径的真实浏览器验证因"没有可测的CREATED状态记录+不确定是否该消耗真实额度"卡住，等GasCan决定后即可收尾；19.12待19.11收尾后一起确认。

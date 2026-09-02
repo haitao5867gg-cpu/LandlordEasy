@@ -570,6 +570,14 @@ GasCan拍板的方案:
 
 **✅ 已证实:taskId=5 确实被轮询误判成 SIGNED(2026-09-02,下次会话开工核查结果)**:SSH到dev服务器查库,`taskId=5` 当前 `status=SIGNED`、`signedAt=2026-09-02T05:30:00.577Z`,距 `createdAt=2026-09-02T05:20:29.445Z` 恰好约10分钟——跟`ContractSigningPollerService`的轮询周期精确吻合。下载了`signedPdfUrl`指向的`/opt/landlord-easy-dev/data/uploads/contract-5-signed.pdf`(真实文件,2页PDF)人工核对:能看到甲方红色"演示章"印章,但"申方签字(按手印)"和"乙方签字(按手印)"两栏**均为空白**、日期也未填,乙方从未真正签署。这就是排查记录里描述的误判风险的真实实例,不是理论推测——**证实了删轮询+加人工确认这个方案的必要性**。这条记录暂不改动(留作证据),按下面方案实施后由房东走新的人工确认流程处理。
 
+**✅ 方案已实施完成(2026-09-02),已部分验证,卡在一步需要GasCan决定才能继续**:
+
+- 改动内容:删除`ContractSigningPollerService`+spec,`leases.module.ts`去掉该provider;`leases.service.ts`新增`previewSignedFile`(下载当前微签文件存成`contract-{id}-preview.pdf`预览副本,不改状态/不绑定openid);`leases.controller.ts`新增`POST /leases/contract-signing-tasks/:id/preview-signed-file`+`POST /leases/contract-signing-tasks/:id/confirm-signed`(后者直接复用现有`tryConfirmSigned`);`LeaseDetail.vue`的CREATED状态区块新增"下载查看签署进度"+"确认已签署"两个按钮,确认前有二次确认弹窗提醒房东必须先核实乙方签字。`GET /wechat/contract-sign-callback`落地页逻辑未改动。**本轮由Claude Code直接实现,未走Kiro CLI**——`kiro-cli chat`的后端域名`runtime.us-east-1.kiro.dev`当时被DNS解析到`198.18.0.91`(疑似网络层面针对该域名的干扰,Google 114.114.114.114等多个DNS服务器解析结果一致,而同一时间`google.com`/SSH到腾讯云服务器均正常),判断是环境问题不是账号问题,鉴于改动范围已经设计清楚且不大,当场决定自己直接写不等待,如实记录这个偏离常规分工的原因。
+- 静态验证:`pnpm --filter server exec tsc --noEmit`0错误(合并dev分支帯来的schema变更后先跑了`prisma generate`);`pnpm --filter server test`10套件85用例全过(比删除前少1套件1用例,正好对应删掉的poller spec,无其他回归);`pnpm --filter landlord-h5 exec vue-tsc -b`0错误;server用`nest build`、landlord-h5用`vite build`均真实构建成功(鉴于19.11过程记录里"改main.ts类改动光靠tsc/jest测不出真实崩溃"的教训,这次特意都做了真实build)。
+- 部署+启动验证:已推送到`dev`分支(commit `7e4b500`证据记录+`c52bcc6`功能实现),SSH到dev服务器跑`deploy/deploy.sh dev`成功部署,PM2重启后`status=online`、`unstable restarts=0`,`/api/v1/health`返回200,确认服务真实启动无崩溃。
+- 接口层验证(真实HTTP请求,非mock):用mock登录拿到房东JWT,对**taskId=5(当前SIGNED状态)**发起验证——`preview-signed-file`返回`400 当前状态不支持预览签署进度`,`confirm-signed`返回`400 未能确认签署,请先点击"下载查看签署进度"核实乙方签字后再试`,对不存在的`taskId=99999`返回`404 电子签约任务不存在`——三条guard路径均符合设计预期。
+- **⚠️ 未完成的部分,卡在这里等GasCan决定**:COLLABORATION.md要求前端改动必须用真实浏览器验证实际交互效果,但"下载查看签署进度"/"确认已签署"这两个按钮只有在任务处于`CREATED`状态时才会渲染,而dev库里现存的两条记录(taskId=4/5)都已经是`SIGNED`。dev当前`WEIQIAN_MODE=real`(真实体验额度联调专用),按正常流程走到CREATED状态需要调用真实微签`eachSign/create`,会消耗一份真实付费额度——**不确定该不该为了测两个按钮的点击效果就花掉一份真实额度**,所以没有擅自执行。曾尝试临时把dev的`WEIQIAN_MODE`切成`mock`跑一轮一次性验证再切回来(这是过去验证M18支付等功能时用过的标准做法),但这个操作被Claude Code自动模式的权限分类器拦下了(判定为修改服务器实时配置的敏感操作),没有强行绕过。**这两个按钮的前端渲染条件、请求路径、loading状态、二次确认弹窗文案都已经代码审查确认无误,后端guard路径也已用真实HTTP请求验证,唯独"点击后真正成功预览/确认"这条成功路径的真实浏览器点击验证还没做**,不满足勾选19.11完成的门槛,如实记录为未完成。下次会话开工请GasCan先决定:①同意临时切一次`WEIQIAN_MODE=mock`测完再切回(不消耗真实额度,零成本);②GasCan自己找时间用真实额度走一遍(顺便也是19.12要做的事,可以合并);③其他方式。
+
 - [ ] 19.12 **真实场景验证:用微签体验额度走一遍完整流程——生成二维码→真实扫码关注→房东发起签署→租客收到微信客服消息+短信→完成实名认证签署→跳转触发或房东手动确认→房东端看到已签署PDF+租客自动绑定成功。**
 > 进度: 核心链路已用测试记录taskId=4完整验证成功(详见19.11进度记录),但19.11要先落地"去掉轮询+新增房东手动确认按钮"这个方案改动、重新在dev环境走一遍完整回归后,19.12才能正式勾选完成。
 
