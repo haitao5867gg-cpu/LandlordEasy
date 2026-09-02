@@ -142,6 +142,21 @@ model Lease {
   @@map("leases")
 }
 
+// ========== 合同签约配置 ==========
+model ContractSettings {
+  id                     Int      @id @default(autoincrement())
+  landlordName           String
+  landlordIdCard         String
+  landlordPhone          String
+  defaultPenaltyMonths   Int      @default(1)
+  defaultOverdueDays     Int      @default(5)
+  defaultCleaningFee     Decimal  @default(110) @db.Decimal(10, 2)
+  defaultRenewNoticeDays Int      @default(30)
+  updatedAt              DateTime @updatedAt
+
+  @@map("contract_settings")
+}
+
 // ========== 合同电子签约记录 ==========
 model ContractSigningTask {
   id                      Int       @id @default(autoincrement())
@@ -153,8 +168,15 @@ model ContractSigningTask {
   electricityMeterReading Decimal?  @db.Decimal(10, 2)
   gasMeterReading         Decimal?  @db.Decimal(10, 2)
   facilities              Json?     // [{name, has}]
-  status                  String    @default("PENDING_SCAN") // PENDING_SCAN / CREATED / SIGNED / EXPIRED
-  tencentFlowId           String?
+  extraTerms              String?   @db.Text
+  penaltyMonths           Int?
+  overdueToleranceDays    Int?
+  cleaningFee             Decimal?  @db.Decimal(10, 2)
+  renewalNoticeDays       Int?
+  status                  String    @default("PENDING_SCAN") // PENDING_SCAN / FOLLOWED / CREATED / SIGNED / EXPIRED
+  followerOpenid          String?
+  weiqianBId              String?
+  weiqianShortCode        String?
   signedPdfUrl            String?   @db.Text
   signedAt                DateTime?
   createdAt               DateTime  @default(now())

@@ -4,8 +4,24 @@
     <van-form @submit="handleSubmit">
       <van-cell-group inset title="租客信息">
         <van-field v-model="form.tenantName" label="姓名" placeholder="租客姓名" :rules="[{ required: true, message: '请填写姓名' }]" />
-        <van-field v-model="form.tenantPhone" label="手机号" placeholder="手机号" :rules="[{ required: true, message: '请填写手机号' }]" />
-        <van-field v-model="form.tenantIdCard" label="身份证" placeholder="可选" />
+        <van-field
+          v-model="form.tenantPhone"
+          label="手机号"
+          placeholder="手机号"
+          :rules="[
+            { required: true, message: '请填写手机号' },
+            { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确' },
+          ]"
+        />
+        <van-field
+          v-model="form.tenantIdCard"
+          label="身份证"
+          placeholder="身份证号"
+          :rules="[
+            { required: true, message: '请填写身份证号' },
+            { pattern: /^\d{17}[\dXx]$|^\d{15}$/, message: '身份证号格式不正确' },
+          ]"
+        />
       </van-cell-group>
 
       <van-cell-group inset title="租约信息">
@@ -97,14 +113,16 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../../utils/http';
 
 const route = useRoute();
+const router = useRouter();
 const loading = ref(false);
 const showResult = ref(false);
 const inviteCode = ref('');
+const newLeaseId = ref<number | null>(null);
 const showStartPicker = ref(false);
 
 const today = new Date();
@@ -193,6 +211,7 @@ async function handleSubmit() {
     if (form.feeItems.length) data.feeItems = form.feeItems.filter(i => i.name && i.amount);
     const res = await http.post('/leases', data) as any;
     inviteCode.value = res.inviteCode;
+    newLeaseId.value = res.id;
     showResult.value = true;
   } finally {
     loading.value = false;
@@ -206,6 +225,9 @@ function copyCode() {
 
 function closeResult() {
   showResult.value = false;
+  if (newLeaseId.value) {
+    router.push(`/leases/${newLeaseId.value}`);
+  }
 }
 </script>
 
