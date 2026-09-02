@@ -314,13 +314,43 @@ export class LeasesService {
     return true;
   }
 
+  /**
+   * 房东手动预览当前微签文件,用于跳转触发失效时的人工兜底核实。
+   * 只是把微签当前能下载到的文件存一份给房东看,绝不代表签署已确认——
+   * 不修改任务状态、signedPdfUrl、signedAt,也不做 openid 绑定。
+   */
+  async previewSignedFile(taskId: number): Promise<{ previewUrl: string }> {
+    const task = await this.prisma.contractSigningTask.findUnique({
+      where: { id: taskId },
+    });
+    if (!task) throw new NotFoundException('电子签约任务不存在');
+    if (task.status !== 'CREATED' || !task.weiqianBId) {
+      throw new BadRequestException('当前状态不支持预览签署进度');
+    }
+
+    const signedPdf = await this.weiqian.downloadSignedFile(task.weiqianBId);
+    if (!signedPdf) {
+      throw new BadRequestException(
+        '微签暂未返回文件,可能签署尚未开始,请稍后重试',
+      );
+    }
+
+    const fileName = `contract-${taskId}-preview.pdf`;
+    this.writeUploadFile(fileName, signedPdf);
+    return { previewUrl: `/uploads/${fileName}` };
+  }
+
   private saveSignedPdf(taskId: number, signedPdf: Buffer): string {
+    const fileName = `contract-${taskId}-signed.pdf`;
+    this.writeUploadFile(fileName, signedPdf);
+    return `/uploads/${fileName}`;
+  }
+
+  private writeUploadFile(fileName: string, content: Buffer): void {
     if (!fs.existsSync(SIGNED_CONTRACT_UPLOAD_DIR)) {
       fs.mkdirSync(SIGNED_CONTRACT_UPLOAD_DIR, { recursive: true });
     }
-    const fileName = `contract-${taskId}-signed.pdf`;
-    fs.writeFileSync(path.join(SIGNED_CONTRACT_UPLOAD_DIR, fileName), signedPdf);
-    return `/uploads/${fileName}`;
+    fs.writeFileSync(path.join(SIGNED_CONTRACT_UPLOAD_DIR, fileName), content);
   }
 
   private buildPropertyAddress(room: {

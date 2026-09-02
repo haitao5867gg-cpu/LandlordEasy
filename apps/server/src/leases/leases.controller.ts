@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   Post,
@@ -59,6 +60,24 @@ export class LeasesController {
     @Body() dto: LaunchContractSigningTaskDto,
   ) {
     return this.leasesService.launchContractSigningTask(id, dto);
+  }
+
+  /** 房东手动预览当前微签文件,跳转触发失效时的人工兜底第一步(仅预览,不确认)。 */
+  @Post('contract-signing-tasks/:id/preview-signed-file')
+  previewSignedFile(@Param('id', ParseIntPipe) id: number) {
+    return this.leasesService.previewSignedFile(id);
+  }
+
+  /** 房东肉眼核实乙方签字属实后手动确认已签署,跳转触发失效时的人工兜底第二步。 */
+  @Post('contract-signing-tasks/:id/confirm-signed')
+  async confirmSignedTask(@Param('id', ParseIntPipe) id: number) {
+    const confirmed = await this.leasesService.tryConfirmSigned(id);
+    if (!confirmed) {
+      throw new BadRequestException(
+        '未能确认签署,请先点击"下载查看签署进度"核实乙方签字后再试',
+      );
+    }
+    return { confirmed: true };
   }
 
   @Post(':id/end')

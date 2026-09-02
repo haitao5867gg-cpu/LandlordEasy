@@ -66,6 +66,15 @@
           <div v-else-if="currentSigningTask.status === 'CREATED'" class="contract-status-content">
             <p>已发起签署,等待租客完成</p>
             <p class="contract-time">发起时间: {{ dt(currentSigningTask.createdAt) }}</p>
+            <p class="contract-hint">如果租客已经签署完成但状态没有自动更新(比如中途关闭了浏览器),可以手动核实:</p>
+            <div class="contract-manual-actions">
+              <van-button plain size="small" :loading="previewing" @click="handlePreviewSignedFile">
+                下载查看签署进度
+              </van-button>
+              <van-button type="success" size="small" :loading="confirming" @click="handleConfirmSigned">
+                确认已签署
+              </van-button>
+            </div>
           </div>
           <div v-else-if="currentSigningTask.status === 'SIGNED'" class="contract-status-content">
             <p>已签署完成</p>
@@ -188,7 +197,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { showToast } from 'vant';
+import { showToast, showConfirmDialog } from 'vant';
 import http from '../../utils/http';
 import { billStatusMap } from '../../utils/status';
 
@@ -203,6 +212,8 @@ const showHandoverDialog = ref(false);
 const showContractDialog = ref(false);
 const generating = ref(false);
 const launching = ref(false);
+const previewing = ref(false);
+const confirming = ref(false);
 
 const facilityOptions = [
   '空调', '冰箱', '洗衣机', '热水器', '燃气灶', '电视',
@@ -342,6 +353,45 @@ async function handleLaunchSigning() {
   }
 }
 
+async function handlePreviewSignedFile() {
+  const task = currentSigningTask.value;
+  if (!task) return;
+
+  previewing.value = true;
+  try {
+    const result = (await http.post(
+      `/leases/contract-signing-tasks/${task.id}/preview-signed-file`,
+      {},
+    )) as { previewUrl: string };
+    window.open(absoluteFileUrl(result.previewUrl), '_blank');
+  } finally {
+    previewing.value = false;
+  }
+}
+
+async function handleConfirmSigned() {
+  const task = currentSigningTask.value;
+  if (!task) return;
+
+  try {
+    await showConfirmDialog({
+      title: '确认已签署',
+      message: '请确认已经打开PDF核实乙方(租客)签字栏确实已签字,再点击确认。仅甲方(发起方)盖章不代表签署完成。',
+    });
+  } catch {
+    return;
+  }
+
+  confirming.value = true;
+  try {
+    await http.post(`/leases/contract-signing-tasks/${task.id}/confirm-signed`, {});
+    showToast('已确认签署完成');
+    await fetchLease();
+  } finally {
+    confirming.value = false;
+  }
+}
+
 function openHandoverDialog() {
   handoverForm.type = 'CHECKIN';
   handoverForm.checklist = [];
@@ -385,6 +435,8 @@ async function handleRenew() {
 .contract-status-content p { margin: 4px 0 12px; }
 .contract-time { color: #969799; font-size: 13px; }
 .contract-link { display: inline-block; color: #1989fa; font-size: 14px; }
+.contract-hint { color: #969799; font-size: 12px; margin: 0 0 12px; }
+.contract-manual-actions { display: flex; justify-content: center; gap: 12px; }
 .contract-popup { max-height: 88vh; overflow-y: auto; }
 .contract-popup-header { padding: 16px; text-align: center; font-size: 17px; font-weight: 600; }
 .facility-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 8px; padding: 12px 16px 18px; }
