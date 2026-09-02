@@ -12,7 +12,7 @@ const commonEnvironment = {
   WEIQIAN_API_BASE_URL: 'https://weiqian.example/openapi/v1/',
   WEIQIAN_APP_ID: 'test-app-id',
   WEIQIAN_APP_SECRET: 'test-app-secret',
-  WEIQIAN_COMPANY_ID: 'company-1',
+  WEIQIAN_COMPANY_ID: '1030391',
   WEIQIAN_SEAL_ID: 'seal-1',
 };
 
@@ -54,7 +54,8 @@ describe('MockWeiQianService', () => {
 
     const task = await service.createEachSignTask({
       launchAccount: 'landlord-mobile',
-      fBIds: [{ fBId: upload.bId, fileName: 'lease.pdf' }],
+      fBIds: [upload.bId],
+      fileName: 'lease.pdf',
       receiverAccount: '13800000000',
       receiverName: '租客',
       receiverIdCard: '310000000000000000',
@@ -136,7 +137,8 @@ describe('RealWeiQianService', () => {
     await expect(
       new RealWeiQianService().createEachSignTask({
         launchAccount: 'landlord-mobile',
-        fBIds: [{ fBId: 'file-1', fileName: '合同.pdf' }],
+        fBIds: ['file-1'],
+        fileName: '合同.pdf',
         receiverAccount: '13800000000',
         receiverName: '张三',
         receiverIdCard: '310000000000000000',
@@ -154,25 +156,17 @@ describe('RealWeiQianService', () => {
     expect(dataString).not.toBeNull();
     expect(JSON.parse(dataString as string)).toEqual({
       launchAccount: 'landlord-mobile',
-      cId: 'company-1',
-      fBIds: [{ fBId: 'file-1', fileName: '合同.pdf' }],
-      rType: 1,
-      authType: 2,
+      cId: 1030391,
+      fBIds: ['file-1'],
+      fileName: '合同.pdf',
+      rType: '1',
+      authType: '2',
+      signType: 1,
       receiverDTOS: [
         {
           account: '13800000000',
           rName: '张三',
           idCard: '310000000000000000',
-        },
-      ],
-      positionDTOS: [{ x: 200, y: 850, pageNum: 1 }],
-      launcherSignRule: [
-        {
-          autosealType: 1,
-          pageNum: 1,
-          x: 700,
-          y: 850,
-          sealId: 'seal-1',
         },
       ],
       expiresTime: 1701000000000,

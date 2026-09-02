@@ -267,7 +267,8 @@ describe('LeasesService contract signing tasks', () => {
     expect(weiqian.uploadFile).toHaveBeenCalledWith(pdf, 'contract-10.pdf');
     expect(weiqian.createEachSignTask).toHaveBeenCalledWith({
       launchAccount: '13900000000',
-      fBIds: [{ fBId: 'file-bid', fileName: 'contract-10.pdf' }],
+      fBIds: ['file-bid'],
+      fileName: 'contract-10.pdf',
       receiverAccount: '13800000000',
       receiverName: '张三',
       receiverIdCard: '310101199001011234',

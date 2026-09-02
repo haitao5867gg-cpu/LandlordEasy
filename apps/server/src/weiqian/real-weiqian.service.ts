@@ -23,19 +23,6 @@ interface WeiQianCreateTaskData {
 }
 
 const AUTH_MODE = 'Signature';
-const DEFAULT_LAUNCHER_SIGN_RULE = {
-  autosealType: 1,
-  pageNum: 1,
-  x: 700,
-  y: 850,
-} as const;
-/** 接收方盖章/签字位置,占位坐标(跟发起方x=700错开避免重叠),
- * 等真实合同模板版式定下来后需要再精调,让它落在乙方签字栏 */
-const DEFAULT_RECEIVER_POSITION = {
-  x: 200,
-  y: 850,
-  pageNum: 1,
-} as const;
 
 @Injectable()
 export class RealWeiQianService implements IWeiQianService {
@@ -69,13 +56,20 @@ export class RealWeiQianService implements IWeiQianService {
   async createEachSignTask(
     params: CreateEachSignTaskParams,
   ): Promise<CreateEachSignTaskResult> {
-    this.validateConfiguration(['WEIQIAN_COMPANY_ID', 'WEIQIAN_SEAL_ID']);
+    this.validateConfiguration(['WEIQIAN_COMPANY_ID']);
     const data = {
       launchAccount: params.launchAccount,
-      cId: process.env.WEIQIAN_COMPANY_ID,
+      // cId 是 BigInteger,不是字符串,微签"平台互签"改版后的联调demo(2026-09
+      // 拿到的weiqian-openapi工程)确认了这个类型,之前当字符串传疑似是
+      // code=10001系统异常的根因之一
+      cId: Number(process.env.WEIQIAN_COMPANY_ID),
       fBIds: params.fBIds,
-      rType: 1,
-      authType: 2,
+      fileName: params.fileName,
+      // rType/authType 是字符串,不是数字(同一份demo确认)
+      rType: '1',
+      authType: '2',
+      // 签署模式:1=多方签署一份文件,官方demo固定用1,我们单文件单接收方的场景符合
+      signType: 1,
       receiverDTOS: [
         {
           account: params.receiverAccount,
@@ -83,13 +77,9 @@ export class RealWeiQianService implements IWeiQianService {
           idCard: params.receiverIdCard,
         },
       ],
-      positionDTOS: [params.receiverPosition ?? DEFAULT_RECEIVER_POSITION],
-      launcherSignRule: [
-        {
-          ...DEFAULT_LAUNCHER_SIGN_RULE,
-          sealId: process.env.WEIQIAN_SEAL_ID,
-        },
-      ],
+      // 官方demo(case1_selfCreate)明确不传positionDTOS/launcherSignRule也能
+      // 跑通"自己发自己的"这个标准流程,这次先按demo最小可跑通配置测,发起方
+      // 自动盖章(launcherSignRule)等基础流程确认没问题后再单独加回来验证
       ...(params.sendSmsToReceiver === undefined
         ? {}
         : { isSendSmsToReceiver: params.sendSmsToReceiver }),

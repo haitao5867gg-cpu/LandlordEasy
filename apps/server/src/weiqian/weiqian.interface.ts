@@ -1,18 +1,14 @@
 export const WEIQIAN_SERVICE = 'WEIQIAN_SERVICE';
 
-export interface WeiQianFileBusinessId {
-  fBId: string;
-  fileName: string;
-}
-
 export interface CreateEachSignTaskParams {
   launchAccount: string;
-  fBIds: WeiQianFileBusinessId[];
+  /** 文件业务ID列表,微签"平台互签"改版后是纯字符串数组,不是{fBId,fileName}对象 */
+  fBIds: string[];
+  /** 文件名是eachSign/create请求体的独立顶层字段,不挂在每个fBId上 */
+  fileName: string;
   receiverAccount: string;
   receiverName: string;
   receiverIdCard: string;
-  /** 接收方指定盖章/签字位置,微签不支持关键字定位,这个字段疑似必填 */
-  receiverPosition?: { x: number; y: number; pageNum: number };
   expiresTime?: number;
   sendSmsToReceiver?: boolean;
   finishSignJumpPage?: string;

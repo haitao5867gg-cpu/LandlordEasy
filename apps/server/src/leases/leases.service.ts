@@ -245,7 +245,8 @@ export class LeasesService {
     const uploadedFile = await this.weiqian.uploadFile(pdfBuffer, fileName);
     const createdTask = await this.weiqian.createEachSignTask({
       launchAccount: settings.landlordPhone,
-      fBIds: [{ fBId: uploadedFile.bId, fileName }],
+      fBIds: [uploadedFile.bId],
+      fileName,
       receiverAccount: tenant.phone,
       receiverName: tenant.name,
       receiverIdCard: tenant.idCard,
