@@ -121,26 +121,28 @@ export class RealWeiQianService implements IWeiQianService {
       });
       if (!response.ok) return null;
 
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      if (
-        contentType.includes('application/json') ||
-        contentType.startsWith('text/') ||
-        contentType.includes('html')
-      ) {
+      // 微签download接口跟其他接口一样,统一走JSON信封响应,不是直接返回
+      // 二进制文件流——文件字节以base64字符串形式包在data.fileBytes里
+      // (2026-09-02用真实签署完成的bId验证时发现,之前误以为content-type
+      // 是json就代表"未签完/无效响应"直接丢弃,把真实已签文件当null处理掉了)
+      const rawText = await response.text();
+      this.logger.debug(
+        `微签 eachSign/download 原始响应长度: ${rawText.length}`,
+      );
+      let envelope: {
+        code?: string | number;
+        data?: { fileBytes?: string } | null;
+      };
+      try {
+        envelope = JSON.parse(rawText);
+      } catch {
         return null;
       }
-
-      const buffer = Buffer.from(await response.arrayBuffer());
-      if (buffer.length === 0) return null;
-
-      const contentDisposition =
-        response.headers.get('content-disposition') || '';
-      const hasFileHeaders =
-        contentType.includes('application/pdf') ||
-        contentType.includes('application/octet-stream') ||
-        /attachment|filename=/i.test(contentDisposition);
-      const hasPdfSignature = buffer.subarray(0, 5).toString('ascii') === '%PDF-';
-      return hasFileHeaders || hasPdfSignature ? buffer : null;
+      if (Number(envelope.code) !== 10000 || !envelope.data?.fileBytes) {
+        return null;
+      }
+      const buffer = Buffer.from(envelope.data.fileBytes, 'base64');
+      return buffer.length > 0 ? buffer : null;
     } catch (error) {
       this.logger.warn(
         `微签 eachSign/download 暂未返回有效文件: ${

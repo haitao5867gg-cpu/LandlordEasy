@@ -189,13 +189,17 @@ describe('RealWeiQianService', () => {
   });
 
   it('download 使用表单 Data，返回 PDF Buffer；非文件响应返回 null', async () => {
+    // 微签download跟其他接口一样统一走JSON信封响应,文件字节以base64
+    // 字符串形式包在data.fileBytes里,不是直接返回二进制流(2026-09-02
+    // 用真实签署完成的bId验证时才发现这一点,此前的实现和测试都基于
+    // "content-type是json就代表未完成"这个错误假设)
     const pdf = Buffer.from('%PDF-1.4\nsigned\n%%EOF\n');
     const fetchSpy = jest
       .spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(
-        new Response(Uint8Array.from(pdf), {
-          status: 200,
-          headers: { 'Content-Type': 'application/pdf' },
+        jsonResponse({
+          code: 10000,
+          data: { fileBytes: pdf.toString('base64') },
         }),
       )
       .mockResolvedValueOnce(
