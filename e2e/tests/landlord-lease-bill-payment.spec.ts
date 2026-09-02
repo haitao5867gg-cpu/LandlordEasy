@@ -144,6 +144,24 @@ async function createLease(role: string, room: TestRoom, index: number): Promise
   return lease;
 }
 
+/** 用微信关注扫码 webhook 模拟(替代原邀请码绑定)把测试 openid 绑到租客身上。 */
+async function bindTenantViaQrcode(leaseId: number, openid: string): Promise<void> {
+  const qrcode = await apiResult<{ sceneValue: number }>(
+    await setupRequest.post(`${apiPrefix}/leases/${leaseId}/bind-qrcode`, {
+      headers: authHeaders(),
+    }),
+  );
+  const followEventXml =
+    `<xml><FromUserName><![CDATA[${openid}]]></FromUserName>` +
+    `<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>` +
+    `<EventKey><![CDATA[qrscene_${qrcode.sceneValue}]]></EventKey></xml>`;
+  const response = await setupRequest.post(`${apiPrefix}/wechat/event`, {
+    headers: { 'Content-Type': 'text/xml' },
+    data: followEventXml,
+  });
+  expect(response.ok(), '模拟关注事件应返回 200').toBeTruthy();
+}
+
 async function createTenantPayment(
   role: string,
   lease: LeaseDetail,
@@ -151,20 +169,16 @@ async function createTenantPayment(
   amount: number,
   proofUrl?: string,
 ): Promise<Payment> {
+  const openid = `${dataPrefix}_${role}_openid`;
+  await bindTenantViaQrcode(lease.id, openid);
   const login = await apiResult<{ token: string }>(
     await setupRequest.post(`${apiPrefix}/auth/tenant/login`, {
-      data: { code: `${dataPrefix}_${role}_openid` },
-    }),
-  );
-  const bound = await apiResult<{ token: string }>(
-    await setupRequest.post(`${apiPrefix}/tenant/bind`, {
-      headers: authHeaders(login.token),
-      data: { inviteCode: lease.inviteCode },
+      data: { code: openid },
     }),
   );
   const payment = await apiResult<Payment>(
     await setupRequest.post(`${apiPrefix}/payments/report`, {
-      headers: authHeaders(bound.token),
+      headers: authHeaders(login.token),
       data: { billId: bill.id, amount, paidAt: today, ...(proofUrl ? { proofUrl } : {}) },
     }),
   );
@@ -346,21 +360,21 @@ test.afterAll(async () => {
 });
 
 test.describe('2.4 新签租约', () => {
-  test('2.4.1 正常签约、预设租期、邀请码弹窗与复制', async ({ page, context }) => {
-    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://dev.landlordeasy.cn' });
+  test('2.4.1 正常签约、预设租期、绑定二维码自动生成', async ({ page }) => {
     await openNewLease(page, rooms.normalUi.id);
     await fillLeaseForm(page, `${dataPrefix}_正常签约租客`, phone(101));
     await page.getByText('6个月', { exact: true }).click();
+    const bindQrcodePromise = waitForApi(page, 'POST', /\/leases\/\d+\/bind-qrcode$/);
     const lease = await pageApiResult<LeaseDetail>(await submitNewLease(page));
     leases.normalUi = lease;
-    expect(lease.inviteCode).toMatch(/^[A-Z0-9]{8}$/);
 
     const dialog = page.locator('.van-dialog').filter({ hasText: '签约成功' });
     await expect(dialog).toBeVisible();
-    await expect(dialog.locator('h2')).toHaveText(lease.inviteCode);
-    await dialog.getByRole('button', { name: '复制邀请码', exact: true }).click();
-    await expect(page.locator('.van-toast')).toContainText('已复制');
-    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(lease.inviteCode);
+    const bindQrcode = await pageApiResult<{ qrCodeImage: string; sceneValue: number }>(
+      await bindQrcodePromise,
+    );
+    expect(bindQrcode.sceneValue).toBeGreaterThan(0);
+    await expect(dialog.locator('.van-image img')).toHaveAttribute('src', /^data:image/);
     await dialog.getByRole('button', { name: '完成', exact: true }).click();
   });
 
@@ -466,11 +480,14 @@ test.describe('2.5 租约详情', () => {
   test('2.5.1 ACTIVE租约信息完整且账单状态标签正确', async ({ page }) => {
     const lease = await getLease(leases.detail.id);
     await openLease(page, lease.id);
-    for (const title of ['租客', '手机', '房间', '租期', '月租金', '押金', '状态', '邀请码']) {
+    for (const title of ['租客', '手机', '房间', '租期', '月租金', '押金', '状态']) {
       await expect(page.locator('.van-cell').filter({ hasText: title }).first()).toBeVisible();
     }
     await expect(page.locator('.van-cell').filter({ hasText: '状态' }).locator('.van-tag')).toHaveText('在租');
-    await expect(page.locator('.van-cell').filter({ hasText: '邀请码' }).locator('.van-cell__value')).toHaveText(lease.inviteCode);
+    // 这条测试租约是通过后端接口直接创建的,没走前端"新建租约"自动生成绑定二维码那一步,
+    // 所以此处应展示"未绑定"状态。
+    await expect(page.locator('.van-cell').filter({ hasText: '绑定状态' }).locator('.van-tag')).toHaveText('未绑定');
+    await expect(page.getByRole('button', { name: '生成绑定二维码' })).toBeVisible();
     const expectedLabels: Record<string, string> = { PENDING: '待付', PAID: '已付', OVERDUE: '逾期' };
     for (const bill of lease.bills ?? []) {
       await expect(page.locator('.van-cell').filter({ hasText: String(bill.totalAmount) }).locator('.van-tag')).toHaveText(expectedLabels[bill.status]);

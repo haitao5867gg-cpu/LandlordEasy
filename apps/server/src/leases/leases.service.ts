@@ -113,6 +113,48 @@ export class LeasesService {
     });
   }
 
+  /** 生成(或复用)租客账号绑定二维码,扫码关注公众号即自动绑定 tenant-h5,替代邀请码。 */
+  async getOrCreateTenantBindQrcode(
+    leaseId: number,
+  ): Promise<{ qrCodeImage: string; sceneValue: number }> {
+    const lease = await this.prisma.lease.findUnique({
+      where: { id: leaseId },
+      select: { tenantId: true },
+    });
+    if (!lease) throw new NotFoundException('租约不存在');
+
+    const sceneValue = await this.ensureTenantBindSceneValue(lease.tenantId);
+    const { qrCodeImage } = await this.wechatQrcode.createSceneQrcode(sceneValue);
+    return { qrCodeImage, sceneValue };
+  }
+
+  private async ensureTenantBindSceneValue(tenantId: number): Promise<number> {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { bindSceneValue: true },
+    });
+    if (tenant?.bindSceneValue) return tenant.bindSceneValue;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const updated = await this.prisma.tenant.update({
+          where: { id: tenantId },
+          data: { bindSceneValue: randomInt(1, 2 ** 31) },
+          select: { bindSceneValue: true },
+        });
+        return updated.bindSceneValue!;
+      } catch (error) {
+        const shouldRetry =
+          attempt === 0 &&
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2002';
+        if (!shouldRetry) throw error;
+      }
+    }
+
+    throw new Error('无法生成唯一的绑定场景值');
+  }
+
   private async createContractSigningTaskRecord(
     leaseId: number,
     dto: CreateContractSigningTaskDto,

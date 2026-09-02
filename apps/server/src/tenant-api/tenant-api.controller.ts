@@ -1,26 +1,12 @@
-import { Controller, Get, Post, Body, UseGuards, Req, BadRequestException } from '@nestjs/common';
+import { Controller, Get, UseGuards, Req, BadRequestException } from '@nestjs/common';
 import { Request } from 'express';
-import { IsString } from 'class-validator';
 import { TenantGuard } from '../auth/guards/tenant.guard';
 import { TenantApiService } from './tenant-api.service';
 import { JwtPayload } from '../auth/auth.service';
 
-class BindInviteCodeDto {
-  @IsString()
-  inviteCode!: string;
-}
-
 @Controller('tenant')
 export class TenantApiController {
   constructor(private readonly tenantApiService: TenantApiService) {}
-
-  @Post('bind')
-  @UseGuards(TenantGuard)
-  async bindInviteCode(@Body() dto: BindInviteCodeDto, @Req() req: Request) {
-    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
-    if (!user.openid) throw new BadRequestException('缺少openid');
-    return this.tenantApiService.bindInviteCode(user.openid, dto.inviteCode);
-  }
 
   @Get('bills')
   @UseGuards(TenantGuard)

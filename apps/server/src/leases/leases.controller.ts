@@ -54,6 +54,12 @@ export class LeasesController {
     return this.leasesService.createContractSigningTask(id, dto);
   }
 
+  /** 生成/复用租客账号绑定二维码,替代邀请码。 */
+  @Post(':id/bind-qrcode')
+  getTenantBindQrcode(@Param('id', ParseIntPipe) id: number) {
+    return this.leasesService.getOrCreateTenantBindQrcode(id);
+  }
+
   @Post('contract-signing-tasks/:id/launch')
   launchContractSigningTask(
     @Param('id', ParseIntPipe) id: number,

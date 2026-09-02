@@ -80,7 +80,7 @@ describe('LeasesService contract signing tasks', () => {
   beforeEach(() => {
     prisma = {
       lease: { findUnique: jest.fn() },
-      tenant: { update: jest.fn() },
+      tenant: { findUnique: jest.fn(), update: jest.fn() },
       contractSettings: { findFirst: jest.fn() },
       contractSigningTask: {
         create: jest.fn(),
@@ -366,5 +366,53 @@ describe('LeasesService contract signing tasks', () => {
     await expect(service.tryConfirmSigned(10)).resolves.toBe(true);
     expect(prisma.tenant.update).not.toHaveBeenCalled();
     expect(warning).toHaveBeenCalledWith(expect.stringContaining('openid 冲突'));
+  });
+
+  describe('getOrCreateTenantBindQrcode', () => {
+    it('租约不存在时抛出 404', async () => {
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue(null);
+
+      await expect(service.getOrCreateTenantBindQrcode(999)).rejects.toThrow(
+        new NotFoundException('租约不存在'),
+      );
+      expect(wechatQrcode.createSceneQrcode).not.toHaveBeenCalled();
+    });
+
+    it('租客尚无绑定场景值时生成新的场景值并返回二维码', async () => {
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue({ tenantId: 7 });
+      (prisma.tenant.findUnique as jest.Mock).mockResolvedValue({ bindSceneValue: null });
+      (prisma.tenant.update as jest.Mock).mockResolvedValue({ bindSceneValue: 999888 });
+      wechatQrcode.createSceneQrcode.mockResolvedValue({
+        ticket: 'ticket-bind',
+        qrCodeImage: 'data:image/png;base64,bindqrcode',
+      });
+
+      await expect(service.getOrCreateTenantBindQrcode(1)).resolves.toEqual({
+        qrCodeImage: 'data:image/png;base64,bindqrcode',
+        sceneValue: 999888,
+      });
+      expect(prisma.tenant.update).toHaveBeenCalledWith({
+        where: { id: 7 },
+        data: { bindSceneValue: expect.any(Number) },
+        select: { bindSceneValue: true },
+      });
+      expect(wechatQrcode.createSceneQrcode).toHaveBeenCalledWith(999888);
+    });
+
+    it('租客已有绑定场景值时直接复用,不重新生成', async () => {
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue({ tenantId: 7 });
+      (prisma.tenant.findUnique as jest.Mock).mockResolvedValue({ bindSceneValue: 555444 });
+      wechatQrcode.createSceneQrcode.mockResolvedValue({
+        ticket: 'ticket-bind',
+        qrCodeImage: 'data:image/png;base64,bindqrcode',
+      });
+
+      await expect(service.getOrCreateTenantBindQrcode(1)).resolves.toEqual({
+        qrCodeImage: 'data:image/png;base64,bindqrcode',
+        sceneValue: 555444,
+      });
+      expect(prisma.tenant.update).not.toHaveBeenCalled();
+      expect(wechatQrcode.createSceneQrcode).toHaveBeenCalledWith(555444);
+    });
   });
 });

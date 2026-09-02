@@ -102,9 +102,17 @@
 
     <van-dialog v-model:show="showResult" title="签约成功" :showConfirmButton="false">
       <div style="padding:16px;text-align:center;">
-        <p>邀请码:</p>
-        <h2>{{ inviteCode }}</h2>
-        <van-button size="small" @click="copyCode">复制邀请码</van-button>
+        <p>转发下方二维码给租客,微信扫码关注公众号即自动绑定账号</p>
+        <van-loading v-if="bindQrcodeLoading" style="margin:24px 0" />
+        <van-image
+          v-else-if="bindQrcodeImage"
+          :src="bindQrcodeImage"
+          width="220"
+          height="220"
+          fit="contain"
+          style="margin:8px 0"
+        />
+        <p v-else class="bind-qrcode-error">二维码生成失败,可以在租约详情页重新生成</p>
       </div>
       <van-button block @click="closeResult">完成</van-button>
     </van-dialog>
@@ -121,7 +129,8 @@ const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
 const showResult = ref(false);
-const inviteCode = ref('');
+const bindQrcodeImage = ref('');
+const bindQrcodeLoading = ref(false);
 const newLeaseId = ref<number | null>(null);
 const showStartPicker = ref(false);
 
@@ -210,17 +219,20 @@ async function handleSubmit() {
     if (form.commission) data.commission = Number(form.commission);
     if (form.feeItems.length) data.feeItems = form.feeItems.filter(i => i.name && i.amount);
     const res = await http.post('/leases', data) as any;
-    inviteCode.value = res.inviteCode;
     newLeaseId.value = res.id;
     showResult.value = true;
+    bindQrcodeLoading.value = true;
+    try {
+      const qrRes = await http.post(`/leases/${res.id}/bind-qrcode`, {}) as any;
+      bindQrcodeImage.value = qrRes.qrCodeImage;
+    } catch {
+      bindQrcodeImage.value = '';
+    } finally {
+      bindQrcodeLoading.value = false;
+    }
   } finally {
     loading.value = false;
   }
-}
-
-function copyCode() {
-  navigator.clipboard.writeText(inviteCode.value);
-  showToast('已复制');
 }
 
 function closeResult() {
@@ -233,4 +245,5 @@ function closeResult() {
 
 <style scoped>
 .lease-term { padding: 4px 0; }
+.bind-qrcode-error { color: #ee0a24; font-size: 13px; }
 </style>

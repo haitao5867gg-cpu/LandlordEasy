@@ -85,6 +85,15 @@ export class WechatController {
         }
       }
 
+      if (
+        !matched &&
+        isFollowEvent &&
+        parsed.sceneValue !== undefined &&
+        parsed.openid
+      ) {
+        matched = await this.tryBindTenant(parsed.sceneValue, parsed.openid);
+      }
+
       if (!matched && isFollowEvent && parsed.openid) {
         await this.wechatCustomerService.sendTextMessage(
           parsed.openid,
@@ -98,6 +107,42 @@ export class WechatController {
         }`,
       );
     }
+  }
+
+  /** 扫描"租客账号绑定"场景二维码,匹配成功即绑定 openid 并推送 tenant-h5 入口链接。 */
+  private async tryBindTenant(
+    sceneValue: number,
+    openid: string,
+  ): Promise<boolean> {
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { bindSceneValue: sceneValue },
+      select: { id: true, openid: true },
+    });
+    if (!tenant) return false;
+
+    if (!tenant.openid) {
+      await this.prisma.tenant.update({
+        where: { id: tenant.id },
+        data: { openid },
+      });
+    } else if (tenant.openid !== openid) {
+      this.logger.warn(
+        `租客 ${tenant.id} 的绑定场景值被另一个 openid 扫描,已绑定 openid 未被覆盖`,
+      );
+    }
+
+    const publicBaseUrl = process.env.SERVER_PUBLIC_BASE_URL?.replace(
+      /\/+$/,
+      '',
+    ).replace(/\/api\/v1$/, '');
+    const tenantUrl = publicBaseUrl ? `${publicBaseUrl}/tenant/` : '';
+    await this.wechatCustomerService.sendTextMessage(
+      openid,
+      tenantUrl
+        ? `绑定成功,点击查看您的租约和账单：${tenantUrl}`
+        : '绑定成功,请联系房东获取查看租约和账单的入口',
+    );
+    return true;
   }
 
   /** 微签完成签署后的公开浏览器落地页，不使用房东 Guard。 */

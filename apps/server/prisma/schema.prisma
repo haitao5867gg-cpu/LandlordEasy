@@ -98,13 +98,14 @@ model Room {
 
 // ========== 租客 ==========
 model Tenant {
-  id        Int      @id @default(autoincrement())
-  openid    String?  @unique
-  name      String
-  phone     String
-  idCard    String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             Int      @id @default(autoincrement())
+  openid         String?  @unique
+  bindSceneValue Int?     @unique
+  name           String
+  phone          String
+  idCard         String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   leases       Lease[]
   reminderLogs ReminderLog[]

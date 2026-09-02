@@ -15,7 +15,28 @@
             <van-tag :type="lease.status === 'ACTIVE' ? 'success' : 'default'">{{ lease.status === 'ACTIVE' ? '在租' : '已退租' }}</van-tag>
           </template>
         </van-cell>
-        <van-cell v-if="lease.inviteCode" title="邀请码" :value="lease.inviteCode" />
+      </van-cell-group>
+
+      <van-cell-group inset title="租客账号绑定">
+        <van-cell title="绑定状态">
+          <template #value>
+            <van-tag :type="lease.tenant?.openid ? 'success' : 'warning'">
+              {{ lease.tenant?.openid ? '已绑定' : '未绑定' }}
+            </van-tag>
+          </template>
+        </van-cell>
+        <div v-if="!lease.tenant?.openid" class="bind-status-content">
+          <p>转发二维码给租客,微信扫码关注公众号即自动绑定账号</p>
+          <van-loading v-if="bindQrcodeLoading" />
+          <van-image
+            v-else-if="bindQrcodeImage"
+            :src="bindQrcodeImage"
+            width="180"
+            height="180"
+            fit="contain"
+          />
+          <van-button v-else size="small" type="primary" @click="handleGenerateBindQrcode">生成绑定二维码</van-button>
+        </div>
       </van-cell-group>
 
       <van-cell-group inset title="账单">
@@ -214,6 +235,8 @@ const generating = ref(false);
 const launching = ref(false);
 const previewing = ref(false);
 const confirming = ref(false);
+const bindQrcodeImage = ref('');
+const bindQrcodeLoading = ref(false);
 
 const facilityOptions = [
   '空调', '冰箱', '洗衣机', '热水器', '燃气灶', '电视',
@@ -392,6 +415,19 @@ async function handleConfirmSigned() {
   }
 }
 
+async function handleGenerateBindQrcode() {
+  bindQrcodeLoading.value = true;
+  try {
+    const res = (await http.post(
+      `/leases/${route.params.id}/bind-qrcode`,
+      {},
+    )) as { qrCodeImage: string };
+    bindQrcodeImage.value = res.qrCodeImage;
+  } finally {
+    bindQrcodeLoading.value = false;
+  }
+}
+
 function openHandoverDialog() {
   handoverForm.type = 'CHECKIN';
   handoverForm.checklist = [];
@@ -432,6 +468,8 @@ async function handleRenew() {
 .contract-empty { padding: 4px 16px 16px; text-align: center; }
 .contract-empty :deep(.van-empty) { padding: 16px 0 8px; }
 .contract-status-content { padding: 8px 16px 16px; text-align: center; }
+.bind-status-content { padding: 8px 16px 16px; text-align: center; }
+.bind-status-content p { margin: 4px 0 12px; color: #969799; font-size: 12px; }
 .contract-status-content p { margin: 4px 0 12px; }
 .contract-time { color: #969799; font-size: 13px; }
 .contract-link { display: inline-block; color: #1989fa; font-size: 14px; }

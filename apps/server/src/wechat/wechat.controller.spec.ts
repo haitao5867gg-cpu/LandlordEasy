@@ -19,7 +19,12 @@ describe('WechatController contract signing events', () => {
         findUnique: jest.fn(),
         updateMany: jest.fn(),
       },
+      tenant: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        update: jest.fn(),
+      },
     } as unknown as jest.Mocked<PrismaService>;
+    process.env.SERVER_PUBLIC_BASE_URL = 'https://dev.landlordeasy.cn/api/v1';
     customerService = { sendTextMessage: jest.fn() };
     leasesService = {
       tryConfirmSigned: jest.fn(),
@@ -112,5 +117,60 @@ describe('WechatController contract signing events', () => {
     ).resolves.toBeUndefined();
     expect(res.value.status).toHaveBeenCalledWith(200);
     expect(res.send).toHaveBeenCalledWith('success');
+  });
+
+  it('场景值匹配租客绑定场景值时,首次关注自动绑定 openid 并推送链接', async () => {
+    (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue(null);
+    (prisma.tenant.findFirst as jest.Mock).mockResolvedValue({ id: 5, openid: null });
+    customerService.sendTextMessage.mockResolvedValue(true);
+    const res = response();
+
+    await controller.event(
+      request(
+        '<xml><FromUserName><![CDATA[openid-tenant]]></FromUserName>' +
+          '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>' +
+          '<EventKey><![CDATA[qrscene_321]]></EventKey></xml>',
+      ),
+      res.value,
+    );
+
+    expect(prisma.tenant.findFirst).toHaveBeenCalledWith({
+      where: { bindSceneValue: 321 },
+      select: { id: true, openid: true },
+    });
+    expect(prisma.tenant.update).toHaveBeenCalledWith({
+      where: { id: 5 },
+      data: { openid: 'openid-tenant' },
+    });
+    expect(customerService.sendTextMessage).toHaveBeenCalledWith(
+      'openid-tenant',
+      expect.stringContaining('https://dev.landlordeasy.cn/tenant/'),
+    );
+    expect(res.send).toHaveBeenCalledWith('success');
+  });
+
+  it('租客绑定场景值已绑定其他 openid 时,不覆盖已有绑定', async () => {
+    (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue(null);
+    (prisma.tenant.findFirst as jest.Mock).mockResolvedValue({
+      id: 5,
+      openid: 'openid-original',
+    });
+    customerService.sendTextMessage.mockResolvedValue(true);
+    const res = response();
+
+    await controller.event(
+      request(
+        '<xml><FromUserName><![CDATA[openid-other]]></FromUserName>' +
+          '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[scan]]></Event>' +
+          '<EventKey><![CDATA[321]]></EventKey></xml>',
+      ),
+      res.value,
+    );
+
+    expect(prisma.tenant.update).not.toHaveBeenCalled();
+    expect(customerService.sendTextMessage).toHaveBeenCalledWith(
+      'openid-other',
+      expect.stringContaining('绑定成功'),
+    );
   });
 });
