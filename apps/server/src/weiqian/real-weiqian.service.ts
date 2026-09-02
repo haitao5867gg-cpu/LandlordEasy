@@ -23,6 +23,14 @@ interface WeiQianCreateTaskData {
 }
 
 const AUTH_MODE = 'Signature';
+// 发起方(房东)自动盖章占位坐标,微签盖章是绝对坐标不支持关键字定位,
+// 等真实合同模板版式最终定稿后需要精调到甲方签字栏的准确位置
+const LAUNCHER_AUTO_SEAL_RULE = {
+  autosealType: 1,
+  x: 700,
+  y: 850,
+  autosealPage: 1,
+} as const;
 
 @Injectable()
 export class RealWeiQianService implements IWeiQianService {
@@ -56,7 +64,7 @@ export class RealWeiQianService implements IWeiQianService {
   async createEachSignTask(
     params: CreateEachSignTaskParams,
   ): Promise<CreateEachSignTaskResult> {
-    this.validateConfiguration(['WEIQIAN_COMPANY_ID']);
+    this.validateConfiguration(['WEIQIAN_COMPANY_ID', 'WEIQIAN_SEAL_ID']);
     const data = {
       launchAccount: params.launchAccount,
       // cId 是 BigInteger,不是字符串,微签"平台互签"改版后的联调demo(2026-09
@@ -77,9 +85,15 @@ export class RealWeiQianService implements IWeiQianService {
           idCard: params.receiverIdCard,
         },
       ],
-      // 官方demo(case1_selfCreate)明确不传positionDTOS/launcherSignRule也能
-      // 跑通"自己发自己的"这个标准流程,这次先按demo最小可跑通配置测,发起方
-      // 自动盖章(launcherSignRule)等基础流程确认没问题后再单独加回来验证
+      // 发起方(房东)自动盖章:字段名是autosealPage不是pageNum,sealId是
+      // BigInteger不是字符串,这两处之前都传错过(2026-09-02用真实API
+      // 验证过一次基础流程后单独加回来验证这部分)
+      launcherSignRule: [
+        {
+          ...LAUNCHER_AUTO_SEAL_RULE,
+          sealId: Number(process.env.WEIQIAN_SEAL_ID),
+        },
+      ],
       ...(params.sendSmsToReceiver === undefined
         ? {}
         : { isSendSmsToReceiver: params.sendSmsToReceiver }),

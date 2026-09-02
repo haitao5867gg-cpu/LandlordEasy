@@ -13,7 +13,7 @@ const commonEnvironment = {
   WEIQIAN_APP_ID: 'test-app-id',
   WEIQIAN_APP_SECRET: 'test-app-secret',
   WEIQIAN_COMPANY_ID: '1030391',
-  WEIQIAN_SEAL_ID: 'seal-1',
+  WEIQIAN_SEAL_ID: '37179',
 };
 
 describe('createWeiQianSign', () => {
@@ -168,6 +168,9 @@ describe('RealWeiQianService', () => {
           rName: '张三',
           idCard: '310000000000000000',
         },
+      ],
+      launcherSignRule: [
+        { autosealType: 1, x: 700, y: 850, autosealPage: 1, sealId: 37179 },
       ],
       expiresTime: 1701000000000,
       finishSignJumpPage: 'https://tenant.example/sign-complete',
