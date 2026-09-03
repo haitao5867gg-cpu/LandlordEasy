@@ -10,6 +10,7 @@ import {
   Res,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   IWechatEventService,
@@ -37,6 +38,35 @@ export class WechatController {
     private readonly wechatCustomerService: IWechatCustomerServiceService,
     private readonly leasesService: LeasesService,
   ) {}
+
+  /**
+   * 微信"服务器配置"URL接入验证握手。首次保存配置、以及微信偶尔重新校验时都会
+   * 发这个GET请求过来，必须用Token+timestamp+nonce算出正确签名并原样回显echostr，
+   * 否则微信会认为URL不可用，拒绝启用消息推送（进而所有事件POST都收不到）。
+   */
+  @Get('event')
+  verifyUrl(
+    @Query('signature') signature: string | undefined,
+    @Query('timestamp') timestamp: string | undefined,
+    @Query('nonce') nonce: string | undefined,
+    @Query('echostr') echostr: string | undefined,
+    @Res() response: Response,
+  ): void {
+    const token = process.env.WECHAT_TOKEN || '';
+    if (!token || !signature || !timestamp || !nonce || !echostr) {
+      response.status(400).type('text/plain').send('missing params');
+      return;
+    }
+    const expected = createHash('sha1')
+      .update([token, timestamp, nonce].sort().join(''))
+      .digest('hex');
+    if (expected !== signature) {
+      this.logger.warn('微信服务器URL接入验证签名不匹配');
+      response.status(403).type('text/plain').send('invalid signature');
+      return;
+    }
+    response.status(200).type('text/plain').send(echostr);
+  }
 
   /** 微信服务器公开事件 webhook，不使用房东 Guard。 */
   @Post('event')

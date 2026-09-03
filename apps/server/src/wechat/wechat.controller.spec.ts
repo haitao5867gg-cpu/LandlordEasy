@@ -1,5 +1,6 @@
 import { RawBodyRequest } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { LeasesService } from '../leases/leases.service';
 import { IWechatCustomerServiceService } from './wechat-customer-service.interface';
@@ -172,5 +173,52 @@ describe('WechatController contract signing events', () => {
       'openid-other',
       expect.stringContaining('绑定成功'),
     );
+  });
+
+  describe('verifyUrl (微信服务器URL接入验证)', () => {
+    const originalToken = process.env.WECHAT_TOKEN;
+
+    afterEach(() => {
+      if (originalToken === undefined) delete process.env.WECHAT_TOKEN;
+      else process.env.WECHAT_TOKEN = originalToken;
+    });
+
+    function sign(token: string, timestamp: string, nonce: string): string {
+      return createHash('sha1')
+        .update([token, timestamp, nonce].sort().join(''))
+        .digest('hex');
+    }
+
+    it('签名正确时原样回显echostr', () => {
+      process.env.WECHAT_TOKEN = 'test-token';
+      const timestamp = '1735689600';
+      const nonce = 'abc123';
+      const signature = sign('test-token', timestamp, nonce);
+      const res = response();
+
+      controller.verifyUrl(signature, timestamp, nonce, 'echo-value', res.value);
+
+      expect(res.value.status).toHaveBeenCalledWith(200);
+      expect(res.send).toHaveBeenCalledWith('echo-value');
+    });
+
+    it('签名不匹配时拒绝', () => {
+      process.env.WECHAT_TOKEN = 'test-token';
+      const res = response();
+
+      controller.verifyUrl('wrong-signature', '123', 'nonce', 'echo-value', res.value);
+
+      expect(res.value.status).toHaveBeenCalledWith(403);
+      expect(res.send).not.toHaveBeenCalledWith('echo-value');
+    });
+
+    it('缺少参数时拒绝', () => {
+      process.env.WECHAT_TOKEN = 'test-token';
+      const res = response();
+
+      controller.verifyUrl(undefined, undefined, undefined, undefined, res.value);
+
+      expect(res.value.status).toHaveBeenCalledWith(400);
+    });
   });
 });
