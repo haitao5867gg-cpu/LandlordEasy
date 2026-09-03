@@ -344,6 +344,28 @@ describe('LeasesService contract signing tasks', () => {
       where: { id: 7 },
       data: { openid: 'openid-tenant' },
     });
+    expect(wechatCustomer.sendTextMessage).toHaveBeenCalledWith(
+      'openid-tenant',
+      expect.stringContaining('已签署完成'),
+    );
+  });
+
+  it('确认签署成功但任务没有 followerOpenid 时不发送签署完成通知', async () => {
+    const signedPdf = Buffer.from('%PDF-signed');
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue({
+      ...followedTask,
+      status: 'CREATED',
+      weiqianBId: 'task-bid',
+      followerOpenid: null,
+    });
+    weiqian.downloadSignedFile.mockResolvedValue(signedPdf);
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    jest
+      .spyOn(service as unknown as { saveSignedPdf: (id: number, pdf: Buffer) => string }, 'saveSignedPdf')
+      .mockReturnValue('/uploads/contract-10-signed.pdf');
+
+    await expect(service.tryConfirmSigned(10)).resolves.toBe(true);
+    expect(wechatCustomer.sendTextMessage).not.toHaveBeenCalled();
   });
 
   it('租客已有不同 openid 时记录 warning 且不覆盖', async () => {

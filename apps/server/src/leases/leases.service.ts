@@ -337,6 +337,13 @@ export class LeasesService {
     });
     if (updateResult.count === 0) return true;
 
+    if (task.followerOpenid) {
+      await this.wechatCustomerService.sendTextMessage(
+        task.followerOpenid,
+        '您的租房合同已签署完成,感谢配合,如有疑问请联系房东',
+      );
+    }
+
     const tenant = task.lease.tenant;
     if (task.followerOpenid && !tenant.openid) {
       await this.prisma.tenant.update({
