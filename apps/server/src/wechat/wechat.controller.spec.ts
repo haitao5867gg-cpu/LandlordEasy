@@ -28,6 +28,7 @@ describe('WechatController contract signing events', () => {
     process.env.SERVER_PUBLIC_BASE_URL = 'https://dev.landlordeasy.cn/api/v1';
     customerService = { sendTextMessage: jest.fn() };
     leasesService = {
+      launchContractSigningTask: jest.fn(),
       tryConfirmSigned: jest.fn(),
     } as unknown as jest.Mocked<LeasesService>;
     controller = new WechatController(
@@ -54,7 +55,7 @@ describe('WechatController contract signing events', () => {
   it.each([
     ['subscribe', 'qrscene_123'],
     ['SCAN', '123'],
-  ])('%s 事件按场景值将任务转为 FOLLOWED', async (event, eventKey) => {
+  ])('%s 事件按场景值转为 FOLLOWED 后自动发起签署', async (event, eventKey) => {
     const xml =
       `<xml><FromUserName><![CDATA[openid-1]]></FromUserName>` +
       `<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[${event}]]></Event>` +
@@ -80,14 +81,40 @@ describe('WechatController contract signing events', () => {
       where: { id: 9, status: 'PENDING_SCAN' },
       data: { status: 'FOLLOWED', followerOpenid: 'openid-1' },
     });
+    expect(leasesService.launchContractSigningTask).toHaveBeenCalledWith(9, {});
+    expect(customerService.sendTextMessage).not.toHaveBeenCalled();
+    expect(res.value.status).toHaveBeenCalledWith(200);
+    expect(res.send).toHaveBeenCalledWith('success');
+  });
+
+  it('自动发起失败时保留 FOLLOWED、发送确认消息且 webhook 仍返回 200', async () => {
+    const xml =
+      '<xml><FromUserName><![CDATA[openid-1]]></FromUserName>' +
+      '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>' +
+      '<EventKey><![CDATA[qrscene_123]]></EventKey></xml>';
+    (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue({
+      id: 9,
+      lease: { room: { roomNo: '205', building: { name: 'R栋' } } },
+    });
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    leasesService.launchContractSigningTask.mockRejectedValue(
+      new Error('微签暂不可用'),
+    );
+    customerService.sendTextMessage.mockResolvedValue(true);
+    const res = response();
+
+    await expect(controller.event(request(xml), res.value)).resolves.toBeUndefined();
+
+    expect(prisma.contractSigningTask.updateMany).toHaveBeenCalledWith({
+      where: { id: 9, status: 'PENDING_SCAN' },
+      data: { status: 'FOLLOWED', followerOpenid: 'openid-1' },
+    });
+    expect(leasesService.launchContractSigningTask).toHaveBeenCalledWith(9, {});
     expect(customerService.sendTextMessage).toHaveBeenCalledWith(
       'openid-1',
-      expect.stringContaining('【R栋205】'),
+      '【R栋205】您已成功关注,该房源的租房合同已进入待签约状态,房东确认后将自动发起电子签约,请留意后续消息',
     );
-    expect(customerService.sendTextMessage).toHaveBeenCalledWith(
-      'openid-1',
-      expect.stringContaining('待签约状态'),
-    );
+    expect(res.value.status).toHaveBeenCalledWith(200);
     expect(res.send).toHaveBeenCalledWith('success');
   });
 

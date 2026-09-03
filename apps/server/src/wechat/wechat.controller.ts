@@ -22,8 +22,8 @@ import {
 } from './wechat-customer-service.interface';
 import { LeasesService } from '../leases/leases.service';
 
-function buildFollowedMessage(roomLabel: string): string {
-  return `【${roomLabel}】租房合同已进入待签约状态,房东确认后会尽快发起电子签约,请留意后续消息`;
+function buildFollowedFallbackMessage(roomLabel: string): string {
+  return `【${roomLabel}】您已成功关注,该房源的租房合同已进入待签约状态,房东确认后将自动发起电子签约,请留意后续消息`;
 }
 const WELCOME_MESSAGE = '欢迎关注,如有问题请联系房东';
 
@@ -111,11 +111,20 @@ export class WechatController {
           });
           if (updated.count > 0) {
             matched = true;
-            const roomLabel = `${task.lease.room.building.name}${task.lease.room.roomNo}`;
-            await this.wechatCustomerService.sendTextMessage(
-              parsed.openid,
-              buildFollowedMessage(roomLabel),
-            );
+            try {
+              await this.leasesService.launchContractSigningTask(task.id, {});
+            } catch (error) {
+              this.logger.warn(
+                `签约任务 ${task.id} 关注后自动发起失败,任务保留在 FOLLOWED: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+              const roomLabel = `${task.lease.room.building.name}${task.lease.room.roomNo}`;
+              await this.wechatCustomerService.sendTextMessage(
+                parsed.openid,
+                buildFollowedFallbackMessage(roomLabel),
+              );
+            }
           }
         }
       }

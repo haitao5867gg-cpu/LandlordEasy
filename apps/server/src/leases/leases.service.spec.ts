@@ -140,7 +140,10 @@ describe('LeasesService contract signing tasks', () => {
       ...createdTask,
       qrCodeImage: 'data:image/png;base64,qrcode',
     };
-    (prisma.lease.findUnique as jest.Mock).mockResolvedValue({ id: 1 });
+    (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+      id: 1,
+      tenant: { openid: null },
+    });
     (prisma.contractSigningTask.create as jest.Mock).mockResolvedValue(createdTask);
     wechatQrcode.createSceneQrcode.mockResolvedValue({
       ticket: 'ticket-1',
@@ -181,7 +184,10 @@ describe('LeasesService contract signing tasks', () => {
       status: 'PENDING_SCAN',
       qrCodeImage: null,
     };
-    (prisma.lease.findUnique as jest.Mock).mockResolvedValue({ id: 1 });
+    (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+      id: 1,
+      tenant: { openid: null },
+    });
     (prisma.contractSigningTask.create as jest.Mock)
       .mockRejectedValueOnce(uniqueConstraintError)
       .mockResolvedValueOnce(createdTask);
@@ -198,6 +204,78 @@ describe('LeasesService contract signing tasks', () => {
       service.createContractSigningTask(1, { type: 'RENEW' }),
     ).resolves.toBeDefined();
     expect(prisma.contractSigningTask.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('租客已有 openid 时跳过二维码并自动发起签署', async () => {
+    const createdTask = { ...followedTask };
+    const updatedTask = { ...followedTask, status: 'CREATED' };
+    (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+      id: 1,
+      tenant: { openid: 'openid-tenant' },
+    });
+    (prisma.contractSigningTask.create as jest.Mock).mockResolvedValue(createdTask);
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
+    (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    contractPdf.generate.mockResolvedValue(Buffer.from('%PDF-test'));
+    weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
+    weiqian.createEachSignTask.mockResolvedValue({
+      bId: 'task-bid',
+      shortCode: 'short-code',
+    });
+    (prisma.contractSigningTask.update as jest.Mock).mockResolvedValue(updatedTask);
+    wechatCustomer.sendTextMessage.mockResolvedValue(true);
+
+    await expect(service.createContractSigningTask(1, dto)).resolves.toEqual(
+      updatedTask,
+    );
+    expect(prisma.contractSigningTask.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        leaseId: 1,
+        status: 'FOLLOWED',
+        followerOpenid: 'openid-tenant',
+      }),
+    });
+    expect(wechatQrcode.createSceneQrcode).not.toHaveBeenCalled();
+    expect(weiqian.createEachSignTask).toHaveBeenCalledTimes(1);
+    expect(prisma.contractSigningTask.update).toHaveBeenCalledWith({
+      where: { id: 10 },
+      data: {
+        status: 'CREATED',
+        weiqianBId: 'task-bid',
+        weiqianShortCode: 'short-code',
+      },
+    });
+    expect(wechatCustomer.sendTextMessage).toHaveBeenCalledWith(
+      'openid-tenant',
+      '【2号楼301】您的租房合同可以签署了,请点击链接完成实名认证并签字(建议在微信内直接打开):\n' +
+        'https://sign.weiqian.example/q/short-code\n' +
+        '链接7天内有效,请尽快完成',
+    );
+  });
+
+  it('租客已有 openid 但自动发起失败时返回 FOLLOWED 任务供人工重试', async () => {
+    const createdTask = { ...followedTask };
+    (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+      id: 1,
+      tenant: { openid: 'openid-tenant' },
+    });
+    (prisma.contractSigningTask.create as jest.Mock).mockResolvedValue(createdTask);
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
+    (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    contractPdf.generate.mockResolvedValue(Buffer.from('%PDF-test'));
+    weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
+    weiqian.createEachSignTask.mockRejectedValue(new Error('微签暂不可用'));
+    const warning = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+
+    await expect(service.createContractSigningTask(1, dto)).resolves.toEqual(
+      createdTask,
+    );
+    expect(createdTask.status).toBe('FOLLOWED');
+    expect(wechatQrcode.createSceneQrcode).not.toHaveBeenCalled();
+    expect(prisma.contractSigningTask.update).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining('自动发起失败,任务保留在 FOLLOWED'),
+    );
   });
 
   it('非 FOLLOWED 状态拒绝发起签署', async () => {
@@ -288,7 +366,9 @@ describe('LeasesService contract signing tasks', () => {
     });
     expect(wechatCustomer.sendTextMessage).toHaveBeenCalledWith(
       'openid-tenant',
-      expect.stringContaining('https://sign.weiqian.example/q/short-code'),
+      '【2号楼301】您的租房合同可以签署了,请点击链接完成实名认证并签字(建议在微信内直接打开):\n' +
+        'https://sign.weiqian.example/q/short-code\n' +
+        '链接7天内有效,请尽快完成',
     );
   });
 
@@ -346,7 +426,7 @@ describe('LeasesService contract signing tasks', () => {
     });
     expect(wechatCustomer.sendTextMessage).toHaveBeenCalledWith(
       'openid-tenant',
-      expect.stringContaining('已签署完成'),
+      '【2号楼301】您的租房合同已签署完成,感谢配合。如有疑问请直接联系房东',
     );
   });
 

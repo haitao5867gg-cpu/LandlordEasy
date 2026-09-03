@@ -96,15 +96,33 @@ export class LeasesService {
     return lease;
   }
 
-  /** 创建电子签约任务并生成关注场景二维码 */
+  /** 创建电子签约任务；已绑定 openid 时直接自动发起签署，否则生成关注场景二维码。 */
   async createContractSigningTask(leaseId: number, dto: CreateContractSigningTaskDto) {
     const lease = await this.prisma.lease.findUnique({
       where: { id: leaseId },
-      select: { id: true },
+      select: { id: true, tenant: { select: { openid: true } } },
     });
     if (!lease) throw new NotFoundException('租约不存在');
 
-    const task = await this.createContractSigningTaskRecord(leaseId, dto);
+    const followerOpenid = lease.tenant.openid;
+    const task = await this.createContractSigningTaskRecord(
+      leaseId,
+      dto,
+      followerOpenid,
+    );
+    if (followerOpenid) {
+      try {
+        return await this.launchContractSigningTaskInternal(task.id, {});
+      } catch (error) {
+        this.logger.warn(
+          `签约任务 ${task.id} 创建后自动发起失败,任务保留在 FOLLOWED: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return task;
+      }
+    }
+
     const { qrCodeImage } = await this.wechatQrcode.createSceneQrcode(task.sceneValue);
 
     return this.prisma.contractSigningTask.update({
@@ -158,6 +176,7 @@ export class LeasesService {
   private async createContractSigningTaskRecord(
     leaseId: number,
     dto: CreateContractSigningTaskDto,
+    followerOpenid: string | null,
   ) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -177,7 +196,8 @@ export class LeasesService {
             overdueToleranceDays: dto.overdueToleranceDays,
             cleaningFee: dto.cleaningFee,
             renewalNoticeDays: dto.renewalNoticeDays,
-            status: 'PENDING_SCAN',
+            status: followerOpenid ? 'FOLLOWED' : 'PENDING_SCAN',
+            ...(followerOpenid ? { followerOpenid } : {}),
           },
         });
       } catch (error) {
@@ -192,8 +212,15 @@ export class LeasesService {
     throw new Error('无法生成唯一的微信场景值');
   }
 
-  /** 房东在租客关注后主动发起微签互签任务 */
+  /** 在租客关注后发起微签互签任务，供自动流程和房东手动重试复用。 */
   async launchContractSigningTask(
+    taskId: number,
+    dto: LaunchContractSigningTaskDto,
+  ) {
+    return this.launchContractSigningTaskInternal(taskId, dto);
+  }
+
+  private async launchContractSigningTaskInternal(
     taskId: number,
     dto: LaunchContractSigningTaskDto,
   ) {
@@ -313,7 +340,9 @@ export class LeasesService {
     const roomLabel = this.formatRoomLabel(task.lease.room);
     await this.wechatCustomerService.sendTextMessage(
       task.followerOpenid,
-      `【${roomLabel}】电子签约已发起,请点击以下链接完成实名认证和签署：${signUrl}`,
+      `【${roomLabel}】您的租房合同可以签署了,请点击链接完成实名认证并签字(建议在微信内直接打开):
+${signUrl}
+链接7天内有效,请尽快完成`,
     );
 
     return updatedTask;
@@ -349,7 +378,7 @@ export class LeasesService {
       const roomLabel = this.formatRoomLabel(task.lease.room);
       await this.wechatCustomerService.sendTextMessage(
         task.followerOpenid,
-        `【${roomLabel}】租房合同已签署完成,感谢配合,如有疑问请联系房东`,
+        `【${roomLabel}】您的租房合同已签署完成,感谢配合。如有疑问请直接联系房东`,
       );
     }
 
