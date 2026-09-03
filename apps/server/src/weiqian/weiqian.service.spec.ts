@@ -160,7 +160,7 @@ describe('RealWeiQianService', () => {
       fBIds: ['file-1'],
       fileName: '合同.pdf',
       rType: '1',
-      authType: '2',
+      authType: '1',
       signType: 1,
       receiverDTOS: [
         {
