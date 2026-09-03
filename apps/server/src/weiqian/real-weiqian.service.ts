@@ -23,13 +23,30 @@ interface WeiQianCreateTaskData {
 }
 
 const AUTH_MODE = 'Signature';
-// 发起方(房东)自动盖章占位坐标,微签盖章是绝对坐标不支持关键字定位,
-// 等真实合同模板版式最终定稿后需要精调到甲方签字栏的准确位置
+// 甲方自动盖章坐标。微签x/y是0-1000的归一化坐标(x=从左往右的千分比,
+// y=从下往上的千分比),不是像素/pt——2026-09-03用contract-7-signed.pdf
+// 实测校准过:原来的占位值x=700/y=850量出来的红章中心正好落在
+// (698,855),证实了这个坐标系换算方式。这组新值是量出"甲方签字(按
+// 手印):"那行空白处的实际位置换算来的,应该比原来精准,但没有再花一次
+// 真实签署额度做二次验证,下次真实测试时要核实红章是否真的落在了签字
+// 行上,不对再调。
 const LAUNCHER_AUTO_SEAL_RULE = {
   autosealType: 1,
-  x: 700,
-  y: 850,
+  x: 210,
+  y: 260,
   autosealPage: 1,
+} as const;
+// 乙方(接收方)指定盖章位置+签章类型。sealType=10强制手写签名,不给
+// 接收方"盖章/时间戳/批注"这些选项——这是这次真实联调发现的问题:同一
+// 套代码之前(taskId=4)接收方选了手写,这次(taskId=7)选了微签测试环境
+// 通用的"演示章",证明不加这个字段时,签署方式是接收方在微签页面自己
+// 选的,不受我方参数控制。x/y同样是量"乙方签字(按手印):"那行空白处
+// 换算来的0-1000坐标。
+const RECEIVER_POSITION_RULE = {
+  x: 900,
+  y: 260,
+  pageNum: 1,
+  sealType: 10,
 } as const;
 
 @Injectable()
@@ -85,6 +102,9 @@ export class RealWeiQianService implements IWeiQianService {
           idCard: params.receiverIdCard,
         },
       ],
+      // 指定接收方盖章位置+强制手写签名(sealType=10),避免接收方在微签
+      // 页面上自己选成"盖章"
+      positionDTOS: [RECEIVER_POSITION_RULE],
       // 发起方(房东)自动盖章:字段名是autosealPage不是pageNum,sealId是
       // BigInteger不是字符串,这两处之前都传错过(2026-09-02用真实API
       // 验证过一次基础流程后单独加回来验证这部分)
