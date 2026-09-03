@@ -59,7 +59,10 @@ describe('WechatController contract signing events', () => {
       `<xml><FromUserName><![CDATA[openid-1]]></FromUserName>` +
       `<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[${event}]]></Event>` +
       `<EventKey><![CDATA[${eventKey}]]></EventKey></xml>`;
-    (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue({ id: 9 });
+    (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue({
+      id: 9,
+      lease: { room: { roomNo: '205', building: { name: 'R栋' } } },
+    });
     (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
     customerService.sendTextMessage.mockResolvedValue(true);
     const res = response();
@@ -68,12 +71,19 @@ describe('WechatController contract signing events', () => {
 
     expect(prisma.contractSigningTask.findFirst).toHaveBeenCalledWith({
       where: { sceneValue: 123, status: 'PENDING_SCAN' },
-      select: { id: true },
+      select: {
+        id: true,
+        lease: { select: { room: { select: { roomNo: true, building: { select: { name: true } } } } } },
+      },
     });
     expect(prisma.contractSigningTask.updateMany).toHaveBeenCalledWith({
       where: { id: 9, status: 'PENDING_SCAN' },
       data: { status: 'FOLLOWED', followerOpenid: 'openid-1' },
     });
+    expect(customerService.sendTextMessage).toHaveBeenCalledWith(
+      'openid-1',
+      expect.stringContaining('【R栋205】'),
+    );
     expect(customerService.sendTextMessage).toHaveBeenCalledWith(
       'openid-1',
       expect.stringContaining('待签约状态'),

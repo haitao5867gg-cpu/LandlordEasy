@@ -310,19 +310,27 @@ export class LeasesService {
       process.env.WEIQIAN_SIGN_BASE_URL || DEFAULT_WEIQIAN_SIGN_BASE_URL
     ).replace(/\/+$/, '');
     const signUrl = `${signBaseUrl}/q/${createdTask.shortCode}`;
+    const roomLabel = this.formatRoomLabel(task.lease.room);
     await this.wechatCustomerService.sendTextMessage(
       task.followerOpenid,
-      `您的租房合同已发起电子签约,请点击以下链接完成实名认证和签署：${signUrl}`,
+      `【${roomLabel}】电子签约已发起,请点击以下链接完成实名认证和签署：${signUrl}`,
     );
 
     return updatedTask;
+  }
+
+  /** 拼装"R栋205"这样的房间标识,用于客服消息区分多套房源。 */
+  private formatRoomLabel(room: { roomNo: string; building: { name: string } }): string {
+    return `${room.building.name}${room.roomNo}`;
   }
 
   /** 核实微签已签文件并完成本地归档、状态更新和租客 openid 绑定 */
   async tryConfirmSigned(taskId: number): Promise<boolean> {
     const task = await this.prisma.contractSigningTask.findUnique({
       where: { id: taskId },
-      include: { lease: { include: { tenant: true } } },
+      include: {
+        lease: { include: { tenant: true, room: { include: { building: true } } } },
+      },
     });
     if (!task || task.status !== 'CREATED' || !task.weiqianBId) return false;
 
@@ -338,9 +346,10 @@ export class LeasesService {
     if (updateResult.count === 0) return true;
 
     if (task.followerOpenid) {
+      const roomLabel = this.formatRoomLabel(task.lease.room);
       await this.wechatCustomerService.sendTextMessage(
         task.followerOpenid,
-        '您的租房合同已签署完成,感谢配合,如有疑问请联系房东',
+        `【${roomLabel}】租房合同已签署完成,感谢配合,如有疑问请联系房东`,
       );
     }
 

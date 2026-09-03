@@ -22,8 +22,9 @@ import {
 } from './wechat-customer-service.interface';
 import { LeasesService } from '../leases/leases.service';
 
-const FOLLOWED_MESSAGE =
-  '您的租房合同已进入待签约状态,房东确认后会尽快发起电子签约,请留意后续消息';
+function buildFollowedMessage(roomLabel: string): string {
+  return `【${roomLabel}】租房合同已进入待签约状态,房东确认后会尽快发起电子签约,请留意后续消息`;
+}
 const WELCOME_MESSAGE = '欢迎关注,如有问题请联系房东';
 
 @Controller('wechat')
@@ -95,7 +96,10 @@ export class WechatController {
             sceneValue: parsed.sceneValue,
             status: 'PENDING_SCAN',
           },
-          select: { id: true },
+          select: {
+            id: true,
+            lease: { select: { room: { select: { roomNo: true, building: { select: { name: true } } } } } },
+          },
         });
         if (task) {
           const updated = await this.prisma.contractSigningTask.updateMany({
@@ -107,9 +111,10 @@ export class WechatController {
           });
           if (updated.count > 0) {
             matched = true;
+            const roomLabel = `${task.lease.room.building.name}${task.lease.room.roomNo}`;
             await this.wechatCustomerService.sendTextMessage(
               parsed.openid,
-              FOLLOWED_MESSAGE,
+              buildFollowedMessage(roomLabel),
             );
           }
         }
