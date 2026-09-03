@@ -171,7 +171,7 @@ describe('RealWeiQianService', () => {
       ],
       positionDTOS: [{ x: 900, y: 260, pageNum: 1, sealType: 10 }],
       launcherSignRule: [
-        { autosealType: 1, x: 210, y: 260, autosealPage: 1, sealId: 37179 },
+        { autosealType: 1, x: 280, y: 265, autosealPage: 1, sealId: 37179 },
       ],
       expiresTime: 1701000000000,
       finishSignJumpPage: 'https://tenant.example/sign-complete',
