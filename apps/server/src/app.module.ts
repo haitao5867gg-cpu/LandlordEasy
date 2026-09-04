@@ -23,6 +23,7 @@ import { RemindersModule } from './reminders/reminders.module';
 import { TenantApiModule } from './tenant-api/tenant-api.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { AdminModule } from './admin/admin.module';
+import { AnnouncementsModule } from './announcements/announcements.module';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 
 @Module({
@@ -52,6 +53,7 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
     TenantApiModule,
     ExpensesModule,
     AdminModule,
+    AnnouncementsModule,
   ],
   providers: [
     {

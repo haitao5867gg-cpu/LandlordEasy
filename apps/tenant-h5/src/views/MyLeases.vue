@@ -4,7 +4,14 @@
     <van-loading v-if="loading" class="page-loading" />
     <van-empty v-else-if="list.length === 0" description="暂无租约" />
     <van-cell-group v-else inset>
-      <van-cell v-for="l in list" :key="l.id" :title="`${l.room?.building?.name} ${l.room?.roomNo}`" :label="`${l.startDate?.split('T')[0]} ~ ${l.endDate?.split('T')[0]}`">
+      <van-cell
+        v-for="l in list"
+        :key="l.id"
+        :title="`${l.room?.building?.name} ${l.room?.roomNo}`"
+        :label="`${l.startDate?.split('T')[0]} ~ ${l.endDate?.split('T')[0]}`"
+        :is-link="l.status === 'ACTIVE'"
+        @click="l.status === 'ACTIVE' && $router.push(`/leases/${l.id}/services`)"
+      >
         <template #value>
           <van-tag :type="l.status === 'ACTIVE' ? 'success' : 'default'">{{ l.status === 'ACTIVE' ? '在租' : '已退租' }}</van-tag>
         </template>

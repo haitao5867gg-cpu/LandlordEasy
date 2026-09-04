@@ -2,10 +2,21 @@ import { Injectable } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
+import { LeasesService } from '../leases/leases.service';
+import { MaintenanceService } from '../maintenance/maintenance.service';
+import {
+  CreateTerminationRequestDto,
+  CreateTransferRequestDto,
+} from '../leases/leases.dto';
+import { CreateRepairRequestDto } from '../maintenance/maintenance.dto';
 
 @Injectable()
 export class TenantApiService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly leasesService: LeasesService,
+    private readonly maintenanceService: MaintenanceService,
+  ) {}
 
   /** 获取收款码图片 URL */
   async getQrcodeUrl() {
@@ -60,5 +71,37 @@ export class TenantApiService {
       include: { room: { include: { building: true } } },
       orderBy: { startDate: 'desc' },
     });
+  }
+
+  createRepairRequest(leaseId: number, tenantId: number, dto: CreateRepairRequestDto) {
+    return this.maintenanceService.createRepairRequest(leaseId, tenantId, dto);
+  }
+
+  listMyRepairRequests(tenantId: number) {
+    return this.maintenanceService.listMyRepairRequests(tenantId);
+  }
+
+  previewTerminationPenalty(leaseId: number, tenantId: number) {
+    return this.leasesService.previewTerminationPenalty(leaseId, tenantId);
+  }
+
+  createTerminationRequest(
+    leaseId: number,
+    tenantId: number,
+    dto: CreateTerminationRequestDto,
+  ) {
+    return this.leasesService.createTerminationRequest(leaseId, tenantId, dto);
+  }
+
+  listMyTerminationRequests(tenantId: number) {
+    return this.leasesService.listMyTerminationRequests(tenantId);
+  }
+
+  createTransferRequest(leaseId: number, tenantId: number, dto: CreateTransferRequestDto) {
+    return this.leasesService.createTransferRequest(leaseId, tenantId, dto);
+  }
+
+  listMyTransferRequests(tenantId: number) {
+    return this.leasesService.listMyTransferRequests(tenantId);
   }
 }

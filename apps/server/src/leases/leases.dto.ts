@@ -130,6 +130,72 @@ export class LaunchContractSigningTaskDto {
   renewalNoticeDays?: number;
 }
 
+export class CreateTerminationRequestDto {
+  @IsDateString()
+  requestedMoveOutDate!: string;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
+export class ApproveTerminationRequestDto {
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  finalPenalty?: number;
+}
+
+export class RejectRequestDto {
+  @IsOptional()
+  @IsString()
+  note?: string;
+}
+
+export class CreateTransferRequestDto {
+  @IsOptional()
+  @IsString()
+  preferredRoom?: string;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
+export class ApproveTransferRequestDto {
+  @IsInt()
+  targetRoomId!: number;
+
+  @IsNumber()
+  @Min(0)
+  newRent!: number;
+
+  @IsNumber()
+  @Min(0)
+  newDeposit!: number;
+
+  @IsDateString()
+  newEndDate!: string;
+
+  @IsOptional()
+  @IsDateString()
+  newStartDate?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{17}[\dXx]$|^\d{15}$/, { message: '身份证号格式不正确' })
+  tenantIdCard?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  oldDepositRefund?: number;
+
+  @IsOptional()
+  @IsString()
+  oldDepositDeductReason?: string;
+}
+
 export class CreateContractSigningTaskDto {
   @IsIn(['NEW', 'RENEW'])
   type!: 'NEW' | 'RENEW';

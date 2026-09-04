@@ -21,6 +21,10 @@ model Landlord {
   payments        Payment[]        @relation("ConfirmedBy")
   expenses        Expense[]
   handoverRecords HandoverRecord[]
+  repairRequests            RepairRequest[]
+  terminationRequests       LeaseTerminationRequest[]
+  transferRequests          RoomTransferRequest[]
+  announcements             Announcement[]
 
   @@map("landlords")
 }
@@ -33,7 +37,8 @@ model Property {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  buildings Building[]
+  buildings     Building[]
+  announcements Announcement[]
 
   @@map("properties")
 }
@@ -91,6 +96,8 @@ model Room {
   leases             Lease[]
   maintenanceRecords MaintenanceRecord[]
   expenses           Expense[]           @relation("RoomExpense")
+  repairRequests     RepairRequest[]
+  transferRequestsAsTarget RoomTransferRequest[] @relation("TargetRoomTransfer")
 
   @@unique([buildingId, roomNo])
   @@map("rooms")
@@ -109,6 +116,9 @@ model Tenant {
 
   leases       Lease[]
   reminderLogs ReminderLog[]
+  repairRequests      RepairRequest[]
+  terminationRequests LeaseTerminationRequest[]
+  transferRequests    RoomTransferRequest[]
 
   @@map("tenants")
 }
@@ -139,6 +149,10 @@ model Lease {
   depositRecords       DepositRecord[]
   handoverRecords      HandoverRecord[]
   contractSigningTasks ContractSigningTask[]
+  repairRequests       RepairRequest[]
+  terminationRequests  LeaseTerminationRequest[]
+  transferRequestsAsOld RoomTransferRequest[] @relation("OldLeaseTransfer")
+  transferRequestsAsNew RoomTransferRequest[] @relation("NewLeaseTransfer")
 
   @@map("leases")
 }
@@ -348,4 +362,92 @@ model AuditLog {
   operator Landlord @relation(fields: [operatorId], references: [id])
 
   @@map("audit_logs")
+}
+
+// ========== 租客在线报修 ==========
+model RepairRequest {
+  id           Int       @id @default(autoincrement())
+  leaseId      Int
+  tenantId     Int
+  roomId       Int
+  description  String    @db.Text
+  status       String    @default("SUBMITTED") // SUBMITTED / IN_PROGRESS / RESOLVED
+  landlordNote String?   @db.Text
+  resolvedCost Decimal?  @db.Decimal(10, 2)
+  resolvedBy   Int?
+  resolvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  lease    Lease     @relation(fields: [leaseId], references: [id])
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  room     Room      @relation(fields: [roomId], references: [id])
+  resolver Landlord? @relation(fields: [resolvedBy], references: [id])
+
+  @@map("repair_requests")
+}
+
+// ========== 租客退租违约申请 ==========
+model LeaseTerminationRequest {
+  id                   Int       @id @default(autoincrement())
+  leaseId              Int
+  tenantId             Int
+  requestedMoveOutDate DateTime  @db.Date
+  reason               String?   @db.Text
+  status               String    @default("PENDING") // PENDING / APPROVED / REJECTED
+  suggestedPenalty     Decimal   @db.Decimal(10, 2)
+  finalPenalty         Decimal?  @db.Decimal(10, 2)
+  landlordNote         String?   @db.Text
+  resolvedBy           Int?
+  resolvedAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  lease    Lease     @relation(fields: [leaseId], references: [id])
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  resolver Landlord? @relation(fields: [resolvedBy], references: [id])
+
+  @@map("lease_termination_requests")
+}
+
+// ========== 租客换租申请 ==========
+model RoomTransferRequest {
+  id            Int       @id @default(autoincrement())
+  leaseId       Int
+  tenantId      Int
+  preferredRoom String?
+  reason        String?   @db.Text
+  status        String    @default("PENDING") // PENDING / APPROVED / REJECTED
+  targetRoomId  Int?
+  newLeaseId    Int?      @unique
+  landlordNote  String?   @db.Text
+  resolvedBy    Int?
+  resolvedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  lease      Lease     @relation("OldLeaseTransfer", fields: [leaseId], references: [id])
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
+  targetRoom Room?     @relation("TargetRoomTransfer", fields: [targetRoomId], references: [id])
+  newLease   Lease?    @relation("NewLeaseTransfer", fields: [newLeaseId], references: [id])
+  resolver   Landlord? @relation(fields: [resolvedBy], references: [id])
+
+  @@map("room_transfer_requests")
+}
+
+// ========== 房东群发通知 ==========
+model Announcement {
+  id           Int      @id @default(autoincrement())
+  title        String
+  content      String   @db.Text
+  propertyId   Int?
+  createdBy    Int
+  successCount Int      @default(0)
+  failCount    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  property Property? @relation(fields: [propertyId], references: [id])
+  creator  Landlord  @relation(fields: [createdBy], references: [id])
+
+  @@map("announcements")
 }

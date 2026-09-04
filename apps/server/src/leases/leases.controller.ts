@@ -14,10 +14,13 @@ import { Request } from 'express';
 import { LeasesService } from './leases.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import {
+  ApproveTerminationRequestDto,
+  ApproveTransferRequestDto,
   CreateContractSigningTaskDto,
   CreateLeaseDto,
   EndLeaseDto,
   LaunchContractSigningTaskDto,
+  RejectRequestDto,
   RenewLeaseDto,
 } from './leases.dto';
 import { JwtPayload } from '../auth/auth.service';
@@ -33,6 +36,18 @@ export class LeasesController {
       roomId ? parseInt(roomId) : undefined,
       status,
     );
+  }
+
+  /** 退租违约申请列表(房东)——必须声明在 `:id` 路由之前,否则会被当成 lease id 解析。 */
+  @Get('termination-requests')
+  listTerminationRequests(@Query('status') status?: string) {
+    return this.leasesService.listTerminationRequests(status);
+  }
+
+  /** 换租申请列表(房东)——同样必须声明在 `:id` 路由之前。 */
+  @Get('transfer-requests')
+  listTransferRequests(@Query('status') status?: string) {
+    return this.leasesService.listTransferRequests(status);
   }
 
   @Get(':id')
@@ -95,5 +110,45 @@ export class LeasesController {
   @Post(':id/renew')
   renew(@Param('id', ParseIntPipe) id: number, @Body() dto: RenewLeaseDto) {
     return this.leasesService.renew(id, dto);
+  }
+
+  @Post('termination-requests/:id/approve')
+  approveTerminationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ApproveTerminationRequestDto,
+    @Req() req: Request,
+  ) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.leasesService.approveTerminationRequest(id, dto, user.sub);
+  }
+
+  @Post('termination-requests/:id/reject')
+  rejectTerminationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RejectRequestDto,
+    @Req() req: Request,
+  ) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.leasesService.rejectTerminationRequest(id, dto, user.sub);
+  }
+
+  @Post('transfer-requests/:id/approve')
+  approveTransferRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ApproveTransferRequestDto,
+    @Req() req: Request,
+  ) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.leasesService.approveTransferRequest(id, dto, user.sub);
+  }
+
+  @Post('transfer-requests/:id/reject')
+  rejectTransferRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RejectRequestDto,
+    @Req() req: Request,
+  ) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.leasesService.rejectTransferRequest(id, dto, user.sub);
   }
 }
