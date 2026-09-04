@@ -402,7 +402,9 @@ ${signUrl}
           data: {
             thing1: { value: this.buildPropertyAddress(task.lease.room) },
             character_string2: { value: `LE-${task.id}` },
-            const3: { value: task.type === 'RENEW' ? '续签合同' : '新签合同' },
+            // const3是微信审核过的固定候选词字段,GasCan申请"新签合同"/"续签合同"被驳回,
+            // 官方建议改用"房屋租赁合同"这一个通用值,不再按task.type区分新签/续签
+            const3: { value: '房屋租赁合同' },
             time4: {
               value: `${task.lease.startDate.toISOString().split('T')[0]}~${task.lease.endDate.toISOString().split('T')[0]}`,
             },

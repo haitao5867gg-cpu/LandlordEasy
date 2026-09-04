@@ -441,7 +441,7 @@ describe('LeasesService contract signing tasks', () => {
         data: {
           thing1: { value: '阳光公寓2号楼301室' },
           character_string2: { value: 'LE-10' },
-          const3: { value: '新签合同' },
+          const3: { value: '房屋租赁合同' },
           time4: { value: '2026-09-01~2027-08-31' },
           thing5: { value: '张三' },
         },
