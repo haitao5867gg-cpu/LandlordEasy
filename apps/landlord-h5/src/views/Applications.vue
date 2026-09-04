@@ -112,6 +112,7 @@
             v-if="terminationForm.finalPenalty !== undefined"
             left-icon="info-o"
             :text="penaltyPreviewText"
+            wrapable
           />
           <van-button size="small" plain type="danger" style="margin-top:8px" @click="rejectTermination">驳回申请</van-button>
         </template>

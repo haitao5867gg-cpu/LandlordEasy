@@ -28,7 +28,7 @@
         <template v-else>
           <van-field v-model="terminationForm.date" label="期望搬离日" placeholder="YYYY-MM-DD" @blur="fetchPenaltyPreview" />
           <van-field v-model="terminationForm.reason" label="原因" placeholder="可选" />
-          <van-notice-bar v-if="penaltyPreview !== null" left-icon="info-o" :text="`按当前合同条款,预计违约金约¥${penaltyPreview},最终以房东审批为准`" />
+          <van-notice-bar v-if="penaltyPreview !== null" left-icon="info-o" wrapable :text="`按当前合同条款,预计违约金约¥${penaltyPreview},最终以房东审批为准`" />
           <van-button size="small" type="danger" plain style="margin:8px 16px" :loading="submittingTermination" @click="submitTermination">提交退租申请</van-button>
         </template>
       </van-cell-group>
