@@ -1,4 +1,5 @@
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { Request } from 'express';
 import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 
@@ -6,11 +7,13 @@ describe('PaymentsController', () => {
   const originalPaymentMode = process.env.PAYMENT_MODE;
   const originalWechatPayMode = process.env.WECHAT_PAY_MODE;
   const originalAlipayMode = process.env.ALIPAY_MODE;
+  const originalAlipayEnabled = process.env.ALIPAY_ENABLED;
 
   beforeEach(() => {
     delete process.env.PAYMENT_MODE;
     delete process.env.WECHAT_PAY_MODE;
     delete process.env.ALIPAY_MODE;
+    delete process.env.ALIPAY_ENABLED;
   });
 
   afterAll(() => {
@@ -20,6 +23,48 @@ describe('PaymentsController', () => {
     else process.env.WECHAT_PAY_MODE = originalWechatPayMode;
     if (originalAlipayMode === undefined) delete process.env.ALIPAY_MODE;
     else process.env.ALIPAY_MODE = originalAlipayMode;
+    if (originalAlipayEnabled === undefined) delete process.env.ALIPAY_ENABLED;
+    else process.env.ALIPAY_ENABLED = originalAlipayEnabled;
+  });
+
+  it('未设置 ALIPAY_ENABLED 时拒绝创建支付宝订单', () => {
+    const paymentsService = {
+      createAlipayOrder: jest.fn(),
+    } as unknown as PaymentsService;
+    const controller = new PaymentsController(paymentsService);
+
+    expect(() =>
+      controller.createAlipayOrder(
+        { billId: 50 },
+        { user: { tenantId: 7, openid: 'tenant-openid' } } as unknown as Request,
+      ),
+    ).toThrow(BadRequestException);
+    expect(paymentsService.createAlipayOrder).not.toHaveBeenCalled();
+  });
+
+  it('ALIPAY_ENABLED=true 时正常交给 service 创建支付宝订单', async () => {
+    process.env.ALIPAY_ENABLED = 'true';
+    const order = {
+      outTradeNo: 'ALI50TEST',
+      mode: 'mock',
+      qrCodeImage: 'data:image/png;base64,test',
+    };
+    const paymentsService = {
+      createAlipayOrder: jest.fn().mockResolvedValue(order),
+    } as unknown as PaymentsService;
+    const controller = new PaymentsController(paymentsService);
+
+    await expect(
+      controller.createAlipayOrder(
+        { billId: 50 },
+        { user: { tenantId: 7, openid: 'tenant-openid' } } as unknown as Request,
+      ),
+    ).resolves.toEqual(order);
+    expect(paymentsService.createAlipayOrder).toHaveBeenCalledWith(
+      50,
+      7,
+      'tenant-openid',
+    );
   });
 
   it('安全性质：两个渠道都是 real 时 mock 接口直接返回 404', () => {

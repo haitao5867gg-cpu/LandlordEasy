@@ -173,6 +173,7 @@ export class PaymentsService {
     tenantId: number | undefined,
     openid: string | undefined,
   ) {
+    this.assertAlipayEnabled();
     const bill = await this.getPayableTenantBill(billId, tenantId);
     if (!openid) throw new BadRequestException('缺少openid');
     const outTradeNo = this.generateOutTradeNo('ALI', billId);
@@ -252,6 +253,7 @@ export class PaymentsService {
     if (!['WECHATPAY', 'ALIPAY'].includes(payment.channel)) {
       throw new BadRequestException('该支付记录不支持在线支付模拟');
     }
+    if (payment.channel === 'ALIPAY') this.assertAlipayEnabled();
     const channelMode =
       payment.channel === 'WECHATPAY' ? this.wechatPayMode : this.alipayMode;
     if (channelMode !== 'mock') throw new NotFoundException();
@@ -280,6 +282,12 @@ export class PaymentsService {
 
   private get alipayMode(): string {
     return process.env.ALIPAY_MODE || process.env.PAYMENT_MODE || 'mock';
+  }
+
+  private assertAlipayEnabled(): void {
+    if (process.env.ALIPAY_ENABLED !== 'true') {
+      throw new BadRequestException('支付宝支付暂未开放，请使用微信支付');
+    }
   }
 
   private async getPayableTenantBill(

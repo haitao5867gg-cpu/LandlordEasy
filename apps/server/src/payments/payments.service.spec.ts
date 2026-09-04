@@ -17,6 +17,7 @@ describe('PaymentsService', () => {
   const originalPaymentMode = process.env.PAYMENT_MODE;
   const originalWechatPayMode = process.env.WECHAT_PAY_MODE;
   const originalAlipayMode = process.env.ALIPAY_MODE;
+  const originalAlipayEnabled = process.env.ALIPAY_ENABLED;
   const originalWechatPayPublicKey = process.env.WECHAT_PAY_PUBLIC_KEY;
   const originalWechatPayPublicKeyId = process.env.WECHAT_PAY_PUBLIC_KEY_ID;
   const originalWechatPayApiV3Key = process.env.WECHAT_PAY_APIV3_KEY;
@@ -25,6 +26,7 @@ describe('PaymentsService', () => {
     delete process.env.PAYMENT_MODE;
     delete process.env.WECHAT_PAY_MODE;
     delete process.env.ALIPAY_MODE;
+    delete process.env.ALIPAY_ENABLED;
     prisma = {
       payment: {
         findUnique: jest.fn(),
@@ -54,6 +56,8 @@ describe('PaymentsService', () => {
     else process.env.WECHAT_PAY_MODE = originalWechatPayMode;
     if (originalAlipayMode === undefined) delete process.env.ALIPAY_MODE;
     else process.env.ALIPAY_MODE = originalAlipayMode;
+    if (originalAlipayEnabled === undefined) delete process.env.ALIPAY_ENABLED;
+    else process.env.ALIPAY_ENABLED = originalAlipayEnabled;
     if (originalWechatPayPublicKey === undefined) {
       delete process.env.WECHAT_PAY_PUBLIC_KEY;
     } else {
@@ -357,7 +361,17 @@ describe('PaymentsService', () => {
       );
     });
 
-    it('创建支付宝订单并在后端生成 PNG data URI', async () => {
+    it('未设置 ALIPAY_ENABLED 时前置拒绝支付宝订单且不访问数据库', async () => {
+      await expect(
+        service.createAlipayOrder(50, 7, 'tenant-openid'),
+      ).rejects.toThrow('支付宝支付暂未开放，请使用微信支付');
+      expect(prisma.bill.findUnique).not.toHaveBeenCalled();
+      expect(prisma.payment.create).not.toHaveBeenCalled();
+      expect(alipayService.createOrder).not.toHaveBeenCalled();
+    });
+
+    it('ALIPAY_ENABLED=true 时创建支付宝订单并在后端生成 PNG data URI', async () => {
+      process.env.ALIPAY_ENABLED = 'true';
       (prisma.bill.findUnique as jest.Mock).mockResolvedValue({
         ...payableBill,
         status: 'OVERDUE',
@@ -377,8 +391,9 @@ describe('PaymentsService', () => {
       });
     });
 
-    it('新变量未设置时两个渠道都回退到 PAYMENT_MODE', async () => {
+    it('支付模式新变量未设置时两个渠道都回退到 PAYMENT_MODE', async () => {
       process.env.PAYMENT_MODE = 'real';
+      process.env.ALIPAY_ENABLED = 'true';
       (prisma.bill.findUnique as jest.Mock).mockResolvedValue(payableBill);
       (prisma.payment.create as jest.Mock).mockResolvedValue({ id: 22 });
       wechatPayService.createOrder.mockResolvedValue({
@@ -415,6 +430,7 @@ describe('PaymentsService', () => {
     });
 
     it('已支付账单返回“该账单无需支付”', async () => {
+      process.env.ALIPAY_ENABLED = 'true';
       (prisma.bill.findUnique as jest.Mock).mockResolvedValue({
         ...payableBill,
         status: 'PAID',
@@ -576,9 +592,10 @@ describe('PaymentsService', () => {
   });
 
   describe('mock 支付成功模拟', () => {
-    it('两个渠道都是 mock 时复用回调确认逻辑完成支付', async () => {
+    it('两个渠道都是 mock 且支付宝已启用时复用回调确认逻辑完成支付', async () => {
       process.env.WECHAT_PAY_MODE = 'mock';
       process.env.ALIPAY_MODE = 'mock';
+      process.env.ALIPAY_ENABLED = 'true';
       const payment = {
         id: 40,
         billId: 70,
@@ -609,9 +626,10 @@ describe('PaymentsService', () => {
       });
     });
 
-    it('混合模式下允许模拟支付宝支付成功', async () => {
+    it('混合模式下允许模拟已启用的支付宝支付成功', async () => {
       process.env.WECHAT_PAY_MODE = 'real';
       process.env.ALIPAY_MODE = 'mock';
+      process.env.ALIPAY_ENABLED = 'true';
       const payment = {
         id: 41,
         billId: 71,

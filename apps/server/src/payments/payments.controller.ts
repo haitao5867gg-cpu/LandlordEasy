@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -43,6 +44,9 @@ export class PaymentsController {
   @Post('alipay/create-order')
   @UseGuards(TenantGuard)
   createAlipayOrder(@Body() dto: CreateOnlinePaymentDto, @Req() req: Request) {
+    if (process.env.ALIPAY_ENABLED !== 'true') {
+      throw new BadRequestException('支付宝支付暂未开放，请使用微信支付');
+    }
     const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
     return this.paymentsService.createAlipayOrder(
       dto.billId,

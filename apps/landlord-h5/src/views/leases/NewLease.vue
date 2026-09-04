@@ -71,8 +71,12 @@
         <!-- 到期日(自动算出,只读展示) -->
         <van-cell title="到期日" :value="form.endDate || '选择起租日和租期后自动计算'" />
 
-        <van-field v-model="form.rent" label="月租金" type="number" :rules="[{ required: true, message: '请填写租金' }]" />
-        <van-field v-model="form.deposit" label="押金" type="number" :rules="[{ required: true, message: '请填写押金' }]" />
+        <van-field v-model="form.rent" label="月租金" type="number" inputmode="decimal" :rules="[{ required: true, message: '请填写租金' }]">
+          <template #button><span class="amount-unit">元</span></template>
+        </van-field>
+        <van-field v-model="depositModel" label="押金" type="number" inputmode="decimal" :rules="[{ required: true, message: '请填写押金' }]">
+          <template #button><span class="amount-unit">元</span></template>
+        </van-field>
         <van-field name="payCycle" label="付款周期">
           <template #input>
             <van-radio-group v-model="form.payCycle" direction="horizontal">
@@ -82,17 +86,21 @@
             </van-radio-group>
           </template>
         </van-field>
-        <van-field v-model="form.carPlate" label="车牌号" placeholder="可选" />
-        <van-field v-model="form.commission" label="佣金" type="number" placeholder="可选" />
+        <van-field v-model="carPlateModel" label="车牌号" placeholder="车牌格式：粤B12345（可选）" />
+        <van-field v-model="form.commission" label="佣金" type="number" inputmode="decimal" placeholder="可选">
+          <template #button><span class="amount-unit">元</span></template>
+        </van-field>
       </van-cell-group>
 
       <van-cell-group inset title="附加费用项">
         <div v-for="(item, idx) in form.feeItems" :key="idx" style="display:flex;align-items:center;padding:4px 16px;">
           <van-field v-model="item.name" placeholder="名称" style="flex:1" />
-          <van-field v-model.number="item.amount" placeholder="金额" type="number" style="flex:1" />
+          <van-field v-model.number="item.amount" placeholder="金额" type="number" inputmode="decimal" style="flex:1">
+            <template #button><span class="amount-unit">元</span></template>
+          </van-field>
           <van-icon name="delete-o" @click="form.feeItems.splice(idx,1)" />
         </div>
-        <van-button size="small" plain @click="form.feeItems.push({name:'',amount:0})" style="margin:8px 16px">+ 添加费用项</van-button>
+        <van-button size="small" plain @click="form.feeItems.push({name:'',amount:''})" style="margin:8px 16px">+ 添加费用项</van-button>
       </van-cell-group>
 
       <div style="margin:16px;">
@@ -120,7 +128,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../../utils/http';
@@ -154,8 +162,36 @@ const form = reactive({
   endDate: '',
   rent: '', deposit: '',
   payCycle: 'MONTHLY', carPlate: '', commission: '',
-  feeItems: [] as { name: string; amount: number }[],
+  feeItems: [] as { name: string; amount: number | '' }[],
 });
+
+const carPlateModel = computed({
+  get: () => form.carPlate,
+  set: (value: string) => {
+    form.carPlate = value.toUpperCase();
+  },
+});
+
+const depositManuallyEdited = ref(false);
+const depositModel = computed({
+  get: () => form.deposit,
+  set: (value: string) => {
+    depositManuallyEdited.value = true;
+    form.deposit = value;
+  },
+});
+
+watch(
+  () => form.rent,
+  (newRent, previousRent) => {
+    if (
+      !depositManuallyEdited.value
+      && (form.deposit === '' || form.deposit === previousRent)
+    ) {
+      form.deposit = newRent;
+    }
+  },
+);
 
 // 初始化时计算到期日
 onMounted(() => { calcEndDate(); });
@@ -245,5 +281,6 @@ function closeResult() {
 
 <style scoped>
 .lease-term { padding: 4px 0; }
+.amount-unit { color: #646566; }
 .bind-qrcode-error { color: #ee0a24; font-size: 13px; }
 </style>

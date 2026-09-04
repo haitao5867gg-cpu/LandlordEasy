@@ -55,22 +55,9 @@
             >
               微信支付
             </van-button>
-            <van-button
-              block
-              plain
-              :loading="creatingMethod === 'alipay'"
-              :disabled="activeMethod !== null"
-              @click="handleAlipayPay"
-            >
-              支付宝
-            </van-button>
           </div>
 
           <van-cell-group v-if="activeMethod" inset title="支付进度" class="payment-progress">
-            <div v-if="activeMethod === 'alipay' && qrCodeImage" class="alipay-qrcode">
-              <van-image :src="qrCodeImage" width="240" height="240" fit="contain" />
-              <p>请截图后使用支付宝 App 扫一扫完成支付</p>
-            </div>
             <p v-if="paymentMode === 'mock'" class="mock-hint">模拟支付中...</p>
             <van-loading class="confirm-loading" size="22">等待支付确认...</van-loading>
             <van-button
@@ -97,7 +84,7 @@ import { useRoute } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../utils/http';
 
-type PaymentMethod = 'wechat' | 'alipay';
+type PaymentMethod = 'wechat';
 type PaymentMode = 'mock' | 'real';
 
 interface BillItem {
@@ -137,12 +124,6 @@ interface WechatOrderResponse {
   wechatParams: WechatParams;
 }
 
-interface AlipayOrderResponse {
-  outTradeNo: string;
-  mode: PaymentMode;
-  qrCodeImage: string;
-}
-
 interface WeixinJSBridge {
   invoke(
     method: 'getBrandWCPayRequest',
@@ -168,7 +149,6 @@ const activeMethod = ref<PaymentMethod | null>(null);
 const creatingMethod = ref<PaymentMethod | null>(null);
 const paymentMode = ref<PaymentMode | null>(null);
 const outTradeNo = ref('');
-const qrCodeImage = ref('');
 const simulating = ref(false);
 
 const paymentChannelMap: Record<string, string> = {
@@ -230,7 +210,6 @@ function handlePaymentSuccess() {
   creatingMethod.value = null;
   paymentMode.value = null;
   outTradeNo.value = '';
-  qrCodeImage.value = '';
   showToast('支付成功');
 }
 
@@ -255,7 +234,6 @@ function startPolling() {
       activeMethod.value = null;
       paymentMode.value = null;
       outTradeNo.value = '';
-      qrCodeImage.value = '';
       showToast('支付结果确认超时，请稍后查看账单');
       return;
     }
@@ -302,7 +280,6 @@ async function handleWechatPay() {
 
   activeMethod.value = 'wechat';
   creatingMethod.value = 'wechat';
-  qrCodeImage.value = '';
   try {
     const response = await http.post('/payments/wechat/create-order', {
       billId: bill.value.id,
@@ -312,27 +289,6 @@ async function handleWechatPay() {
     startPolling();
 
     if (response.mode === 'real') invokeWechatPay(response.wechatParams);
-  } catch {
-    activeMethod.value = null;
-  } finally {
-    creatingMethod.value = null;
-  }
-}
-
-async function handleAlipayPay() {
-  if (!bill.value || activeMethod.value) return;
-
-  activeMethod.value = 'alipay';
-  creatingMethod.value = 'alipay';
-  qrCodeImage.value = '';
-  try {
-    const response = await http.post('/payments/alipay/create-order', {
-      billId: bill.value.id,
-    }) as AlipayOrderResponse;
-    outTradeNo.value = response.outTradeNo;
-    paymentMode.value = response.mode;
-    qrCodeImage.value = response.qrCodeImage;
-    startPolling();
   } catch {
     activeMethod.value = null;
   } finally {
@@ -376,8 +332,6 @@ onBeforeUnmount(() => {
 .payment-actions { display: grid; gap: 12px; padding: 20px 16px; }
 .payment-progress { padding: 16px; }
 .paid-state { display: grid; justify-items: center; gap: 12px; padding: 48px 16px; color: #07c160; }
-.alipay-qrcode { text-align: center; color: #646566; }
-.alipay-qrcode p { margin: 12px 0 20px; }
 .mock-hint { margin: 0 0 12px; text-align: center; color: #ed6a0c; }
 .confirm-loading { display: flex; justify-content: center; margin-bottom: 20px; }
 </style>
