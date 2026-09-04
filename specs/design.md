@@ -142,6 +142,23 @@ JWT 内含 tenantId;接口只返回该租客自己租约的数据。UI 按租约
 
 **本轮范围**:先做成功路径最小可用版本;租客拒签、签署链接过期、房东撤销重新发起这几个边界状态本轮不做,留待下一轮迭代。
 
+### 5.7 租客自助流程 M21:退租违约/换租/在线报修 + 房东群发通知(2026-09-05)
+
+**数据模型**:新增4张表——`RepairRequest`(leaseId/tenantId/roomId/description/status[SUBMITTED→IN_PROGRESS→RESOLVED]/landlordNote/resolvedCost/resolvedBy/resolvedAt)、`LeaseTerminationRequest`(leaseId/tenantId/requestedMoveOutDate/reason/status[PENDING/APPROVED/REJECTED]/suggestedPenalty/finalPenalty/landlordNote/resolvedBy/resolvedAt)、`RoomTransferRequest`(leaseId旧租约/tenantId/preferredRoom/reason/status/targetRoomId/newLeaseId新租约,leaseId和newLeaseId都指向Lease,用具名relation区分)、`Announcement`(title/content/propertyId可空/createdBy/successCount/failCount)。
+
+**核心编排逻辑(`leases.service.ts`,大量复用已有方法而非重新实现)**:
+- 违约金计算:`月租金 × 该租约最近一次ContractSigningTask.penaltyMonths(没有则用ContractSettings.defaultPenaltyMonths)`,只是"建议值",房东审批时可覆盖成`finalPenalty`。
+- 退租批准 = 调用既有`endLease()`(depositRefund=max(0,押金-违约金),depositDeductReason记录违约金),若违约金超过押金,额外调用新增的私有方法`createAdHocBill()`生成一张一次性账单(periodStart用搬离日,冲突时顺延一天重试,避免撞`@@unique([leaseId,periodStart])`)。
+- 换租批准 = 调用既有`endLease()`结束旧租约 → 调用既有`create()`用同一租客手机号在目标房间开新租约(`create()`本身按手机号查找/复用Tenant,不会产生重复记录)→ 调用既有`createContractSigningTask()`(这个方法内部本来就会在tenant.openid已绑定时自动触发`launchContractSigningTaskInternal`——M20.4已经做的能力,这里白捡)。**没有发明任何新的微签调用逻辑**,纯粹是编排三个已验证过的方法。
+- 报修完成时若填了`resolvedCost>0`,顺手创建一条`MaintenanceRecord`,跟房东手动记录的维修台账口径统一。
+- 群发通知:按`propertyId`(可选)过滤出`openid不为空`且有`ACTIVE`租约的Tenant,逐个调用`IWechatCustomerServiceService.sendTextMessage`,如实统计`successCount`/`failCount`存档,不做重试也不假装100%送达。
+
+**前端**:landlord-h5新增`Applications.vue`(三tab统一入口,工作台卡片带待处理数量角标)+`settings/Announcements.vue`(群发通知,复用现有公寓切换器选择范围);tenant-h5新增`LeaseServices.vue`(挂在`/leases/:id/services`,三个子表单+各自的历史/状态展示,不是分成三个路由)。
+
+**范围内的产品判断(供后续接手参考)**:
+- 换租不允许租客直接选目标房间,只能填自由文本"期望房间"——房源具体分布/租金不适合对所有租客公开,目标房间由房东在审批时从空置房间选择。
+- 三类申请不接入新的微信模板消息(会卡在申请审核,M18/M19已经吃过这个亏),先用"房东进App看待办列表"模式;群发通知同理走客服消息不走模板消息。GasCan已知晓这个决定,后续需要时可以再补模板消息申请。
+
 ## 6. API 约定
 
 REST,前缀 /api/v1,统一响应 `{code, message, data}`。分组:auth、buildings、room-types、rooms、tenants、leases、bills、payments、dashboard(逾期看板/空置看板/到期预警/报表)、admin(白名单、系统配置)。具体端点 Kiro 按需求自行设计,遵循 RESTful 惯例即可。

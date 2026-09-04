@@ -671,6 +671,31 @@ GasCan拍板的方案:
 > 5. **GasCan随后主动要求"进入自主模式,用真实Chrome把电子签约全流程测试一遍,确保没问题"**(为次日他本人真实测试探路)。由于M20.4~20.7在19.11/19.12验证之后又层层叠加了自动发起、authType切换、模板消息、支付宝隐藏、表单体验优化等改动,自19.12之后没人做过一次完整的端到端回归——这次补上:新建一次性测试房源(S栋411,leaseId=982,租客"M19测试租客")→真实浏览器走完整"新签租约"表单(验证20.7的押金自动同步/车牌自动大写/附加费用默认空值三项体验修复仍然生效)→确认签约成功跳转到租约详情页(验证19.11修复的跳转bug未回归)→构造真实微信XML关注事件绑定M20的租客二维码(`bindSceneValue`)→在已绑定openid的前提下点击"生成电子签约"，验证20.4"去人工确认闸"后的自动发起链路——**真实调用微签`eachSign/create`成功**(消耗1份真实额度,`positionDTOS`用20.3修复后的0-1000归一化坐标+`authType=1`,与20.5的决定一致)→用19.11新增的"下载查看签署进度"按钮下载真实PDF核实(甲方红章已盖、乙方签字栏空白,预览不改状态)→点击"确认已签署"完整走完手动确认路径,状态正确转`SIGNED`、`signedPdfUrl`落库、`查看/下载合同`链接可用。全程通过`claude-in-chrome`(用户真实Chrome)操作,不是脚本模拟。**结论:M19+M20全部机制在20.4~20.7层层修改之后依然完整健康,未发现任何新增回归问题**。真实微信客服消息/模板消息因测试用的是虚构openid,按预期收到`errcode=40003 invalid openid`但不影响主流程(设计上就是fire-and-forget,不阻塞状态转换)。测试数据(tenant 975、lease 982、contract_signing_task 12、deposit_record、两个uploads下的测试PDF)测试完毕后已全部清理,room 426恢复`VACANT`。
 > 6. **遗留观察,未处理**:核查中发现dev库有一条独立于本次测试的`contract_signing_task`(id=10,leaseId=980)自2026-09-03起一直停留在`CREATED`状态未完成签署,不是本次测试产生、也未受本次改动影响,原样保留未动——留待GasCan确认这是不是他自己某次测试中断的记录。
 
+## M21 租客自助流程扩展:退租违约/换租/在线报修 + 房东群发通知(2026-09-05立项+完成,GasCan授权自主设计)
+
+> 背景:GasCan深夜表态"剩下的功能你可以看看网上成熟的企业级房东管理应用都做了啥,自己判断加,目标是在Claude周额度刷新前尽可能完善系统",并具体点了三个方向(退租违约、换租、在线报修)+追加了房东群发通知,要求"自己作为产品经理去设计"。开工前问了GasCan两个关键设计决策(换租是否重新走电子签约、是否要新申请模板消息通知),其余全部由Claude Code自主设计,详细方案见`specs/design.md` 5.7节。全程Claude Code直接实现(未走Kiro CLI——GasCan明确要求"优先用你自己的额度,保留Kiro的月额度,等周额度重置后再用Kiro")。
+
+- [x] 21.1 **Prisma schema:新增RepairRequest/LeaseTerminationRequest/RoomTransferRequest/Announcement四张表。**
+> 完成说明:详见`specs/design.md` 5.7节数据模型段落。`prisma generate`本地校验通过,`prisma db push`在dev库执行(纯新增表,无数据丢失警告)。
+
+- [x] 21.2 **后端:退租违约申请(租客提交+违约金建议计算+房东审批,复用endLease做实际结算+超额自动生成补差账单)。**
+> 完成说明:`leases.service.ts`新增`createTerminationRequest`/`previewTerminationPenalty`/`listTerminationRequests`/`listMyTerminationRequests`/`approveTerminationRequest`/`rejectTerminationRequest`/私有`createAdHocBill`;`leases.controller.ts`+`tenant-api.controller.ts`对应路由(注意`termination-requests`字面量路由必须声明在`:id`路由之前,已处理)。`jest`新增12个用例(`leases-requests.service.spec.ts`)覆盖违约金计算(有/无电子签约记录两种取值来源)、押金足够/不足两种结算分支、重复提交拦截、已处理申请不能重复审批。**真实浏览器端到端验证**:新建测试房源"M21测试专用"公寓下的测试租约(月租¥2000/押金¥2000),tenant-h5提交退租(期望搬离日+原因),页面正确显示预估违约金¥2000;landlord-h5"待处理申请-退租"tab审批时手动调高违约金到¥2500(超过押金,故意测试补差分支),批准后查库确认:租约ENDED、押金记录DEDUCT¥2000(违约金¥2500)、自动生成一张¥500的一次性账单(BillItem"违约金差额")、房间恢复VACANT——租客侧`GET /tenant/bills`确认能看到这张¥500待付账单。测试数据已清理。
+
+- [x] 21.3 **后端:换租申请(租客提交意向+房东选定目标房间审批,自动编排结束旧租约→开新租约→自动发起新合同电子签约)。**
+> 完成说明:`leases.service.ts`新增`createTransferRequest`/`listTransferRequests`/`listMyTransferRequests`/`approveTransferRequest`(核心编排:调`endLease`结束旧租约→调`create`用同一租客手机号在目标房间开新租约,验证过`create`内部按手机号查找/复用Tenant不会产生重复档案→调`createContractSigningTask`,该方法在tenant.openid已绑定时会自动触发真实微签`eachSign/create`,是M20.4已有能力的直接复用,没有新写微签调用逻辑)/`rejectTransferRequest`。`jest`新增测试覆盖目标房间非空置校验、租客缺身份证号且审批时未补充的拦截、成功路径的三个方法调用链断言、重复审批拦截。**真实浏览器+真实微签额度端到端验证**:测试租客B(月租¥2200房)提交换租(期望房间"101"+原因),landlord-h5审批时用真实空置房间picker选中"测试楼101"、确认新租金/押金/到期日(预填自动带出原租约数值),点击"批准换租"后**真实调用微签`eachSign/create`成功**(返回真实`weiqianBId`)——查库确认:旧租约ENDED(endReason"换租至101")、新租约在目标房间下ACTIVE且tenantId与原租客一致(未产生重复Tenant)、原房间VACANT/新房间RENTED、新租约的ContractSigningTask状态CREATED(真实发起成功)。这是本轮验证难度最高的一条链路,一次性完整跑通没有发现问题。测试数据已清理。
+
+- [x] 21.4 **后端+前端:租客在线报修(提交问题描述,房东标记处理中/已完成,完成时可选填费用自动生成维修记录)。**
+> 完成说明:扩展现有`maintenance`模块(而不是新建模块,复用房东既有维修台账语义)——`maintenance.service.ts`新增`createRepairRequest`/`listMyRepairRequests`/`listRepairRequests`/`updateRepairRequest`(标记RESOLVED且填了费用时自动创建一条`MaintenanceRecord`,跟房东手动记录走同一张表、同一套报表统计口径,不是新开一套账)。`jest`新增7个用例(`maintenance.service.spec.ts`)覆盖租约归属校验、已完成报修不能再改、有/无费用两种resolve分支是否生成维修记录。**真实浏览器端到端验证**:tenant-h5提交"空调不制冷"报修,landlord-h5"待处理申请-报修"tab立即看到(带待处理数量角标),填维修费用¥150点"标记已完成",查库确认`repair_requests.status=RESOLVED`+新增一条`maintenance_records`内容"租客报修:空调不制冷..."金额¥150。测试数据已清理。
+
+- [x] 21.5 **前端:房东端统一"待处理申请"入口(landlord-h5新增Applications.vue三tab页+工作台卡片角标)+租客端在线服务页(tenant-h5新增LeaseServices.vue,三个子表单+历史状态)。**
+> 完成说明:`Applications.vue`用`van-tabs`三个tab(报修/退租/换租)各自列表+详情弹窗(审批/驳回/标记状态),`Home.vue`新增"待处理申请"卡片(三类pending数量之和,加入现有`Promise.allSettled`并行拉取模式);`LeaseServices.vue`挂在`/leases/:id/services`,`MyLeases.vue`的ACTIVE租约行改成可点击跳转(之前是纯展示)。**自查复核发现并修复一个真实UX bug**:三个详情弹窗在状态已经是已处理(RESOLVED/APPROVED/REJECTED)时,`show-cancel-button`和`show-confirm-button`同时判false导致弹窗没有任何按钮可关闭,只能刷新页面才能脱困——改成始终显示一个按钮(待处理时"取消"/已处理时"关闭"),已提交独立commit`bbedcbe`修复。真实浏览器测试中还发现违约金超额提示文案(van-notice-bar)默认单行显示不全,补`wrapable`属性修复(commit`281be61`)。两端`vue-tsc -b`+`vite build`全程0错误。
+
+- [x] 21.6 **后端+前端:房东群发通知(Announcement模块,走客服消息不走模板消息,如实统计成功/失败数量)。**
+> 完成说明:新增独立`announcements`模块(`announcements.service.ts`按`propertyId`可选过滤`openid`不为空且有ACTIVE租约的Tenant,逐个调用现有`IWechatCustomerServiceService.sendTextMessage`,统计成功/失败数量存档,不重试不假装100%必达);`Announcements.vue`(landlord-h5系统设置新增入口)复用现有公寓切换器组件选发送范围,发送前二次确认弹窗明确文案范围,发送后显示历史记录列表(标题/内容/范围/成功数/失败数)。`jest`新增3个用例覆盖openid+ACTIVE过滤条件、propertyId过滤、无匹配租客时不报错。**真实浏览器端到端验证(格外注意不能误发给真实租客)**:专门新建了一个隔离测试公寓"M21测试专用"(单独property,内部只有1个测试租客且是虚构openid),确认查库该property下只有这1个ACTIVE租客后,才在真实群发通知页面选择这个公寓范围发送测试消息——发送结果"成功0/失败1"(虚构openid预期内失败),历史记录正确展示。**全程未对真实租客发送任何测试消息**,验证完毕后测试property/tenant/lease等数据已全部清理,不留痕迹。
+
+- [x] 21.7 **全量回归验证与部署。**
+> 完成说明:server `tsc --noEmit`0错误、`jest`最终13套件123用例全过(本轮净增22个用例)、真实`nest build`+本机boot smoke test(用假DATABASE_URL启动,确认所有新模块含跨模块依赖`AnnouncementsModule`/`LeasesModule`新增导出/`TenantApiModule`新导入`LeasesModule`+`MaintenanceModule`均正确完成NestJS依赖注入解析,只在连接假数据库那一步报错,证明没有DI循环依赖或缺失export——这类问题`tsc`/`jest`都测不出来,必须真实boot)。两端`vue-tsc -b`+`vite build`均0错误。已推送`dev`分支(4个commit:`e3e00b1`功能主体、`bbedcbe`弹窗关闭按钮修复、`281be61`提示条wrapable修复,另有一次纯文档commit),部署过程GitHub从服务器出网多次超时(境内已知问题),两次改用`git bundle`+`scp`的方式绕过(不依赖GitHub连通性,比之前的"scp单个文件"方案更适合多文件批量变更),`prisma db push`+两端build+`nest build`+PM2重启+nginx reload全部手动分步执行并逐步验证,最终确认服务器`git log -1`哈希与本地一致、健康检查200、`unstable_restarts=0`。**全程仍只在dev分支/dev环境,未合并main、未部署生产**。
+
 ## P2(暂不开工)
 (空)
 
