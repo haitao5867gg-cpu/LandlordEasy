@@ -61,7 +61,8 @@
     <van-dialog
       v-model:show="showRepairDialog"
       title="报修详情"
-      :show-cancel-button="currentRepair?.status !== 'RESOLVED'"
+      show-cancel-button
+      cancel-button-text="关闭"
       :show-confirm-button="false"
     >
       <div class="dialog-body" v-if="currentRepair">
@@ -88,8 +89,9 @@
     <van-dialog
       v-model:show="showTerminationDialog"
       title="退租申请审批"
-      :show-cancel-button="currentTermination?.status === 'PENDING'"
-      :confirm-button-text="'批准退租'"
+      show-cancel-button
+      :cancel-button-text="currentTermination?.status === 'PENDING' ? '取消' : '关闭'"
+      confirm-button-text="批准退租"
       :show-confirm-button="currentTermination?.status === 'PENDING'"
       :before-close="beforeCloseTermination"
     >
@@ -120,8 +122,9 @@
     <van-dialog
       v-model:show="showTransferDialog"
       title="换租申请审批"
-      :show-cancel-button="currentTransfer?.status === 'PENDING'"
-      :confirm-button-text="'批准换租(将发起新合同签约)'"
+      show-cancel-button
+      :cancel-button-text="currentTransfer?.status === 'PENDING' ? '取消' : '关闭'"
+      confirm-button-text="批准换租(将发起新合同签约)"
       :show-confirm-button="currentTransfer?.status === 'PENDING'"
       :before-close="beforeCloseTransfer"
     >
