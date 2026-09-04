@@ -647,6 +647,12 @@ GasCan拍板的方案:
 > 1. **短信问题确认根因并切换**:GasCan联系微签技术人员用官方demo(`authType="1"`)实测确认收到短信,回复"我选择1"。`real-weiqian.service.ts`的`authType`从`'2'`(实名认证)切成`'1'`(手机验证码)——**这两者互斥,不是简单开关**:`authType=1`换来短信通道,代价是接收方签署时的身份核验方式从"微签实名认证"降级成"收短信验证码",法律效力更弱。这是GasCan在明确知晓这个取舍后做的选择,不是技术层面能兼得的方案。`tsc`0错误、`jest`97用例全过(`weiqian.service.spec.ts`断言同步更新),已部署dev、PM2`status=online`、健康检查200。
 > 2. **客服消息48小时窗口问题,排查出可行方向但未实施**:GasCan问"用户不主动发消息是不是就没法推送"——答案是"用错了消息类型,不是没办法"。项目里已有一套**模板消息**机制(`RealWechatNotifyService`,`POST /cgi-bin/message/template/send`),现有的房租催缴提醒就是用它,不受客服消息那个严格的互动窗口限制。**用真实access_token查了`GET /cgi-bin/template/get_all_private_template`**,发现已有的两个模板:一个是房租提醒专用的、字段固定;另一个"订阅模板消息"(`{{content.DATA}}`单一自由字段,原以为能直接复用发任意文本)——**实测用这个模板真实调`message/template/send`发送,返回`errcode=40037 invalid template_id`,证实它其实是"一次性订阅消息"类型模板(需要用户逐次点击授权链接才能收,不是能随时推送的常规模板消息),用不了**。结论:微信没有开放"搜索模板库"的接口,选新模板这一步必须GasCan自己上公众号后台"模板消息"页面搜索/挑选;选好之后"添加到账号拿到可用template_id"这一步可以由Claude Code通过接口完成,不需要GasCan自己点添加。**等GasCan挑好模板告诉具体信息后再实施**,这次只到"查清楚方向+验证了一条死路"为止,没有改代码。
 
+- [ ] 20.6 **接上"合同签署成功提醒"模板消息,作为签署完成通知的保底通道(阻塞:枚举字段审核中)。**
+> 进度(2026-09-04,代码已完成部署,功能被微信侧枚举值审核卡住,未勾选完成):
+> 1. **代码实现**:GasCan从公众号后台模板库挑了"合同签署成功提醒"(字段:`thing1`房屋地址/`character_string2`合同编号/`const3`合同类型/`time4`合同期/`thing5`签约人)+"租赁合同终止通知"(备用,给以后退租/`endLease`功能用,这次没接)两个模板。`tryConfirmSigned`(`leases.service.ts`)在原有客服消息之后,只要配置了`WECHAT_TEMPLATE_CONTRACT_SIGNED`环境变量就并行发一条模板消息(不受48小时窗口限制,两条消息都发不冲突);新注入`IWechatNotifyService`,`tryConfirmSigned`的查询expand了`room.building.property`供`buildPropertyAddress`复用。`.env.example`补充说明。`tsc`0错误,`jest`10套件98用例全过(新增2个用例:配置了模板ID时正确调用+字段值校验、未配置时不调用)。已部署dev,PM2`status=online`、健康检查200。
+> 2. **真实API测试发现`const3`是固定枚举字段,不是自由文本,连续两轮排查**:第一次用`新签合同`/`收房合同`(模板示例值)测都报`errcode=47003 const3.value invalid`;GasCan在后台找到"合同类型"字段旁边的"管理枚举值"入口,发现之前那版模板的枚举值"已经审核了,没法修改"(说明这个字段的枚举值本身需要走微信审核,不是配置了就能用),于是删掉重建了模板(新template_id `3Xh3U9kQ-ZXxmyNYL-5Djj6DBNxp124Pm0-tZaEhl8g`)、按Claude建议添加了枚举值"新签合同"/"续签合同"——**用新模板ID重新测试,仍然报`const3.value invalid`,GasCan核实枚举值状态是"审核中",确认是这个原因**。dev环境`.env.dev`的`WECHAT_TEMPLATE_CONTRACT_SIGNED`已经更新成新template_id,代码逻辑本身(字段拼装、发送时机、并行不冲突)已经用真实API直接测试到"发送请求本身格式正确、只差枚举值审核"这一步,**没有为了这个再消耗真实签署额度走完整流程**。
+> 3. **阻塞,等GasCan通知审核结果**:枚举值审核通过后不需要再改代码,直接会生效(GasCan说了会提醒),届时补一次真实签署确认这条模板消息真的收到,再勾选完成。
+
 ## P2(暂不开工)
 (空)
 
