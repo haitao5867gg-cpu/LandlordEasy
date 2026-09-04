@@ -113,7 +113,14 @@ export class BillsService {
   private async sendManualReminder(billId: number): Promise<void> {
     const bill = await this.prisma.bill.findUnique({
       where: { id: billId },
-      include: { lease: { include: { tenant: true } } },
+      include: {
+        lease: {
+          include: {
+            tenant: true,
+            room: { include: { building: { include: { property: true } } } },
+          },
+        },
+      },
     });
     if (!bill) throw new NotFoundException('账单不存在');
     if (!['PENDING', 'OVERDUE'].includes(bill.status)) {
@@ -138,19 +145,23 @@ export class BillsService {
     if (!tenant.openid) throw new BadRequestException('租客未绑定微信');
 
     const type = this.getReminderType(bill.dueDate, today);
-    const keyword3 = {
-      PRE: '即将到期',
-      DUE: '今日到期',
-      OVERDUE: '已逾期',
-    }[type];
+    // 字段名对应微信公众号后台真实配置的"房租账单催缴通知"模板(2026-09-04用真实
+    // access_token查get_all_private_template核实),跟reminders.service.ts自动
+    // 催缴用的是同一个模板,字段必须保持一致:
+    // amount3=金额 / time4=账单周期 / thing5=账单类型 / thing7=房间名称 / time10=到期时间
     const templateId = process.env.WECHAT_TEMPLATE_RENT_REMINDER || 'RENT_REMINDER';
+    const room = bill.lease.room;
     const success = await this.wechatNotify.sendTemplateMessage({
       openid: tenant.openid,
       templateId,
       data: {
-        keyword1: { value: `${bill.totalAmount}元` },
-        keyword2: { value: bill.dueDate.toISOString().split('T')[0] },
-        keyword3: { value: keyword3 },
+        amount3: { value: `${bill.totalAmount}` },
+        time4: {
+          value: `${bill.periodStart.toISOString().split('T')[0]}~${bill.periodEnd.toISOString().split('T')[0]}`,
+        },
+        thing5: { value: '房租账单' },
+        thing7: { value: `${room.building.property.name}${room.building.name}${room.roomNo}` },
+        time10: { value: bill.dueDate.toISOString().split('T')[0] },
       },
     });
 

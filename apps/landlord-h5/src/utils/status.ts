@@ -22,6 +22,7 @@ export const paymentStatusMap: Record<string, string> = {
 export const paymentChannelMap: Record<string, string> = {
   QRCODE: '收款码',
   WECHATPAY: '微信支付',
+  ALIPAY: '支付宝',
   CASH: '现金',
   TRANSFER: '转账',
 };

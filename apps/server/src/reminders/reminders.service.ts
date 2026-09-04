@@ -26,7 +26,14 @@ export class RemindersService {
     // 待付+逾期账单
     const bills = await this.prisma.bill.findMany({
       where: { status: { in: ['PENDING', 'OVERDUE'] } },
-      include: { lease: { include: { tenant: true } } },
+      include: {
+        lease: {
+          include: {
+            tenant: true,
+            room: { include: { building: { include: { property: true } } } },
+          },
+        },
+      },
     });
 
     let sentCount = 0;
@@ -47,14 +54,24 @@ export class RemindersService {
       if (alreadySent) continue;
 
       // 发送提醒
+      // 字段名对应微信公众号后台真实配置的"房租账单催缴通知"模板(2026-09-04用真实
+      // access_token查get_all_private_template核实):
+      // amount3=金额 / time4=账单周期 / thing5=账单类型 / thing7=房间名称 / time10=到期时间
+      // 此前用的keyword1/2/3是旧模板占位字段名,跟这个真实模板完全对不上,微信会返回
+      // errcode非0(数据格式不匹配),发送一直静默失败,PM2日志有error但没人盯着看
       const templateId = process.env.WECHAT_TEMPLATE_RENT_REMINDER || 'RENT_REMINDER';
+      const room = bill.lease.room;
       const success = await this.wechatNotify.sendTemplateMessage({
         openid: tenant.openid,
         templateId,
         data: {
-          keyword1: { value: `${bill.totalAmount}元` },
-          keyword2: { value: bill.dueDate.toISOString().split('T')[0] },
-          keyword3: { value: shouldSend.type === 'OVERDUE' ? '已逾期' : '即将到期' },
+          amount3: { value: `${bill.totalAmount}` },
+          time4: {
+            value: `${bill.periodStart.toISOString().split('T')[0]}~${bill.periodEnd.toISOString().split('T')[0]}`,
+          },
+          thing5: { value: '房租账单' },
+          thing7: { value: `${room.building.property.name}${room.building.name}${room.roomNo}` },
+          time10: { value: bill.dueDate.toISOString().split('T')[0] },
         },
       });
 
