@@ -6,6 +6,7 @@ import { IWechatQrcodeService } from '../wechat/wechat-qrcode.interface';
 import { ContractPdfService } from '../contract-pdf/contract-pdf.service';
 import { IWeiQianService } from '../weiqian/weiqian.interface';
 import { IWechatCustomerServiceService } from '../wechat/wechat-customer-service.interface';
+import { IWechatNotifyService } from '../wechat/wechat-notify.interface';
 
 describe('LeasesService contract signing tasks', () => {
   let service: LeasesService;
@@ -14,6 +15,7 @@ describe('LeasesService contract signing tasks', () => {
   let contractPdf: jest.Mocked<ContractPdfService>;
   let weiqian: jest.Mocked<IWeiQianService>;
   let wechatCustomer: jest.Mocked<IWechatCustomerServiceService>;
+  let wechatNotify: jest.Mocked<IWechatNotifyService>;
 
   const originalPublicBaseUrl = process.env.SERVER_PUBLIC_BASE_URL;
   const originalSignBaseUrl = process.env.WEIQIAN_SIGN_BASE_URL;
@@ -97,12 +99,14 @@ describe('LeasesService contract signing tasks', () => {
       downloadSignedFile: jest.fn(),
     };
     wechatCustomer = { sendTextMessage: jest.fn() };
+    wechatNotify = { sendTemplateMessage: jest.fn().mockResolvedValue(true) };
     service = new LeasesService(
       prisma,
       wechatQrcode,
       contractPdf,
       weiqian,
       wechatCustomer,
+      wechatNotify,
     );
     process.env.SERVER_PUBLIC_BASE_URL = 'https://landlordeasy.cn/api/v1';
     process.env.WEIQIAN_SIGN_BASE_URL = 'https://sign.weiqian.example';
@@ -397,6 +401,8 @@ describe('LeasesService contract signing tasks', () => {
   });
 
   it('download 返回 PDF 时归档、转 SIGNED 并自动绑定 openid', async () => {
+    const originalTemplateId = process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED;
+    process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED = 'tpl-contract-signed';
     const signedPdf = Buffer.from('%PDF-signed');
     (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue({
       ...followedTask,
@@ -410,24 +416,65 @@ describe('LeasesService contract signing tasks', () => {
       .spyOn(service as unknown as { saveSignedPdf: (id: number, pdf: Buffer) => string }, 'saveSignedPdf')
       .mockReturnValue('/uploads/contract-10-signed.pdf');
 
-    await expect(service.tryConfirmSigned(10)).resolves.toBe(true);
-    expect(saveSpy).toHaveBeenCalledWith(10, signedPdf);
-    expect(prisma.contractSigningTask.updateMany).toHaveBeenCalledWith({
-      where: { id: 10, status: 'CREATED' },
-      data: {
-        status: 'SIGNED',
-        signedPdfUrl: '/uploads/contract-10-signed.pdf',
-        signedAt: expect.any(Date),
-      },
+    try {
+      await expect(service.tryConfirmSigned(10)).resolves.toBe(true);
+      expect(saveSpy).toHaveBeenCalledWith(10, signedPdf);
+      expect(prisma.contractSigningTask.updateMany).toHaveBeenCalledWith({
+        where: { id: 10, status: 'CREATED' },
+        data: {
+          status: 'SIGNED',
+          signedPdfUrl: '/uploads/contract-10-signed.pdf',
+          signedAt: expect.any(Date),
+        },
+      });
+      expect(prisma.tenant.update).toHaveBeenCalledWith({
+        where: { id: 7 },
+        data: { openid: 'openid-tenant' },
+      });
+      expect(wechatCustomer.sendTextMessage).toHaveBeenCalledWith(
+        'openid-tenant',
+        '【2号楼301】您的租房合同已签署完成,感谢配合。如有疑问请直接联系房东',
+      );
+      expect(wechatNotify.sendTemplateMessage).toHaveBeenCalledWith({
+        openid: 'openid-tenant',
+        templateId: 'tpl-contract-signed',
+        data: {
+          thing1: { value: '阳光公寓2号楼301室' },
+          character_string2: { value: 'LE-10' },
+          const3: { value: '新签合同' },
+          time4: { value: '2026-09-01~2027-08-31' },
+          thing5: { value: '张三' },
+        },
+      });
+    } finally {
+      if (originalTemplateId === undefined) delete process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED;
+      else process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED = originalTemplateId;
+    }
+  });
+
+  it('未配置 WECHAT_TEMPLATE_CONTRACT_SIGNED 时不发送签署完成模板消息', async () => {
+    const originalTemplateId = process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED;
+    delete process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED;
+    const signedPdf = Buffer.from('%PDF-signed');
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue({
+      ...followedTask,
+      status: 'CREATED',
+      weiqianBId: 'task-bid',
     });
-    expect(prisma.tenant.update).toHaveBeenCalledWith({
-      where: { id: 7 },
-      data: { openid: 'openid-tenant' },
-    });
-    expect(wechatCustomer.sendTextMessage).toHaveBeenCalledWith(
-      'openid-tenant',
-      '【2号楼301】您的租房合同已签署完成,感谢配合。如有疑问请直接联系房东',
-    );
+    weiqian.downloadSignedFile.mockResolvedValue(signedPdf);
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (prisma.tenant.update as jest.Mock).mockResolvedValue({});
+    jest
+      .spyOn(service as unknown as { saveSignedPdf: (id: number, pdf: Buffer) => string }, 'saveSignedPdf')
+      .mockReturnValue('/uploads/contract-10-signed.pdf');
+
+    try {
+      await expect(service.tryConfirmSigned(10)).resolves.toBe(true);
+      expect(wechatNotify.sendTemplateMessage).not.toHaveBeenCalled();
+    } finally {
+      if (originalTemplateId === undefined) delete process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED;
+      else process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED = originalTemplateId;
+    }
   });
 
   it('确认签署成功但任务没有 followerOpenid 时不发送签署完成通知', async () => {

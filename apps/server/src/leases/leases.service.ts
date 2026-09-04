@@ -26,6 +26,10 @@ import {
   IWechatCustomerServiceService,
   WECHAT_CUSTOMER_SERVICE,
 } from '../wechat/wechat-customer-service.interface';
+import {
+  IWechatNotifyService,
+  WECHAT_NOTIFY_SERVICE,
+} from '../wechat/wechat-notify.interface';
 import { ContractPdfService } from '../contract-pdf/contract-pdf.service';
 import {
   ContractFacilities,
@@ -66,6 +70,8 @@ export class LeasesService {
     @Inject(WEIQIAN_SERVICE) private readonly weiqian: IWeiQianService,
     @Inject(WECHAT_CUSTOMER_SERVICE)
     private readonly wechatCustomerService: IWechatCustomerServiceService,
+    @Inject(WECHAT_NOTIFY_SERVICE)
+    private readonly wechatNotify: IWechatNotifyService,
   ) {}
 
   async findAll(roomId?: number, status?: string) {
@@ -358,7 +364,12 @@ ${signUrl}
     const task = await this.prisma.contractSigningTask.findUnique({
       where: { id: taskId },
       include: {
-        lease: { include: { tenant: true, room: { include: { building: true } } } },
+        lease: {
+          include: {
+            tenant: true,
+            room: { include: { building: { include: { property: true } } } },
+          },
+        },
       },
     });
     if (!task || task.status !== 'CREATED' || !task.weiqianBId) return false;
@@ -380,6 +391,25 @@ ${signUrl}
         task.followerOpenid,
         `【${roomLabel}】您的租房合同已签署完成,感谢配合。如有疑问请直接联系房东`,
       );
+
+      // 客服消息受微信48小时互动窗口限制、经常发不出去;模板消息不受这个限制,
+      // 作为保底通道并行发送,只要模板ID配置了就发,两条消息都发不影响业务。
+      const templateId = process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED;
+      if (templateId) {
+        await this.wechatNotify.sendTemplateMessage({
+          openid: task.followerOpenid,
+          templateId,
+          data: {
+            thing1: { value: this.buildPropertyAddress(task.lease.room) },
+            character_string2: { value: `LE-${task.id}` },
+            const3: { value: task.type === 'RENEW' ? '续签合同' : '新签合同' },
+            time4: {
+              value: `${task.lease.startDate.toISOString().split('T')[0]}~${task.lease.endDate.toISOString().split('T')[0]}`,
+            },
+            thing5: { value: task.lease.tenant.name },
+          },
+        });
+      }
     }
 
     const tenant = task.lease.tenant;
