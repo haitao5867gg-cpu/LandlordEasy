@@ -8,11 +8,7 @@ import {
 import { createDecipheriv, createVerify, randomBytes } from 'crypto';
 import QRCode from 'qrcode';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  ConfirmPaymentDto,
-  ManualPaymentDto,
-  TenantReportPaymentDto,
-} from './payments.dto';
+import { ConfirmPaymentDto, ManualPaymentDto } from './payments.dto';
 import {
   IWechatPayService,
   WECHAT_PAY_SERVICE,
@@ -120,23 +116,6 @@ export class PaymentsService {
     });
     await this.checkBillPaid(dto.billId);
     return payment;
-  }
-
-  /** 租客上报 */
-  async tenantReport(dto: TenantReportPaymentDto) {
-    const bill = await this.prisma.bill.findUnique({ where: { id: dto.billId } });
-    if (!bill) throw new NotFoundException('账单不存在');
-
-    return this.prisma.payment.create({
-      data: {
-        billId: dto.billId,
-        channel: 'QRCODE',
-        amount: dto.amount,
-        status: 'PENDING_CONFIRM',
-        proofUrl: dto.proofUrl,
-        paidAt: new Date(dto.paidAt),
-      },
-    });
   }
 
   async createWechatOrder(
