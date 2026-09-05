@@ -7,7 +7,7 @@ As of 2026-09-05 UTC. Release decision: **NO-GO**.
 - Both match the handoff; only main/dev branches and no open Issues/PRs at initial check.
 - Both branches report unprotected. REL-003 must distinguish CI existence from enforceable merge protection.
 - AGENTS.md, COLLABORATION.md and historical specs already exist. Control plane supplements historical records; current release priority and owner delegation follow the 2026-09-05 handoff.
-- Work branch: release/v1-control-plane, based on the pinned dev commit. main/dev are not deployment targets for this task.
+- Control plane: release/v1-control-plane, commit a166fa0 (draft PR #6). Security work branch: fix/sec001-contract-access, based on a166fa0. main/dev are not deployment targets for this task.
 
 ## Evidence classes
 VERIFIED = directly checked this session; HISTORICAL = prior report; PENDING = not yet tested; BLOCKED = unmet prerequisite. Every runtime result must name environment and tested commit.
@@ -18,7 +18,7 @@ Handoff estimates 85–90% internal completeness / 70–75% safe release readine
 ## Release work
 | ID | Priority | State | Next evidence |
 |---|---|---|---|
-| SEC-001 | P0 | IN_PROGRESS | authenticated PDF paths, old URL denial, migration, regression |
+| SEC-001 | P0 | LOCAL_VERIFIED / DEPLOYMENT_PENDING | dev/prod proxy + migration + real WeChat verification |
 | SEC-002 | P1 | READY | retired report route removal or ownership checks |
 | REL-001 | P1 | READY | atomic approvals and concurrent/failure tests |
 | REL-002 | P1 | READY | fail-closed startup validation |
@@ -38,3 +38,12 @@ Legal text and safety undertaking (HA-001/002) are deferred by Haitao for a late
 - [REL-001](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/3) — specs/REL-001.md
 - [REL-002](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/4) — specs/REL-002.md
 - [REL-003](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/5) — specs/REL-003.md
+
+## Latest checkpoint — 2026-09-05
+- Control plane and five specs committed in a166fa0; GitHub draft PR #6 targets dev. main/dev remain at original pinned hashes (rechecked before security delivery).
+- SEC-001: private PDF storage, authenticated landlord/tenant downloads and tenant signed-contract discovery; app/Nginx legacy URL denial; dry-run-first offline migration; two H5 blob-download interactions.
+- Independent review reproduced a direct-backend symlink alias leak and fixed it; raw HTTP encoding/path/link regressions added.
+- Current local evidence: backend typecheck PASS; Jest 15 suites / 166 tests PASS including real Chromium PDF generation; both H5 typecheck/build PASS; five real Chromium UI fixture cases PASS; ten migration fixtures PASS; git diff --check PASS.
+- All DB/provider inputs in these tests are isolated fixtures. Browser tests use synthetic API responses. Runtime dependencies (headless shell and CJK font) installed locally only. See specs/SEC-001-VERIFICATION.md for commands and boundaries.
+- Not deployed; no real contracts migrated; no actual Nginx loaded-config or real WeChat WebView evidence. SEC-001 issue stays open. CI still absent, no PR merged, release remains NO-GO.
+- Next engineering priority: close SEC-001 dev rehearsal evidence in a connected execution environment; dispatch SEC-002, REL-002 and REL-003 independently, then REL-001 with leases-service ownership coordinated. Do not wait for legal input to do ordinary engineering.

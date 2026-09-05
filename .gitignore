@@ -44,3 +44,9 @@ prisma/migrations/**/migration_lock.toml
 # SSH keys and helper scripts
 .ssh-helper.sh
 *.pem
+
+# Private contract archives must never be committed
+**/data/private/
+
+# Python migration-test bytecode
+__pycache__/
