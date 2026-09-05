@@ -1,16 +1,22 @@
-# LandlordEasy(房屋收租系统)—— Codex 项目须知
+# LandlordEasy — Agent Bootstrap
 
-> 这个文件会在每次会话开始时自动加载。不管这是全新会话,还是长对话压缩/重启之后的会话,**先按下面的顺序读完文档,再做任何判断或决策**——本仓库是这个项目的唯一信息源,不要依赖对话记忆里的印象。
+> 2026-09-05 V1.0 Release Management 生效。Haitao 为 Product Owner；Commander 管理优先级、Spec、验收与发布。以 GitHub 文档恢复状态，不依赖长聊天。
 
-## 开工前必读(按顺序)
+## 开工顺序
+1. 本文件。
+2. `project-brain/CURRENT_STATE.md`。
+3. `project-brain/RELEASE_PLAN.md`。
+4. 分配的 `specs/SEC-*.md` / `specs/REL-*.md` 和对应 Issue。
+5. 相关代码；需要历史依据时查 `specs/requirements.md`、`specs/design.md`、`specs/tasks.md`、`review/review-notes.md`、`PROJECT_STATUS.md`。
 
-1. `COLLABORATION.md` —— 协作规则、交付标准、Kiro CLI headless 调用方式,全部硬性要求都在这
-2. `PROJECT_STATUS.md` —— Kiro 维护的项目状态文档,文末"最新状态"章节记录了最近一次线上部署的详细验证过程(域名/HTTPS/微信 real 模式/白名单/稳定性测试),跟 review-notes.md 的"交接现状快照"互补,两份都要看
-3. `specs/requirements.md` / `specs/design.md` —— 需求和技术方案
-4. `specs/tasks.md` —— 任务清单和当前进度,**认这份文件里的勾选状态,不要认对话记忆里以为的进度**
-5. `review/review-notes.md` —— 尤其看最后的"交接现状快照"和最近几条 Review,了解当前卡点和已知问题
-6. `questions.md` —— 有没有悬而未决的问题
-7. `KIRO_CLI_NOTES.md` —— 调用 Kiro CLI 之前先看一眼,避免语法写错、避免踩过的坑重踩
+## 当前工作规则
+- 先读 `project-brain/AGENT_RULES.md` 与 `RELEASE_GATE.md` 的验收要求。
+- FEATURE FREEZE：只处理安全、发布阻塞、M19–M21 必需缺口、严重 UX 和生产 bug。
+- 常规 UX/API/DB 实现与测试由 Commander 决定；不再把所有技术疑问提交用户审批。法律/合同、商业规则、重大方向、新成本、第三方商务、生产不可逆操作、真实用户重大策略仍由 Haitao 决策。
+- `COLLABORATION.md` 保留历史执行经验和验证底线；其中旧的角色分工、全量历史 bootstrap、任务顺序与“一切不确定都等用户”规则，由本次交接明确取代。
+- 任何旧 milestone 的已完成不等于 V1 release gate 通过。先核对当前 commit、环境和实际证据。
+- 当前优先级 SEC-001 → 其他已分配 Release Spec。未分配的新功能不自主开工。
+- 调 Kiro CLI 之前仍须读 `KIRO_CLI_NOTES.md` 和适用官方说明，确认实际可用；不假设不同订阅共享额度或可自动调度。
 
 ## 几条不能忘的硬性规则(详见 COLLABORATION.md,这里摘重点)
 
