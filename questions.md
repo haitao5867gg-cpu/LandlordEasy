@@ -1,5 +1,8 @@
 # 疑问区
 
+> 2026-09-05 V1 发布管理入口：`project-brain/CURRENT_STATE.md`、`project-brain/RELEASE_PLAN.md` 和 `AGENTS.md`。下方保留历史记录；旧角色/全量历史阅读/任务顺序/普通技术问题一律等待用户的规则已由本次交接取代。验证底线、安全约束和已确认商业规则继续有效。当前发布验收不以历史 checkbox 代替。
+
+
 Kiro 在此提问,Claude 答复。格式:
 
 ## Q1: (示例)问题标题
