@@ -18,7 +18,7 @@ Planning anchor: Day 1 = 2026-09-05, day boundaries for planning only. Dates are
 1. SEC-001 first. SEC-002 / REL-002 / REL-003 can run independently in isolated branches once assigned. REL-001 overlaps leases service with SEC-001; serialize or assign file ownership to avoid collisions.
 2. All five specs must pass independent acceptance before RC. Merge only passing gates; docs bootstrap may be prepared before CI exists but lack of CI is not recorded as PASS.
 3. Product polish is mandatory after security repairs. Check existing landlord and tenant journeys, not just new screens.
-4. Human actions may progress alongside engineering. Request original contract early; HA-001/002/003 must resolve before real contracts.
+4. Human actions may progress alongside engineering. HA-001/002 are explicitly deferred to a later dedicated Commander–Haitao discussion; they do not block engineering but must resolve before real contracts. HA-003 must also resolve before the legal/integration gate.
 5. Rehearse isolated schema/config/file changes. Record actual RC hash, migration manifest, backup, health checks, restore result and rollback triggers.
 6. Any missed gate causes reforecast. Preserve two days of real pilot buffer; never compress validation into the last day merely to claim Day 14.
 

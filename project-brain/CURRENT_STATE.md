@@ -29,7 +29,7 @@ Engineering execution assigned to Work agent; Kiro/Claude CLI unavailable in thi
 
 ## Known limitations and next steps
 Complete control plane → implement/review SEC-001 → retain NO-GO until all RELEASE_GATE.md conditions are evidenced. Production and dev runtime states have not been inspected this session.
-Legal text/watermark and pilot decisions remain in HUMAN_ACTIONS.md. Do not request routine engineering decisions from Haitao.
+Legal text and safety undertaking (HA-001/002) are deferred by Haitao for a later dedicated Commander discussion and do not block engineering; they still block real-contract legal acceptance. Watermark and pilot decisions remain in HUMAN_ACTIONS.md. Do not request routine engineering decisions from Haitao.
 
 
 ## GitHub dispatch
