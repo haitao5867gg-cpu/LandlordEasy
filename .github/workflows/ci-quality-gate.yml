@@ -1,0 +1,83 @@
+name: CI Quality Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+  push:
+    branches:
+      - main
+      - dev
+      - 'release/**'
+      - 'fix/**'
+      - 'ci/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-quality-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: REL-003 quality gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      NODE_ENV: test
+      TZ: UTC
+      CHECKPOINT_DISABLE: '1'
+      PRISMA_HIDE_UPDATE_MESSAGE: '1'
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9.15.9
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20.19.5
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: 1. Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install and configure Chromium for PDF tests
+        run: |
+          pnpm exec playwright install --with-deps --only-shell chromium
+          browser_path="$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -path '*/chromium_headless_shell-*/chrome-linux/headless_shell' -perm -u+x -print -quit)"
+          test -n "$browser_path"
+          test -x "$browser_path"
+          echo "PDF_CHROME_EXECUTABLE_PATH=$browser_path" >> "$GITHUB_ENV"
+
+      - name: 2. Generate Prisma client
+        run: pnpm --filter server exec prisma generate
+
+      - name: 3. Type-check server
+        run: pnpm --filter server exec tsc --noEmit
+
+      - name: 4. Run full server test suite
+        run: pnpm --filter server test -- --runInBand
+
+      - name: 5. Type-check and build landlord H5
+        run: |
+          pnpm --filter landlord-h5 exec vue-tsc -b
+          pnpm --filter landlord-h5 build
+
+      - name: 6. Type-check and build tenant H5
+        run: |
+          pnpm --filter tenant-h5 exec vue-tsc -b
+          pnpm --filter tenant-h5 build
