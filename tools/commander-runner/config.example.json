@@ -1,0 +1,18 @@
+{
+  "repository": "haitao5867gg-cpu/LandlordEasy",
+  "queue_issue": 17,
+  "commander_login": "SET_CONFIGURED_COMMANDER_LOGIN",
+  "runner_id": "SET_IMMUTABLE_RUNNER_ID",
+  "canonical_repo": "~/LandLordEasy",
+  "worktree_root": "~/LandLordEasy-runner-worktrees",
+  "state_dir": "~/.local/state/landlordeasy-commander",
+  "origin_url": "https://github.com/haitao5867gg-cpu/LandlordEasy.git",
+  "poll_seconds": 60,
+  "lease_seconds": 180,
+  "provider_failover": true,
+  "executable_paths": {
+    "kiro": "/ABSOLUTE/PATH/TO/kiro-cli",
+    "copilot": "/ABSOLUTE/PATH/TO/copilot",
+    "claude": "/ABSOLUTE/PATH/TO/claude"
+  }
+}
