@@ -10,6 +10,6 @@
 | D-007 / Sep 5 | SEC-001 uses existing active-landlord shared access and strict tenant ownership | Existing schema + guards; avoids changing business permissions |
 | D-008 / Sep 5 | Current Work engineering agents may execute specs; Kiro/Claude integrations not assumed available | Environment capability check |
 | D-009 / Sep 5 | Preserve e-sign manual confirmation and latest authType=1 decision; do not revert to old design's polling/authType=2 | Historical M19.11/M20.5 plus code; no new legal/business decision |
+| D-010 / Sep 6 | Finish the Commander control system first; Haitao will then assist connecting Kiro CLI, Copilot CLI and Claude Code for spec-driven execution | Haitao owner instruction; external subscriptions/tools are not assumed callable until that handoff |
 
 All future records include status (proposed/accepted/superseded), decision maker, reasoning and affected specs. Entries above are accepted except explicitly pending owner choices. Historical design.md sections can be older than tasks.md; inspect code and latest decision rather than reinstating obsolete behavior.
-
