@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   CreateMaintenanceDto,
@@ -75,33 +76,44 @@ export class MaintenanceService {
   }
 
   async updateRepairRequest(id: number, dto: UpdateRepairRequestDto, operatorId: number) {
-    const req = await this.prisma.repairRequest.findUnique({ where: { id } });
-    if (!req) throw new NotFoundException('报修申请不存在');
-    if (req.status === 'RESOLVED') throw new BadRequestException('该报修已完成,不能再修改');
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw(
+        Prisma.sql`SELECT id FROM \`repair_requests\` WHERE id = ${id} FOR UPDATE`,
+      );
+      const req = await tx.repairRequest.findUnique({ where: { id } });
+      if (!req) throw new NotFoundException('报修申请不存在');
+      if (req.status === 'RESOLVED') {
+        throw new BadRequestException('该报修已完成,不能再修改');
+      }
 
-    const updated = await this.prisma.repairRequest.update({
-      where: { id },
-      data: {
-        status: dto.status,
-        landlordNote: dto.landlordNote,
-        ...(dto.status === 'RESOLVED'
-          ? { resolvedCost: dto.resolvedCost ?? 0, resolvedBy: operatorId, resolvedAt: new Date() }
-          : {}),
-      },
-    });
-
-    if (dto.status === 'RESOLVED' && dto.resolvedCost && dto.resolvedCost > 0) {
-      await this.prisma.maintenanceRecord.create({
+      const updated = await tx.repairRequest.update({
+        where: { id },
         data: {
-          roomId: req.roomId,
-          date: new Date(),
-          content: `租客报修:${req.description}`,
-          cost: dto.resolvedCost,
-          operatorId,
+          status: dto.status,
+          landlordNote: dto.landlordNote,
+          ...(dto.status === 'RESOLVED'
+            ? {
+                resolvedCost: dto.resolvedCost ?? 0,
+                resolvedBy: operatorId,
+                resolvedAt: new Date(),
+              }
+            : {}),
         },
       });
-    }
 
-    return updated;
+      if (dto.status === 'RESOLVED' && dto.resolvedCost && dto.resolvedCost > 0) {
+        await tx.maintenanceRecord.create({
+          data: {
+            roomId: req.roomId,
+            date: new Date(),
+            content: `租客报修:${req.description}`,
+            cost: dto.resolvedCost,
+            operatorId,
+          },
+        });
+      }
+
+      return updated;
+    });
   }
 }

@@ -84,6 +84,12 @@
               发起签署
             </van-button>
           </div>
+          <div v-else-if="currentSigningTask.status === 'LAUNCHING'" class="contract-status-content">
+            <p>签约服务的返回结果不确定,系统已暂停自动重试,避免重复发起。</p>
+            <p class="contract-hint">
+              请先在微签后台按合同编号 LE-{{ currentSigningTask.id }} 核对。若已存在签约任务,请勿再次发起；若确认不存在,请联系系统维护人员恢复。
+            </p>
+          </div>
           <div v-else-if="currentSigningTask.status === 'CREATED'" class="contract-status-content">
             <p>已发起签署,等待租客完成</p>
             <p class="contract-time">发起时间: {{ dt(currentSigningTask.createdAt) }}</p>
@@ -273,12 +279,14 @@ function contractStatusLabel(status: string) {
   return {
     PENDING_SCAN: '待租客关注',
     FOLLOWED: '租客已关注',
+    LAUNCHING: '发起结果待核对',
     CREATED: '等待租客签署',
     SIGNED: '已签署',
   }[status] || status;
 }
-function contractStatusType(status: string): 'primary' | 'success' | 'warning' | 'default' {
+function contractStatusType(status: string): 'primary' | 'success' | 'warning' | 'danger' | 'default' {
   if (status === 'SIGNED') return 'success';
+  if (status === 'LAUNCHING') return 'danger';
   if (status === 'FOLLOWED') return 'primary';
   if (status === 'PENDING_SCAN' || status === 'CREATED') return 'warning';
   return 'default';
