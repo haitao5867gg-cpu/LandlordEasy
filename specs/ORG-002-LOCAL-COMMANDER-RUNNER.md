@@ -4,19 +4,33 @@ Priority: control-plane enablement. Status: READY FOR IMPLEMENTATION. Owner: Com
 
 ## Objective
 
-Remove Haitao from ordinary Commander-to-worker message relay. A local macOS runner polls one dedicated GitHub Issue for structured Commander jobs, invokes the already accepted Kiro/Copilot/Claude CLIs under predefined least-privilege profiles, and posts sanitized results back to that Issue.
+Remove Haitao from ordinary Commander-to-worker message relay. A dedicated always-on Mac mini worker node polls one GitHub Issue for structured Commander jobs, invokes the accepted Kiro/Copilot/Claude CLIs under predefined least-privilege profiles, and posts sanitized results back to that Issue.
 
-This runner supports development execution only. LandlordEasy production remains fully hosted on Tencent Cloud and never depends on Haitao's Mac.
+Haitao may direct the cloud Commander from a phone or MacBook; neither device is an execution dependency. This runner supports development execution only. LandlordEasy production remains fully hosted on Tencent Cloud and never depends on the Mac mini.
 
 ## Architecture
 
 - Queue: one dedicated GitHub Issue in `haitao5867gg-cpu/LandlordEasy`.
 - Dispatcher: Commander creates structured `COMMANDER_JOB_V1` comments.
 - Executor: Python 3 standard-library runner under `tools/commander-runner/`.
-- Scheduler: user-level macOS LaunchAgent, disabled until Haitao performs the final activation.
+- Executor node: the dedicated Mac mini M4, identified by a configured immutable runner ID; MacBook execution is disabled after migration.
+- Scheduler: user-level macOS LaunchAgent on the Mac mini, disabled until Haitao performs final activation.
 - State: local, gitignored replay-protection database under an application-specific state directory.
 - Results: bounded sanitized summary posted as an Issue comment; full raw stdout/stderr stays local with restricted permissions and retention.
-- Poll interval: 60 seconds while the Mac is awake. Offline jobs remain queued.
+- Poll interval: 60 seconds while the Mac mini is online. Offline jobs remain queued.
+- Connectivity: outbound-only GitHub and official model-service traffic; no inbound port, public SSH, VPN or remote shell is required.
+
+## Mac mini enrollment
+
+Enrollment is a separate one-time human-assisted phase after implementation review.
+
+- Create or select a dedicated standard macOS user for the runner; do not use an administrator session for unattended execution.
+- Clone the repository normally on the Mac mini and configure its canonical path in a local, owner-readable config file. No username or home path is hard-coded in repository code.
+- Install and authenticate `git`, `gh`, Python 3, Kiro CLI, Copilot CLI and Claude Code directly on the Mac mini. Never copy credential stores, keychains or token files from the MacBook.
+- Run the same bounded ORG-001 smoke tests on the Mac mini before activation.
+- Docker is optional for the runner itself and is enrolled separately for isolated test jobs. Production credentials are never copied to the Mac mini.
+- Configure normal macOS power/restart behavior only through explicit Haitao action. The installer must not change sleep, FileVault, login, firewall or administrator settings.
+- Only one runner ID may be active for this queue. The MacBook remains a Commander client and emergency manual workstation, not a polling executor.
 
 ## Job schema
 
@@ -75,6 +89,7 @@ Model routing follows `specs/ORG-001-AI-CLI-ONBOARDING.md`.
 - Hard-code the repository and queue Issue.
 - Accept jobs only from the configured GitHub login after verifying it through `gh api`.
 - Require the exact `COMMANDER_JOB_V1` marker and schema.
+- Require the configured runner ID and acquire a queue lease before claiming work; a second host must fail closed.
 - Record comment ID + job ID before execution using an atomic claim so restarts cannot replay work.
 - Post lifecycle states: CLAIMED, COMPLETED, FAILED, REJECTED or TIMED_OUT.
 - Do not execute edited comments; bind the claim to a content hash.
@@ -91,8 +106,8 @@ Model routing follows `specs/ORG-001-AI-CLI-ONBOARDING.md`.
 
 ## Worktree rules
 
-- Canonical repository: `/Users/gascan/LandLordEasy`.
-- Runner worktree root: a dedicated sibling directory controlled by the runner.
+- Canonical repository and runner worktree root are explicit absolute paths in the Mac mini's local configuration; repository code must not hard-code a macOS username.
+- The worktree root is a dedicated sibling directory controlled by the runner and distinct from any MacBook path.
 - Resolve and validate real paths; reject symlinks or paths outside the exact roots.
 - Fetch only the configured origin.
 - New jobs start from an exact SHA and a clean isolated worktree.
@@ -108,7 +123,8 @@ Provide commands/scripts for:
 - `run-once --dry-run`: fetch and validate without executing;
 - `run-once`: claim and execute one job;
 - `start` / `stop`: load or unload the user LaunchAgent;
-- `status`: show sanitized local state;
+- `status`: show sanitized local state and runner-ID/lease health;
+- `heartbeat`: renew the single-node lease without executing a job;
 - `uninstall`: unload and remove only runner-owned files after confirmation.
 
 Use an exclusive process lock. Apply bounded exponential backoff for GitHub/model-service failures. Never retry a worker task automatically after an ambiguous exit; report and await a new job.
@@ -127,13 +143,14 @@ Use an exclusive process lock. Apply bounded exponential backoff for GitHub/mode
 
 After implementation PR review:
 
-1. Haitao performs one explicit local installation/activation.
-2. Run `doctor` with no secret output.
+1. Haitao signs into the dedicated Mac mini user and performs one explicit installation/activation.
+2. Run `doctor` with no secret output, proving the configured canonical path, runner ID, outbound-only boundary and single-node lease.
 3. Commander posts one harmless `repo_read` canary job for Kiro Luna.
 4. Runner automatically claims it, invokes Kiro, and posts the sanitized result.
 5. Stop/start the runner and prove the job is not replayed.
 6. Commander posts a second harmless job routed to a different CLI and verifies autonomous round-trip.
 7. Confirm quota reporting, clean worktrees, stop/uninstall behavior and no unexpected network or permission requests.
+8. From the MacBook or phone, create no local execution dependency: close the MacBook-side worker session and prove the Mac mini alone claims the next canary.
 
 Only then mark ORG-002 ACCEPTED and resume OPS-001 through the queue.
 
@@ -148,4 +165,4 @@ Stop without broadening permissions on unexpected macOS approval, unknown GitHub
 - Running arbitrary Issue text.
 - Automatic production deployment or provider access.
 - Bypassing subscription limits, account controls or human approvals.
-- Keeping the Mac awake indefinitely.
+- Providing a production uptime guarantee; queued development work resumes after any Mac mini outage.
