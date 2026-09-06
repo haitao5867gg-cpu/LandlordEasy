@@ -31,7 +31,6 @@ jobs:
       TZ: UTC
       CHECKPOINT_DISABLE: '1'
       PRISMA_HIDE_UPDATE_MESSAGE: '1'
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
 
     steps:
       - name: Check out candidate
@@ -56,6 +55,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install and configure Chromium for PDF tests
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
         run: |
           pnpm exec playwright install --with-deps --only-shell chromium
           browser_path="$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -path '*/chromium_headless_shell-*/chrome-linux/headless_shell' -perm -u+x -print -quit)"
