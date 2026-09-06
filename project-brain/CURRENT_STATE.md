@@ -1,5 +1,5 @@
 # Current state
-As of 2026-09-05 UTC. Release decision: **NO-GO**.
+As of 2026-09-06 UTC. Release decision: **NO-GO**.
 
 ## Baseline verified through GitHub
 - main: c3b5b2d849745d7ed4e0c2b5d674900d1f4bf286 (M18 baseline).
@@ -16,20 +16,20 @@ Historical: six Playwright files / about 88 cases and ~80 landlord regression ca
 Handoff estimates 85–90% internal completeness / 70–75% safe release readiness are unverified estimates, not Commander scores.
 
 ## Release work
-| ID | Priority | State | Next evidence |
+| ID | Priority | State | Evidence / next gate |
 |---|---|---|---|
-| SEC-001 | P0 | LOCAL_VERIFIED / DEPLOYMENT_PENDING | dev/prod proxy + migration + real WeChat verification |
-| SEC-002 | P1 | READY | retired report route removal or ownership checks |
-| REL-001 | P1 | READY | atomic approvals and concurrent/failure tests |
-| REL-002 | P1 | READY | fail-closed startup validation |
-| REL-003 | P1 | READY | isolated CI gates and enforcement evidence |
+| SEC-001 | P0 | LOCAL_ACCEPTED / DEPLOYMENT_PENDING | authenticated private downloads and migration tooling reviewed; verify loaded proxy config and migrate real files |
+| SEC-002 | P1 | REVIEWED / ACTIONS_GREEN | unsafe tenant report route removed; integrated runtime payment regression remains an RC gate |
+| REL-001 | P1 | REVIEWED / MYSQL_RUNTIME_BLOCKED | transactions, locks and recovery UX reviewed; isolated MySQL failure/concurrency and provider reconciliation remain required |
+| REL-002 | P1 | REVIEWED / ACTIONS_GREEN | production mock/auth/signing and disabled-Alipay paths fail closed; prod-like startup rehearsal remains |
+| REL-003 | P1 | ACTIONS_GREEN / ENFORCEMENT_PENDING | cumulative candidate green; required-check ruleset/branch protection is absent |
 
 SEC-001 code review verified predictable public PDF writes, app static serving and both Nginx uploads aliases. Current landlords share whitelist portfolio access; schema contains no per-landlord property grant. This repair must not silently create a new business access model.
-Engineering execution assigned to Work agent; Kiro/Claude CLI unavailable in this environment. No real-provider call, production mutation or notification is authorized by this assignment.
+Engineering execution and independent review used isolated Work agents. Kiro/Copilot/Claude may later consume repository Specs, but are not assumed to form a unified callable API pool. No real-provider call, production mutation or notification was performed.
 
 ## Known limitations and next steps
-Complete control plane → implement/review SEC-001 → retain NO-GO until all RELEASE_GATE.md conditions are evidenced. Production and dev runtime states have not been inspected this session.
-Legal text and safety undertaking (HA-001/002) are deferred by Haitao for a later dedicated Commander discussion and do not block engineering; they still block real-contract legal acceptance. Watermark and pilot decisions remain in HUMAN_ACTIONS.md. Do not request routine engineering decisions from Haitao.
+The five initial blockers now have implementation branches and Draft PRs. Retain NO-GO while SEC-001 proxy/file migration, REL-001 MySQL tests, prod-like startup, branch enforcement and full runtime/E2E gates remain open. Production and dev runtime states have not been mutated or accepted in this work.
+Legal text and safety-undertaking content are deferred by Haitao to a later dedicated Commander discussion; they do not block engineering but still block real-contract legal acceptance. Watermark and pilot decisions remain in HUMAN_ACTIONS.md. Do not request routine engineering decisions from Haitao.
 
 
 ## GitHub dispatch
@@ -39,11 +39,20 @@ Legal text and safety undertaking (HA-001/002) are deferred by Haitao for a late
 - [REL-002](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/4) — specs/REL-002.md
 - [REL-003](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/5) — specs/REL-003.md
 
-## Latest checkpoint — 2026-09-05
-- Control plane and five specs committed in a166fa0; GitHub draft PR #6 targets dev. main/dev remain at original pinned hashes (rechecked before security delivery).
-- SEC-001: private PDF storage, authenticated landlord/tenant downloads and tenant signed-contract discovery; app/Nginx legacy URL denial; dry-run-first offline migration; two H5 blob-download interactions.
-- Independent review reproduced a direct-backend symlink alias leak and fixed it; raw HTTP encoding/path/link regressions added.
-- Current local evidence: backend typecheck PASS; Jest 15 suites / 166 tests PASS including real Chromium PDF generation; both H5 typecheck/build PASS; five real Chromium UI fixture cases PASS; ten migration fixtures PASS; git diff --check PASS.
-- All DB/provider inputs in these tests are isolated fixtures. Browser tests use synthetic API responses. Runtime dependencies (headless shell and CJK font) installed locally only. See specs/SEC-001-VERIFICATION.md for commands and boundaries.
-- Not deployed; no real contracts migrated; no actual Nginx loaded-config or real WeChat WebView evidence. SEC-001 issue stays open. CI still absent, no PR merged, release remains NO-GO.
-- Next engineering priority: close SEC-001 dev rehearsal evidence in a connected execution environment; dispatch SEC-002, REL-002 and REL-003 independently, then REL-001 with leases-service ownership coordinated. Do not wait for legal input to do ordinary engineering.
+## Draft PR stack and verified CI
+- [#6 Control plane](https://github.com/haitao5867gg-cpu/LandlordEasy/pull/6) → `dev`
+- [#7 SEC-001](https://github.com/haitao5867gg-cpu/LandlordEasy/pull/7) → control plane
+- [#8 SEC-002](https://github.com/haitao5867gg-cpu/LandlordEasy/pull/8) → SEC-001
+- [#9 REL-003](https://github.com/haitao5867gg-cpu/LandlordEasy/pull/9) → SEC-002
+- [#10 REL-002](https://github.com/haitao5867gg-cpu/LandlordEasy/pull/10) → REL-003
+- [#11 REL-001](https://github.com/haitao5867gg-cpu/LandlordEasy/pull/11) → REL-002
+
+Cumulative candidate `142027e6b0266640ed806e2487ff54359d64312f` passed [Actions run 34020718504](https://github.com/haitao5867gg-cpu/LandlordEasy/actions/runs/34020718504). REL-002 integration candidate `4711f1bf657b078396f1a0c44076c301ea2d5506` passed [run 34020541332](https://github.com/haitao5867gg-cpu/LandlordEasy/actions/runs/34020541332). Both executed locked install, Prisma generate, server typecheck, full Jest with real Chromium PDF generation, and both H5 typecheck/build gates. These results do not replace pending real MySQL, proxy, provider and browser evidence.
+
+## Latest checkpoint — 2026-09-06
+- Control plane and all five blocker implementations are present as the Draft PR stack above; `main` and `dev` remain untouched and no PR has been merged.
+- SEC-001 local security review and regression passed, including symlink/path defenses, authenticated downloads and migration fixtures. Deployment proxy/file migration and real WeChat WebView evidence remain open.
+- SEC-002, REL-002 and REL-003 were integrated together after real CI caught an initially reintroduced retired payment DTO. Corrected cumulative runs are green.
+- REL-001 transaction and signing-recovery changes passed independent code review, server/full Jest, both frontend builds and isolated browser fixtures. The environment lacked MySQL, so actual rollback, lock/deadlock and concurrent approval behavior is still BLOCKED.
+- No production/dev deployment, real DB mutation, provider call or real-user notification occurred. Release remains NO-GO.
+- Next engineering priority: obtain isolated MySQL evidence and prepare connected dev rehearsal for proxy migration, prod-like startup and full M19–M21 runtime journeys. Contract content remains outside the current engineering critical path until the dedicated owner discussion.
