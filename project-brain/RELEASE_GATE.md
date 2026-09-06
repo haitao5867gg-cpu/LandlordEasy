@@ -1,12 +1,12 @@
 # Release gates
-Decision at initialization: NO-GO. States: PENDING / PASS / FAIL / BLOCKED. A PASS needs dated evidence, exact candidate commit, environment, command or walkthrough, result and reviewer. Historical PASS cannot be silently reused after affected code changes.
+Current decision: NO-GO. States: PENDING / PASS / FAIL / BLOCKED. A PASS needs dated evidence, exact candidate commit, environment, command or walkthrough, result and reviewer. Historical PASS cannot be silently reused after affected code changes.
 
-| Gate | Acceptance | Initial state |
+| Gate | Acceptance | Current state |
 |---|---|---|
 | Security | SEC-001/002 accepted; old PDF URLs denied through actual proxy; tenant isolation; active landlord checks; no known P0/P1 security issue | BLOCKED |
 | Data integrity | REL-001 failure injection and concurrent approvals; no duplicate lease/bill/settlement; external failures recover visibly | BLOCKED |
-| Configuration | REL-002 rejects missing/unsafe real/prod settings before side effects | BLOCKED |
-| CI | REL-003 all six steps pass exact candidate; no production credentials or deployment; enforcement evaluated | BLOCKED |
+| Configuration | REL-002 rejects missing/unsafe real/prod settings before side effects | PENDING — implementation reviewed and cumulative CI green; prod-like startup rehearsal remains |
+| CI | REL-003 all six steps pass exact candidate; no production credentials or deployment; enforcement evaluated | PASS — cumulative candidate `142027e6` green in run `34020718504`; enforcement evaluated absent and tracked separately |
 | Feature completeness | M19–M21 acceptance matrix closed; all required journey steps reachable | PENDING |
 | UX completeness | both full mobile walkthroughs and failure states accepted | PENDING |
 | Integrations | real WeChat binding/OAuth/payment/cancel/retry/callback; e-sign failure/manual confirmation/download verified with approved test identities | PENDING |
@@ -23,4 +23,3 @@ For each relevant step record happy path, loading, empty/error state, duplicate 
 ## Release decision
 Commander assembles concrete GO/NO-GO packet with release commit, exact deploy plan, evidence, costs, blast radius, backups and rollback. Only then escalate irreversible production actions or material owner decisions. No unknown critical gate, failing CI or unresolved P0/P1 may be waived to hit a date.
 Staging success != deployed success. Signed PDF availability != proof tenant signed; preserve approved manual confirmation process and verify its business acceptance separately.
-
