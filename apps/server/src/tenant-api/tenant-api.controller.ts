@@ -7,9 +7,12 @@ import {
   UseGuards,
   ParseIntPipe,
   Req,
+  Res,
   BadRequestException,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
+import { LeasesService } from '../leases/leases.service';
+import { sendContractPdf } from '../leases/send-contract-pdf';
 import { TenantGuard } from '../auth/guards/tenant.guard';
 import { TenantApiService } from './tenant-api.service';
 import { JwtPayload } from '../auth/auth.service';
@@ -21,7 +24,19 @@ import {
 
 @Controller('tenant')
 export class TenantApiController {
-  constructor(private readonly tenantApiService: TenantApiService) {}
+  constructor(private readonly tenantApiService: TenantApiService, private readonly leasesService: LeasesService) {}
+
+  @Get('contracts')
+  @UseGuards(TenantGuard)
+  listContracts(@Req() req: Request) {
+    return this.leasesService.listTenantContracts(this.getTenantId(req));
+  }
+
+  @Get('contracts/:id/pdf')
+  @UseGuards(TenantGuard)
+  async downloadContract(@Param('id', ParseIntPipe) id: number, @Req() req: Request, @Res() res: Response) {
+    sendContractPdf(res, await this.leasesService.downloadSignedContract(id, this.getTenantId(req)), id, 'signed');
+  }
 
   @Get('bills')
   @UseGuards(TenantGuard)
