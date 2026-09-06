@@ -292,34 +292,6 @@ describe('PaymentsService', () => {
     });
   });
 
-  describe('tenantReport', () => {
-    it('租客上报:状态为 PENDING_CONFIRM', async () => {
-      (prisma.bill.findUnique as jest.Mock).mockResolvedValue({ id: 40 });
-      (prisma.payment.create as jest.Mock).mockResolvedValue({
-        id: 8,
-        status: 'PENDING_CONFIRM',
-        channel: 'QRCODE',
-      });
-
-      const result = await service.tenantReport({
-        billId: 40,
-        amount: 1000,
-        paidAt: '2026-07-20',
-        proofUrl: 'https://example.com/proof.jpg',
-      });
-
-      expect(prisma.payment.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            status: 'PENDING_CONFIRM',
-            channel: 'QRCODE',
-            proofUrl: 'https://example.com/proof.jpg',
-          }),
-        }),
-      );
-    });
-  });
-
   describe('在线支付下单', () => {
     const payableBill = {
       id: 50,

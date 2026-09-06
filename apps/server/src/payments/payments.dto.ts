@@ -1,4 +1,4 @@
-import { IsInt, IsString, IsIn, IsOptional, IsNumber, IsDateString, Min, IsNotEmpty } from 'class-validator';
+import { IsInt, IsString, IsIn, IsNumber, IsDateString, Min, IsNotEmpty } from 'class-validator';
 
 /** 在线支付下单 */
 export class CreateOnlinePaymentDto {
@@ -11,23 +11,6 @@ export class MockSimulateSuccessDto {
   @IsString()
   @IsNotEmpty()
   outTradeNo!: string;
-}
-
-/** 租客上报付款 */
-export class TenantReportPaymentDto {
-  @IsInt()
-  billId!: number;
-
-  @IsNumber()
-  @Min(0.01)
-  amount!: number;
-
-  @IsOptional()
-  @IsString()
-  proofUrl?: string;
-
-  @IsDateString()
-  paidAt!: string;
 }
 
 /** 房东手动记账 */
