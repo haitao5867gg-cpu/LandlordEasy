@@ -20,7 +20,6 @@ import {
   CreateOnlinePaymentDto,
   ManualPaymentDto,
   MockSimulateSuccessDto,
-  TenantReportPaymentDto,
 } from './payments.dto';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { TenantGuard } from '../auth/guards/tenant.guard';
@@ -111,13 +110,6 @@ export class PaymentsController {
   manualRecord(@Body() dto: ManualPaymentDto, @Req() req: Request) {
     const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
     return this.paymentsService.manualRecord(dto, user.sub);
-  }
-
-  /** 租客:上报已付款 */
-  @Post('report')
-  @UseGuards(TenantGuard)
-  tenantReport(@Body() dto: TenantReportPaymentDto) {
-    return this.paymentsService.tenantReport(dto);
   }
 
   /** 按账单查收款记录 */

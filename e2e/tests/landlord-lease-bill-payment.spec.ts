@@ -26,7 +26,6 @@ let setupRequest: APIRequestContext;
 const rooms: Record<string, TestRoom> = {};
 const leases: Record<string, LeaseDetail> = {};
 const bills: Record<string, BillDetail> = {};
-const pendingPayments: Record<string, Payment> = {};
 
 interface ApiEnvelope<T> {
   code: number;
@@ -144,48 +143,6 @@ async function createLease(role: string, room: TestRoom, index: number): Promise
   return lease;
 }
 
-/** 用微信关注扫码 webhook 模拟(替代原邀请码绑定)把测试 openid 绑到租客身上。 */
-async function bindTenantViaQrcode(leaseId: number, openid: string): Promise<void> {
-  const qrcode = await apiResult<{ sceneValue: number }>(
-    await setupRequest.post(`${apiPrefix}/leases/${leaseId}/bind-qrcode`, {
-      headers: authHeaders(),
-    }),
-  );
-  const followEventXml =
-    `<xml><FromUserName><![CDATA[${openid}]]></FromUserName>` +
-    `<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>` +
-    `<EventKey><![CDATA[qrscene_${qrcode.sceneValue}]]></EventKey></xml>`;
-  const response = await setupRequest.post(`${apiPrefix}/wechat/event`, {
-    headers: { 'Content-Type': 'text/xml' },
-    data: followEventXml,
-  });
-  expect(response.ok(), '模拟关注事件应返回 200').toBeTruthy();
-}
-
-async function createTenantPayment(
-  role: string,
-  lease: LeaseDetail,
-  bill: BillDetail,
-  amount: number,
-  proofUrl?: string,
-): Promise<Payment> {
-  const openid = `${dataPrefix}_${role}_openid`;
-  await bindTenantViaQrcode(lease.id, openid);
-  const login = await apiResult<{ token: string }>(
-    await setupRequest.post(`${apiPrefix}/auth/tenant/login`, {
-      data: { code: openid },
-    }),
-  );
-  const payment = await apiResult<Payment>(
-    await setupRequest.post(`${apiPrefix}/payments/report`, {
-      headers: authHeaders(login.token),
-      data: { billId: bill.id, amount, paidAt: today, ...(proofUrl ? { proofUrl } : {}) },
-    }),
-  );
-  pendingPayments[role] = payment;
-  return payment;
-}
-
 function waitForApi(page: Page, method: string, pathname: string | RegExp): Promise<Response> {
   return page.waitForResponse((response) => {
     const request = response.request();
@@ -258,19 +215,16 @@ const roomRoles = [
   'normalUi', 'feeUi', 'reuseUi', 'reuseAnchor',
   'detail', 'renew', 'renewBoundary', 'endNormal', 'endBoundary', 'ended',
   'billPending', 'billAdd', 'billPartial', 'billFull', 'billBlank', 'billPaid',
-  'pendingDisplay', 'pendingConfirm', 'pendingReject',
 ];
 
 const backendLeaseRoles = [
   'reuseAnchor', 'detail', 'renew', 'renewBoundary', 'endNormal', 'endBoundary', 'ended',
   'billPending', 'billAdd', 'billPartial', 'billFull', 'billBlank', 'billPaid',
-  'pendingDisplay', 'pendingConfirm', 'pendingReject',
 ];
 
 const billRoles = [
   'detail', 'renew', 'renewBoundary', 'endNormal', 'endBoundary',
   'billPending', 'billAdd', 'billPartial', 'billFull', 'billBlank', 'billPaid',
-  'pendingDisplay', 'pendingConfirm', 'pendingReject',
 ];
 
 test.beforeAll(async () => {
@@ -334,25 +288,6 @@ test.beforeAll(async () => {
   });
   bills.billPaid = await getBill(bills.billPaid.id);
 
-  await createTenantPayment(
-    'pendingDisplay',
-    leases.pendingDisplay,
-    bills.pendingDisplay,
-    1,
-    'https://dev.landlordeasy.cn/favicon.ico',
-  );
-  await createTenantPayment(
-    'pendingConfirm',
-    leases.pendingConfirm,
-    bills.pendingConfirm,
-    Number(bills.pendingConfirm.totalAmount),
-  );
-  await createTenantPayment(
-    'pendingReject',
-    leases.pendingReject,
-    bills.pendingReject,
-    1,
-  );
 });
 
 test.afterAll(async () => {
@@ -758,42 +693,77 @@ test.describe('2.6 账单', () => {
 });
 
 test.describe('2.7 待确认收款', () => {
-  test('2.7.1 列表信息正确且凭证图片可放大预览', async ({ page }) => {
+  const pendingFixture = {
+    id: 91001,
+    billId: 92001,
+    amount: 1,
+    paidAt: `${today}T00:00:00.000Z`,
+    status: 'PENDING_CONFIRM',
+    proofUrl: 'https://dev.landlordeasy.cn/favicon.ico',
+    bill: {
+      lease: {
+        tenant: { name: `${dataPrefix}_历史待确认租客` },
+        room: { roomNo: '901', building: { name: 'Q栋' } },
+      },
+    },
+  };
+
+  async function mockPendingApi(page: Page) {
+    let pending = [pendingFixture];
+    const actions: string[] = [];
+    await page.route('**/api/v1/payments/pending**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 0, message: 'success', data: pending }),
+      });
+    });
+    await page.route(`**/api/v1/payments/${pendingFixture.id}/confirm`, async (route) => {
+      actions.push((route.request().postDataJSON() as { action: string }).action);
+      pending = [];
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 0, message: 'success', data: {} }),
+      });
+    });
+    return actions;
+  }
+
+  test('2.7.1 历史待确认记录信息正确且凭证图片可放大预览', async ({ page }) => {
+    await mockPendingApi(page);
     await login(page, '/payments/pending');
-    const tenantName = `${dataPrefix}_pendingDisplay`;
+    const tenantName = `${dataPrefix}_历史待确认租客`;
     const cell = page.locator('.van-cell').filter({ hasText: tenantName });
     await expect(cell).toBeVisible();
-    await expect(cell).toContainText(`¥${pendingPayments.pendingDisplay.amount}`);
+    await expect(cell).toContainText(`¥${pendingFixture.amount}`);
     await expect(cell).toContainText(today);
     await cell.locator('.van-image').click();
     await expect(page.locator('.van-image-preview')).toBeVisible();
   });
 
-  test('2.7.2 确认后提示、列表移除且足额账单变已付', async ({ page }) => {
+  test('2.7.2 历史记录确认后提示并从列表移除', async ({ page }) => {
+    const actions = await mockPendingApi(page);
     await login(page, '/payments/pending');
-    const tenantName = `${dataPrefix}_pendingConfirm`;
+    const tenantName = `${dataPrefix}_历史待确认租客`;
     const cell = page.locator('.van-cell').filter({ hasText: tenantName });
     await expect(cell).toBeVisible();
-    const responsePromise = waitForApi(page, 'POST', `/payments/${pendingPayments.pendingConfirm.id}/confirm`);
     await cell.getByRole('button', { name: '确认', exact: true }).click();
-    await pageApiResult(await responsePromise);
     await expect(page.locator('.van-toast')).toContainText('已确认');
     await expect(page.locator('.van-cell').filter({ hasText: tenantName })).toHaveCount(0);
-    expect((await getBill(bills.pendingConfirm.id)).status).toBe('PAID');
+    expect(actions).toEqual(['confirm']);
   });
 
-  test('2.7.3 驳回后提示、列表移除且记录状态为REJECTED', async ({ page }) => {
+  test('2.7.3 历史记录驳回后提示并从列表移除', async ({ page }) => {
+    const actions = await mockPendingApi(page);
     await login(page, '/payments/pending');
-    const tenantName = `${dataPrefix}_pendingReject`;
+    const tenantName = `${dataPrefix}_历史待确认租客`;
     const cell = page.locator('.van-cell').filter({ hasText: tenantName });
     await expect(cell).toBeVisible();
-    const responsePromise = waitForApi(page, 'POST', `/payments/${pendingPayments.pendingReject.id}/confirm`);
     await cell.getByRole('button', { name: '驳回', exact: true }).click();
-    await pageApiResult(await responsePromise);
     await expect(page.locator('.van-toast')).toContainText('已驳回');
     await expect(page.locator('.van-cell').filter({ hasText: tenantName })).toHaveCount(0);
-    const records = await landlordGet<Payment[]>(`/payments?billId=${bills.pendingReject.id}`);
-    expect(records.find((item) => item.id === pendingPayments.pendingReject.id)?.status).toBe('REJECTED');
+    expect(actions).toEqual(['reject']);
   });
 
   test('2.7.4 无待确认收款时显示空状态', async ({ page }) => {

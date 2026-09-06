@@ -95,7 +95,7 @@ Tab 分类:全部/待付(PENDING)/已付(PAID)/逾期(OVERDUE),每行显示房�
 | `/login` | 登录/绑定 | `POST /auth/tenant/login`,`POST /tenant/bind` |
 | `/` | 我的账单 | `GET /tenant/bills` |
 | `/leases` | 我的租约(多租约时用) | `GET /tenant/leases` |
-| `/bills/:id/pay` | 付款上报 | `POST /payments/report` |
+| `/bills/:id/pay` | 在线支付 | `POST /payments/wechat/create-order`,`POST /payments/alipay/create-order` |
 
 ### 关键页面详情
 
@@ -105,17 +105,13 @@ mock 模式下带 `?mock_openid=xxx` 自动登录。登录后调 `GET /tenant/le
 **`/` 我的账单**
 `GET /tenant/bills` 返回的是"按租约分组的账单列表",按 requirements §8 的规则前端要正确处理三种情况:①`readonly:false` 且租约 ACTIVE → 正常显示全部账单,可操作;②`readonly:false` 且租约 ENDED(即接口已经帮忙过滤成只剩未结清的)→ 显示"该房源已退租,以下为未结清账单",仍可点进去付款;③`readonly:true` → 显示"当前无在租房源"提示 + 历史账单只读列表,不出现付款按钮。如果租客绑定了多份租约(同一人先后租过不同房间),顶部要有租约切换器,不要把多份租约的账单混在一个列表里让人分不清是哪个房间的。
 
-**`/bills/:id/pay` 付款上报**
-展示收款码图片 + 账单金额,表单:实付金额(默认等于账单金额,可改,对应部分支付场景)、付款日期、上传截图(可选),提交调 `POST /payments/report`。提交后按钮变灰/显示"待房东确认",不能重复提交同一账单的上报(除非上一笔被驳回)。
-
-**⚠️ 收款码图片来源需要后端补一个接口** —— 见下方「后端小缺口」第 1 条,这个页面暂时拿不到图片 URL,先按接口设计把 UI 搭好,等后端加了接口再接。
+**`/bills/:id/pay` 在线支付**
+展示账单金额与微信支付入口；支付宝仅在后端明确启用时开放。前端使用对应 `create-order` 接口，并轮询账单状态确认支付结果。服务端用 JWT 中的租客身份校验账单归属。原收款码、截图上传和人工付款上报流程已经下线；房东仍可处理历史待确认记录，也可从账单详情手动记账。
 
 ---
 
 ## 三、发现的后端小缺口(建议一并交给 Kiro 处理,不算前端的活但会卡前端页面)
 
-写这份文档梳理接口时发现两个小缺口,后端已有的接口覆盖不到,建议 Kiro 顺手补一下,别等前端写到这一步才发现卡住:
+写这份文档梳理接口时发现一个小缺口,后端已有的接口覆盖不到,建议 Kiro 顺手补一下,别等前端写到这一步才发现卡住:
 
-1. **租客端拿不到收款码图片。** `qrcodeImageUrl` 只能从 `GET /admin/settings` 拿,这个接口在 `LandlordGuard` 后面,租客端过不去。付款页(`/bills/:id/pay`)需要展示收款码图。建议加一个 `GET /tenant/qrcode`(挂 `TenantGuard` 或者干脆不设防,反正只是一张图片 URL,不敏感),只返回 `{ qrcodeImageUrl }`。
-
-2. **绑定邀请码后 JWT 没刷新,拿不到新 tenantId。** 首次登录时 `Tenant` 表里还没有这个 openid 对应的记录,所以登录换到的 JWT 里 `tenantId` 是空的;调完 `POST /tenant/bind` 之后,`Tenant.openid` 才被设上,但用户手里那个 JWT 还是绑定前签发的旧的,`tenantId` 依然是空,直接拿它去调 `GET /tenant/bills` 会报"未绑定租约"。前端要绕过去的话得在 bind 成功后重新调一次登录接口换新 token,多一次网络往返还容易被漏掉。建议更省事的做法:`POST /tenant/bind` 成功后直接在响应里带一个刷新过的新 JWT,前端替换掉本地存的 token 就行,不用多跳一次登录。
+1. **绑定邀请码后 JWT 没刷新,拿不到新 tenantId。** 首次登录时 `Tenant` 表里还没有这个 openid 对应的记录,所以登录换到的 JWT 里 `tenantId` 是空的;调完 `POST /tenant/bind` 之后,`Tenant.openid` 才被设上,但用户手里那个 JWT 还是绑定前签发的旧的,`tenantId` 依然是空,直接拿它去调 `GET /tenant/bills` 会报"未绑定租约"。前端要绕过去的话得在 bind 成功后重新调一次登录接口换新 token,多一次网络往返还容易被漏掉。建议更省事的做法:`POST /tenant/bind` 成功后直接在响应里带一个刷新过的新 JWT,前端替换掉本地存的 token 就行,不用多跳一次登录。
