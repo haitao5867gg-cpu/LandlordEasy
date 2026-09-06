@@ -9,4 +9,6 @@
 8. Before each delivery: git status and git diff --stat; include every changed/untracked file. Commit coherent work with tested hash/evidence. Never include secrets or personal data.
 9. Update CURRENT_STATE and assigned spec after material progress; risks/decisions/human actions as needed. GitHub Issue/PR links provide dispatch. Historical milestone completion stays historical; V1 release acceptance is separate.
 10. Merge no failing CI. CI absence is not green. No background work or scheduled monitoring is implied by a chat response; report what is actually running.
-
+11. CLI routing follows `specs/ORG-001-AI-CLI-ONBOARDING.md`: Kiro coordinates standard execution, Copilot handles mechanical work, Claude Code handles difficult security/integration work, and Commander retains product/release authority.
+12. Grant each CLI only the tools, paths and network destinations required by its assigned Spec. Claude Remote Control and Copilot allow-all modes are off by default. Production access always requires separate explicit authorization.
+13. Respect separate quota pools: Kiro/Copilot reset monthly on day 1; Claude resets Saturday with a five-hour window. Prefer the cheapest model that can safely satisfy acceptance, but never trade away correctness for quota.
