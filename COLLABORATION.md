@@ -1,5 +1,8 @@
 # 协作与交付规则（Claude ↔ Kiro ↔ spec-task agents）
 
+> 2026-09-05 V1 发布管理入口：`project-brain/CURRENT_STATE.md`、`project-brain/RELEASE_PLAN.md` 和 `AGENTS.md`。下方保留历史记录；旧角色/全量历史阅读/任务顺序/普通技术问题一律等待用户的规则已由本次交接取代。验证底线、安全约束和已确认商业规则继续有效。当前发布验收不以历史 checkbox 代替。
+
+
 本仓库是「房屋收租」项目的唯一信息源。Claude 负责需求、设计、任务拆分和 review；Kiro/其他 spec-task agents 按 `specs/` 实现与验证；GasCan 是最终决策人。以下规则是所有代理的硬性要求。
 
 ## 工作模式（2026-08-09 起）
