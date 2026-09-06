@@ -11,5 +11,7 @@
 | D-008 / Sep 5 | Current Work engineering agents may execute specs; Kiro/Claude integrations not assumed available | Environment capability check |
 | D-009 / Sep 5 | Preserve e-sign manual confirmation and latest authType=1 decision; do not revert to old design's polling/authType=2 | Historical M19.11/M20.5 plus code; no new legal/business decision |
 | D-010 / Sep 6 | Finish the Commander control system first; Haitao will then assist connecting Kiro CLI, Copilot CLI and Claude Code for spec-driven execution | Haitao owner instruction; external subscriptions/tools are not assumed callable until that handoff |
+| D-011 / Sep 6 | Accept Kiro 2.21.1, Copilot 1.0.82 and Claude Code 2.1.263 as bounded workers under ORG-001; each task still requires explicit Spec permissions and independent review | Successful isolated read-only bootstrap tests with clean repository invariants |
+| D-012 / Sep 6 | Route standard coordination to Kiro, mechanical work to Copilot and difficult security/integration work to Claude; conserve monthly Kiro/Copilot and weekly Claude quota | Haitao delegated tool/model selection to Commander; observed CLI capability and quota cycles |
 
 All future records include status (proposed/accepted/superseded), decision maker, reasoning and affected specs. Entries above are accepted except explicitly pending owner choices. Historical design.md sections can be older than tasks.md; inspect code and latest decision rather than reinstating obsolete behavior.
