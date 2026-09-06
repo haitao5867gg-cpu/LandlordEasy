@@ -460,7 +460,19 @@ describe('PaymentsService', () => {
       expect(prisma.bill.update).toHaveBeenCalledTimes(1);
     });
 
-    it('找不到支付记录时仍向网关返回成功', async () => {
+    it('支付宝关闭时回调返回 404 且不访问数据库', async () => {
+      await expect(
+        service.handleAlipayNotify({
+          out_trade_no: 'DISABLED',
+          trade_no: 'ALI-GATEWAY-DISABLED',
+          trade_status: 'TRADE_SUCCESS',
+        }),
+      ).rejects.toThrow(NotFoundException);
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('支付宝已启用但找不到支付记录时仍向网关返回成功', async () => {
+      process.env.ALIPAY_ENABLED = 'true';
       (prisma.payment.findUnique as jest.Mock).mockResolvedValue(null);
       await expect(
         service.handleAlipayNotify({

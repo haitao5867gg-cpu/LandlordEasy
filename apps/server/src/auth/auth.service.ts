@@ -2,6 +2,7 @@ import { Injectable, Inject, UnauthorizedException, Logger } from '@nestjs/commo
 import * as jwt from 'jsonwebtoken';
 import { PrismaService } from '../prisma/prisma.service';
 import { WECHAT_AUTH_SERVICE, IWechatAuthService } from '../wechat/wechat-auth.interface';
+import { getJwtSecret } from '../config/startup-config';
 
 export interface JwtPayload {
   sub: number;
@@ -23,7 +24,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     @Inject(WECHAT_AUTH_SERVICE) private readonly wechatAuth: IWechatAuthService,
   ) {
-    this.jwtSecret = process.env.JWT_SECRET || 'dev-secret';
+    this.jwtSecret = getJwtSecret();
     this.jwtExpiresIn = 7 * 24 * 60 * 60; // 7 days in seconds
   }
 

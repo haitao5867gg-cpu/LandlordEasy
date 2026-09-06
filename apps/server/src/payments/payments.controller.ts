@@ -24,6 +24,10 @@ import {
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { TenantGuard } from '../auth/guards/tenant.guard';
 import { JwtPayload } from '../auth/auth.service';
+import {
+  isPaymentSimulationEnabled,
+  resolveAlipayEnabled,
+} from '../config/startup-config';
 
 @Controller('payments')
 export class PaymentsController {
@@ -43,7 +47,7 @@ export class PaymentsController {
   @Post('alipay/create-order')
   @UseGuards(TenantGuard)
   createAlipayOrder(@Body() dto: CreateOnlinePaymentDto, @Req() req: Request) {
-    if (process.env.ALIPAY_ENABLED !== 'true') {
+    if (!resolveAlipayEnabled()) {
       throw new BadRequestException('支付宝支付暂未开放，请使用微信支付');
     }
     const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
@@ -73,11 +77,7 @@ export class PaymentsController {
   /** 仅 mock 模式可见；real 模式必须表现为接口不存在。 */
   @Post('mock/simulate-success')
   mockSimulateSuccess(@Body() dto: MockSimulateSuccessDto) {
-    const wechatPayMode =
-      process.env.WECHAT_PAY_MODE || process.env.PAYMENT_MODE || 'mock';
-    const alipayMode =
-      process.env.ALIPAY_MODE || process.env.PAYMENT_MODE || 'mock';
-    if (wechatPayMode === 'real' && alipayMode === 'real') {
+    if (!isPaymentSimulationEnabled()) {
       throw new NotFoundException();
     }
     return this.paymentsService.simulateSuccess(dto.outTradeNo);

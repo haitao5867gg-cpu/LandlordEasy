@@ -4,12 +4,14 @@ import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 
 describe('PaymentsController', () => {
+  const originalNodeEnv = process.env.NODE_ENV;
   const originalPaymentMode = process.env.PAYMENT_MODE;
   const originalWechatPayMode = process.env.WECHAT_PAY_MODE;
   const originalAlipayMode = process.env.ALIPAY_MODE;
   const originalAlipayEnabled = process.env.ALIPAY_ENABLED;
 
   beforeEach(() => {
+    process.env.NODE_ENV = 'test';
     delete process.env.PAYMENT_MODE;
     delete process.env.WECHAT_PAY_MODE;
     delete process.env.ALIPAY_MODE;
@@ -17,6 +19,8 @@ describe('PaymentsController', () => {
   });
 
   afterAll(() => {
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
     if (originalPaymentMode === undefined) delete process.env.PAYMENT_MODE;
     else process.env.PAYMENT_MODE = originalPaymentMode;
     if (originalWechatPayMode === undefined) delete process.env.WECHAT_PAY_MODE;
@@ -81,6 +85,37 @@ describe('PaymentsController', () => {
     expect(paymentsService.simulateSuccess).not.toHaveBeenCalled();
   });
 
+  it('production 中即使禁用支付宝且其模式为 mock，mock 接口也直接返回 404', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.WECHAT_PAY_MODE = 'real';
+    process.env.ALIPAY_MODE = 'mock';
+    process.env.ALIPAY_ENABLED = 'false';
+    const paymentsService = {
+      simulateSuccess: jest.fn(),
+    } as unknown as PaymentsService;
+    const controller = new PaymentsController(paymentsService);
+
+    expect(() =>
+      controller.mockSimulateSuccess({ outTradeNo: 'WX-PRODUCTION' }),
+    ).toThrow(NotFoundException);
+    expect(paymentsService.simulateSuccess).not.toHaveBeenCalled();
+  });
+
+  it('微信为 real 且支付宝禁用时 mock 接口直接返回 404', () => {
+    process.env.WECHAT_PAY_MODE = 'real';
+    process.env.ALIPAY_MODE = 'mock';
+    process.env.ALIPAY_ENABLED = 'false';
+    const paymentsService = {
+      simulateSuccess: jest.fn(),
+    } as unknown as PaymentsService;
+    const controller = new PaymentsController(paymentsService);
+
+    expect(() =>
+      controller.mockSimulateSuccess({ outTradeNo: 'WX-DISABLED-ALIPAY' }),
+    ).toThrow(NotFoundException);
+    expect(paymentsService.simulateSuccess).not.toHaveBeenCalled();
+  });
+
   it('两个渠道都是 mock 时把请求交给 service', async () => {
     process.env.WECHAT_PAY_MODE = 'mock';
     process.env.ALIPAY_MODE = 'mock';
@@ -99,6 +134,7 @@ describe('PaymentsController', () => {
   it('混合模式下不提前拦截，由 service 按渠道分别允许或拒绝', async () => {
     process.env.WECHAT_PAY_MODE = 'real';
     process.env.ALIPAY_MODE = 'mock';
+    process.env.ALIPAY_ENABLED = 'true';
     const success = { code: 'SUCCESS', message: '成功' };
     const paymentsService = {
       simulateSuccess: jest.fn((outTradeNo: string) =>
