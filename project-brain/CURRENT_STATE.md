@@ -47,7 +47,13 @@ Legal text and safety-undertaking content are deferred by Haitao to a later dedi
 - [#10 REL-002](https://github.com/haitao5867gg-cpu/LandlordEasy/pull/10) → REL-003
 - [#11 REL-001](https://github.com/haitao5867gg-cpu/LandlordEasy/pull/11) → REL-002
 
-Cumulative candidate `142027e6b0266640ed806e2487ff54359d64312f` passed [Actions run 34020718504](https://github.com/haitao5867gg-cpu/LandlordEasy/actions/runs/34020718504). REL-002 integration candidate `4711f1bf657b078396f1a0c44076c301ea2d5506` passed [run 34020541332](https://github.com/haitao5867gg-cpu/LandlordEasy/actions/runs/34020541332). Both executed locked install, Prisma generate, server typecheck, full Jest with real Chromium PDF generation, and both H5 typecheck/build gates. These results do not replace pending real MySQL, proxy, provider and browser evidence.
+Cumulative control-system candidate `9f064a39d250a00ea4bc86cf2d02bde31b60834e` passed [Actions run 34021383258](https://github.com/haitao5867gg-cpu/LandlordEasy/actions/runs/34021383258). REL-002 integration candidate `4711f1bf657b078396f1a0c44076c301ea2d5506` passed [run 34020541332](https://github.com/haitao5867gg-cpu/LandlordEasy/actions/runs/34020541332). Both executed locked install, Prisma generate, server typecheck, full Jest with real Chromium PDF generation, and both H5 typecheck/build gates. These results do not replace pending real MySQL, proxy, provider and browser evidence.
+
+## Next execution wave
+- [#12 OPS-001 connected dev rehearsal](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/12) — proxy/file migration, prod-like config, MySQL failure/concurrency and signing recovery evidence.
+- [#13 QA-001 M19–M21 E2E](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/13) — connected end-to-end acceptance after OPS-001 provides a pinned environment.
+- [#14 UX-001 product polish](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/14) — complete mobile/WeChat journey polish after the first E2E pass.
+- [#15 ORG-001 AI CLI onboarding](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/15) — Haitao-assisted Kiro/Copilot/Claude connection after the Commander ready signal.
 
 ## Latest checkpoint — 2026-09-06
 - Control plane and all five blocker implementations are present as the Draft PR stack above; `main` and `dev` remain untouched and no PR has been merged.
