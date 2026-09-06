@@ -188,7 +188,7 @@ model ContractSigningTask {
   overdueToleranceDays    Int?
   cleaningFee             Decimal?  @db.Decimal(10, 2)
   renewalNoticeDays       Int?
-  status                  String    @default("PENDING_SCAN") // PENDING_SCAN / FOLLOWED / CREATED / SIGNED / EXPIRED
+  status                  String    @default("PENDING_SCAN") // PENDING_SCAN / FOLLOWED / LAUNCHING / CREATED / SIGNED / EXPIRED
   followerOpenid          String?
   weiqianBId              String?
   weiqianShortCode        String?

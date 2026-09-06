@@ -87,7 +87,7 @@ describe('WechatController contract signing events', () => {
     expect(res.send).toHaveBeenCalledWith('success');
   });
 
-  it('自动发起失败时保留 FOLLOWED、发送确认消息且 webhook 仍返回 200', async () => {
+  it('自动发起失败时发送确认消息且 webhook 仍返回 200', async () => {
     const xml =
       '<xml><FromUserName><![CDATA[openid-1]]></FromUserName>' +
       '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>' +

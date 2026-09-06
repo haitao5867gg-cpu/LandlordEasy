@@ -69,6 +69,37 @@ for (const status of ['CREATED', 'SIGNED']) {
   });
 }
 
+test('landlord LAUNCHING: ambiguity is visible and duplicate launch is unavailable', async ({ page }) => {
+  await login(page, 'landlord');
+  await page.route('**/api/v1/**', async route => {
+    const req = route.request();
+    const path = new URL(req.url()).pathname;
+    expect(req.headers().authorization).toBe(`Bearer ${token}`);
+    expect(req.method()).toBe('GET');
+    if (path === '/api/v1/leases/7') {
+      return route.fulfill({
+        json: {
+          ...lease,
+          contractSigningTasks: [
+            { id: 42, status: 'LAUNCHING', createdAt: '2026-09-05T00:00:00Z' },
+          ],
+        },
+      });
+    }
+    if (path === '/api/v1/handover' || path === '/api/v1/properties') {
+      return route.fulfill({ json: [] });
+    }
+    throw new Error(`Unexpected fixture request ${req.url()}`);
+  });
+
+  await page.goto('http://127.0.0.1:5183/leases/7');
+  await expect(page.getByText('发起结果待核对', { exact: true })).toBeVisible();
+  await expect(page.getByText('签约服务的返回结果不确定,系统已暂停自动重试,避免重复发起。')).toBeVisible();
+  await expect(page.getByText(/LE-42/)).toBeVisible();
+  await expect(page.getByRole('button', { name: '发起签署', exact: true })).toHaveCount(0);
+  await capture(page, 'landlord-launching');
+});
+
 test('tenant historic contract: list/download failure, retry, auth and duplicate prevention', async ({ page }) => {
   await login(page, 'tenant');
   let lists = 0, reads = 0;
