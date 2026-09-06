@@ -292,6 +292,34 @@ describe('PaymentsService', () => {
     });
   });
 
+  describe('tenantReport', () => {
+    it('租客上报:状态为 PENDING_CONFIRM', async () => {
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue({ id: 40 });
+      (prisma.payment.create as jest.Mock).mockResolvedValue({
+        id: 8,
+        status: 'PENDING_CONFIRM',
+        channel: 'QRCODE',
+      });
+
+      const result = await service.tenantReport({
+        billId: 40,
+        amount: 1000,
+        paidAt: '2026-07-20',
+        proofUrl: 'https://example.com/proof.jpg',
+      });
+
+      expect(prisma.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: 'PENDING_CONFIRM',
+            channel: 'QRCODE',
+            proofUrl: 'https://example.com/proof.jpg',
+          }),
+        }),
+      );
+    });
+  });
+
   describe('在线支付下单', () => {
     const payableBill = {
       id: 50,
@@ -460,7 +488,19 @@ describe('PaymentsService', () => {
       expect(prisma.bill.update).toHaveBeenCalledTimes(1);
     });
 
-    it('找不到支付记录时仍向网关返回成功', async () => {
+    it('支付宝关闭时回调返回 404 且不访问数据库', async () => {
+      await expect(
+        service.handleAlipayNotify({
+          out_trade_no: 'DISABLED',
+          trade_no: 'ALI-GATEWAY-DISABLED',
+          trade_status: 'TRADE_SUCCESS',
+        }),
+      ).rejects.toThrow(NotFoundException);
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('支付宝已启用但找不到支付记录时仍向网关返回成功', async () => {
+      process.env.ALIPAY_ENABLED = 'true';
       (prisma.payment.findUnique as jest.Mock).mockResolvedValue(null);
       await expect(
         service.handleAlipayNotify({

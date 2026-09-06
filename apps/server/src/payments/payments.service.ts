@@ -8,12 +8,21 @@ import {
 import { createDecipheriv, createVerify, randomBytes } from 'crypto';
 import QRCode from 'qrcode';
 import { PrismaService } from '../prisma/prisma.service';
-import { ConfirmPaymentDto, ManualPaymentDto } from './payments.dto';
+import {
+  ConfirmPaymentDto,
+  ManualPaymentDto,
+  TenantReportPaymentDto,
+} from './payments.dto';
 import {
   IWechatPayService,
   WECHAT_PAY_SERVICE,
 } from './gateways/wechat-pay.interface';
 import { ALIPAY_SERVICE, IAlipayService } from './gateways/alipay.interface';
+import {
+  resolveAlipayMode,
+  resolveAlipayEnabled,
+  resolveWechatPayMode,
+} from '../config/startup-config';
 import { loadPemKey } from './gateways/pem-key.util';
 
 export interface WechatNotifyBody {
@@ -118,6 +127,23 @@ export class PaymentsService {
     return payment;
   }
 
+  /** 租客上报 */
+  async tenantReport(dto: TenantReportPaymentDto) {
+    const bill = await this.prisma.bill.findUnique({ where: { id: dto.billId } });
+    if (!bill) throw new NotFoundException('账单不存在');
+
+    return this.prisma.payment.create({
+      data: {
+        billId: dto.billId,
+        channel: 'QRCODE',
+        amount: dto.amount,
+        status: 'PENDING_CONFIRM',
+        proofUrl: dto.proofUrl,
+        paidAt: new Date(dto.paidAt),
+      },
+    });
+  }
+
   async createWechatOrder(
     billId: number,
     tenantId: number | undefined,
@@ -206,6 +232,7 @@ export class PaymentsService {
   }
 
   async handleAlipayNotify(body: AlipayNotifyBody) {
+    if (!resolveAlipayEnabled()) throw new NotFoundException();
     if (this.alipayMode === 'real') this.verifyAlipayNotify(body);
     if (
       body.trade_status &&
@@ -225,6 +252,9 @@ export class PaymentsService {
   }
 
   async simulateSuccess(outTradeNo: string) {
+    if (process.env.NODE_ENV?.trim() === 'production') {
+      throw new NotFoundException();
+    }
     const payment = await this.prisma.payment.findUnique({
       where: { outTradeNo },
     });
@@ -256,15 +286,15 @@ export class PaymentsService {
   }
 
   private get wechatPayMode(): string {
-    return process.env.WECHAT_PAY_MODE || process.env.PAYMENT_MODE || 'mock';
+    return resolveWechatPayMode();
   }
 
   private get alipayMode(): string {
-    return process.env.ALIPAY_MODE || process.env.PAYMENT_MODE || 'mock';
+    return resolveAlipayMode();
   }
 
   private assertAlipayEnabled(): void {
-    if (process.env.ALIPAY_ENABLED !== 'true') {
+    if (!resolveAlipayEnabled()) {
       throw new BadRequestException('支付宝支付暂未开放，请使用微信支付');
     }
   }

@@ -14,8 +14,9 @@ import { RealWechatQrcodeService } from './real-wechat-qrcode.service';
 import { RealWechatCustomerServiceService } from './real-wechat-customer-service.service';
 import { WechatAccessTokenService } from './wechat-access-token.service';
 import { WechatEventService } from './wechat-event.service';
+import { resolveWechatMode } from '../config/startup-config';
 
-const wechatMode = process.env.WECHAT_MODE || 'mock';
+const wechatMode = resolveWechatMode();
 
 const authProvider = {
   provide: WECHAT_AUTH_SERVICE,
