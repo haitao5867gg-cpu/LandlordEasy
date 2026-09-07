@@ -193,8 +193,15 @@ class SecurityTests(RunnerTestCase):
             with self.assertRaises(runner.ValidationError): runner.checked_child(self.worktrees, "job-abc", True)
         finally:
             if link.exists() or link.is_symlink(): link.unlink()
-        env = runner.safe_environment({"PATH": "/bin", "TOKEN": "sec" + "ret", "HOME": "/safe"})
-        self.assertEqual(env, {"PATH": "/bin", "HOME": "/safe"})
+        source = {"PATH": "/bin", "TOKEN": "sec" + "ret", "HOME": "/safe",
+                  "USER": "forged", "LOGNAME": "forged", "SSH_AUTH_SOCK": "/unsafe/socket"}
+        record = types.SimpleNamespace(pw_name="trusted_user")
+        with mock.patch.object(runner.os, "getuid", return_value=501), \
+             mock.patch.object(runner.pwd, "getpwuid", return_value=record) as getpwuid:
+            env = runner.safe_environment(source)
+        getpwuid.assert_called_once_with(501)
+        self.assertEqual(env, {"PATH": "/bin", "HOME": "/safe", "USER": "trusted_user"})
+        self.assertNotIn("LOGNAME", env); self.assertNotIn("SSH_AUTH_SOCK", env)
         simulated_value = "token=" + "verysecretvalue"
         simulated_classic_token = "ghp_" + "abcdefghijklmnopqrstuv"
         safe = runner.ensure_safe_post(simulated_value + " " + simulated_classic_token)
@@ -203,6 +210,44 @@ class SecurityTests(RunnerTestCase):
         private_key = "-----BEGIN " + "PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"
         cleaned = runner.redact(cloud_key + " " + private_key)
         self.assertNotIn(cloud_key, cleaned); self.assertNotIn("PRIVATE KEY", cleaned)
+
+    def test_safe_environment_fails_closed_for_unavailable_or_invalid_user_record(self):
+        failures = (KeyError(501), OSError("fixture"), types.SimpleNamespace(pw_name=""),
+                    types.SimpleNamespace(pw_name="bad user"), types.SimpleNamespace(pw_name="-bad"),
+                    types.SimpleNamespace(pw_name="x" * 256))
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                effect = failure if isinstance(failure, BaseException) else None
+                returned = failure if effect is None else None
+                with mock.patch.object(runner.os, "getuid", return_value=501), \
+                     mock.patch.object(runner.pwd, "getpwuid", side_effect=effect,
+                                       return_value=returned), \
+                     self.assertRaises(runner.RunnerError):
+                    runner.safe_environment({"HOME": "/safe", "USER": "forged"})
+
+    def test_all_provider_adapters_receive_the_same_restricted_environment(self):
+        source = {"HOME": "/safe", "PATH": "/bin", "LANG": "C", "USER": "forged",
+                  "LOGNAME": "forged", "SSH_AUTH_SOCK": "/unsafe/socket",
+                  "CLAUDE_CONFIG_DIR": "/unsafe", "ANTHROPIC_API_KEY": "fixture"}
+        expected = {"HOME": "/safe", "PATH": "/bin", "LANG": "C", "USER": "trusted_user"}
+        models = {"kiro": "gpt-5.6-luna", "copilot": "default", "claude": "claude-sonnet-5"}
+        captured = {}
+        def fake_execute(argv, **kwargs):
+            captured[Path(argv[0]).name + str(len(captured))] = kwargs["env"]
+            return runner.Result(0, '{"status":"ok","summary":"done","evidence":[]}',
+                                 False, False, 0.1)
+        record = types.SimpleNamespace(pw_name="trusted_user")
+        with mock.patch.object(runner.os, "environ", source), \
+             mock.patch.object(runner.os, "getuid", return_value=501), \
+             mock.patch.object(runner.pwd, "getpwuid", return_value=record), \
+             mock.patch.object(runner, "execute", side_effect=fake_execute):
+            for worker, model in models.items():
+                job = runner.Job.from_comment(self.comment(worker=worker, model=model), self.config)
+                attempt, attempts = runner.execute_with_failover(
+                    job, runner.dataclasses.replace(self.config, provider_failover=False), self.repo)
+                self.assertIsNotNone(attempt.output); self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(captured), 3)
+        for environment in captured.values(): self.assertEqual(environment, expected)
 
     def test_terminal_lifecycle_falls_back_to_fixed_safe_evidence(self):
         job = runner.Job.from_comment(self.comment(), self.config)

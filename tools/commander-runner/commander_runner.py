@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import plistlib
+import pwd
 import re
 import shutil
 import signal
@@ -362,7 +363,17 @@ def checked_child(root: Path, child_name: str, must_exist: bool = False) -> Path
 def safe_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
     source = os.environ if source is None else source
     allowed = {"HOME", "PATH", "LANG", "LC_ALL", "TERM", "TMPDIR", "XDG_CONFIG_HOME"}
-    return {key: value for key, value in source.items() if key in allowed and isinstance(value, str)}
+    try:
+        username = pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError) as exc:
+        raise RunnerError("unable to resolve trusted local user") from exc
+    if (not isinstance(username, str) or not username or len(username) > 255 or
+            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]*", username)):
+        raise RunnerError("trusted local user record is invalid")
+    environment = {key: value for key, value in source.items()
+                   if key in allowed and isinstance(value, str)}
+    environment["USER"] = username
+    return environment
 
 def redact(text: str, limit: int = 4000) -> str:
     value = text.replace(str(Path.home()), "$HOME")

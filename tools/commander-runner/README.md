@@ -8,6 +8,8 @@ Copy `config.example.json` to a local owner-readable `config.json`, replace ever
 
 The config fixes the repository, queue Issue, separate Commander and Executor GitHub logins, immutable runner ID, stable runtime directory, absolute provider and operational (`gh`, `git`, `python`) executable locations, state directory, polling/lease limits, and whether cross-provider failover is explicitly enabled. Both logins use strict GitHub-name validation and must differ. `commander_login` authorizes job comments only; `executor_login` must match the local `gh` identity used to read the fixed Issue, post lifecycle results, and perform controlled delivery pushes. Neither identity is included in status, logs, or public lifecycle bodies. Absolute executable paths are mandatory because LaunchAgent PATH resolution is intentionally not trusted. The runner never reads `.env`, keychains, credential files, SSH configuration, or shell history; CLI authentication remains the enrolled CLI's responsibility.
 
+Provider subprocesses receive a fixed environment allowlist. `USER` is resolved from the current POSIX user record with `pwd.getpwuid(os.getuid())`, never inherited from the parent environment; an unavailable, empty, or malformed record fails closed. `LOGNAME`, `SSH_AUTH_SOCK`, arbitrary `CLAUDE_`/`ANTHROPIC_` variables, and the full shell environment are not forwarded.
+
 `enabled_providers`, `enabled_profiles`, and `enabled_quality_gates` are explicit owner-only activation switches. The first activation configuration enables only `repo_read`; write and delivery remain implemented but disabled until Phase 2 approval. Disabled providers do not block `doctor`, so a provider that fails later workspace-sentinel validation can be turned off independently.
 
 ## Commands
