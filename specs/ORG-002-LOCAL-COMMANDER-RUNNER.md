@@ -1,6 +1,6 @@
 # ORG-002 — Local Commander Runner
 
-Priority: control-plane enablement. Status: READY FOR IMPLEMENTATION. Owner: Commander. Acceptance: Commander + Haitao activation.
+Priority: control-plane enablement. Status: **ACCEPTED — scoped development execution, 2026-09-07 UTC**. Owner: Commander. Baseline: `77487255a60502ae5cef9f753380629289ba39e1`. Acceptance record: Commander + Haitao activation, see "Acceptance record" below.
 
 ## Objective
 
@@ -69,8 +69,8 @@ Reject unknown fields, duplicate IDs, malformed JSON, moving refs where an exact
 
 ### `repo_delivery`
 
-- Adds fixed Git status/diff/check, commit and explicit same-name branch push operations.
-- No force push, rebase, branch deletion, tags, PR merge or main/dev direct writes.
+- Adds fixed Git status/diff/check, commit and explicit same-name branch push operations. The runner derives the branch name from a per-job UUID; it creates and pushes only that UUID-derived branch.
+- No force push, rebase, branch deletion, tags, PR merge, or direct writes to `main`, `dev`, or the infra Commander Runner branch (`tools/commander-runner/`'s own delivery branch). `repo_delivery` cannot push `main`, `dev`, or the infra Commander Runner branch directly under any job payload.
 - Requires exact base SHA and clean-state checks.
 - Requires a non-empty owner-controlled exact-path allowlist for the selected quality gate. All staged additions, modifications and deletions must match it both before and after the gate; jobs, prompts and provider output cannot expand it.
 - Disables commit hooks and verifies the committed tree exactly matches the final validated staged tree before push.
@@ -103,7 +103,7 @@ Model routing follows `specs/ORG-001-AI-CLI-ONBOARDING.md`.
 - Record comment ID + job ID before execution using an atomic claim so restarts cannot replay work.
 - Post lifecycle states: CLAIMED, COMPLETED, FAILED, REJECTED or TIMED_OUT.
 - Do not execute edited comments; bind the claim to a content hash.
-- GitHub writes are limited to comments on the queue Issue. No Issue edits, labels, PR actions, releases, workflows or repository settings.
+- GitHub writes are limited to comments on the queue Issue plus, only for jobs running under the hardened `repo_delivery` profile with a valid human-approval reference, a single push of the job's UUID-derived branch. No Issue edits, labels, PR actions, releases, workflows or repository-settings changes exist in any profile. Every other GitHub action — including merges, direct pushes to `main`/`dev`, and any write outside the queue Issue comment thread and the one allowed delivery-branch push — remains entirely outside the Runner and stays a manual, separately authorized action.
 
 ## Secret and output handling
 
@@ -163,6 +163,29 @@ After implementation PR review:
 8. From the MacBook or phone, create no local execution dependency: close the MacBook-side worker session and prove the Mac mini alone claims the next canary.
 
 Only then mark ORG-002 ACCEPTED and resume OPS-001 through the queue.
+
+## Acceptance record
+
+As of 2026-09-07 UTC, ORG-002 is **ACCEPTED for scoped development execution** at Commander Runner baseline `77487255a60502ae5cef9f753380629289ba39e1`, on the following independently observed evidence:
+
+- `repo_read` canary jobs completed for Kiro, Copilot and Claude, each round-tripped through the queue Issue with a sanitized result comment.
+- Stop/restart checks proved no job replay after the runner was stopped and restarted mid-queue.
+- A `repo_write_test` canary ran a reversible repository-local build/typecheck/test command inside an isolated worktree with no push.
+- Dispatcher (`commander_login`) and Executor (`executor_login`) GitHub identities were confirmed distinct and independently validated; Executor-authored comments were confirmed ignored as non-jobs.
+- The runner ran stably across the canary sequence with no unexpected macOS approval, network destination, or permission escalation.
+- `repo_delivery` exact-path allowlist enforcement was exercised: staged changes outside the owner-controlled allowlist were rejected both before and after the quality gate.
+- The mandatory bounded human-approval reference was required and checked on every `repo_delivery` job; jobs on other profiles that supplied one were rejected.
+- Provider/profile capability enforcement is independently fail closed per worker, matching the active capability matrix below; failover between providers remains disabled.
+
+This acceptance is scoped to development execution only. It does not constitute Production readiness, deployment, a merge to `main`, object storage access, production database access, real third-party provider verification, or legal approval. Mac mini physical enrollment/activation steps not covered by the canary evidence above remain to be completed per the "Activation acceptance" checklist.
+
+### Active capability matrix
+
+| Worker | `repo_read` | `repo_write_test` | `repo_delivery` | Basis |
+|---|---|---|---|---|
+| Kiro | Yes | Yes | Yes | Canary evidence above |
+| GitHub Copilot | Yes | No | No | Copilot CLI 1.0.83 headless write behavior not validated; write/delivery jobs are rejected at parse time and never routed to Copilot by failover |
+| Claude | Yes | Yes | Yes | Enabled after stable authentication was confirmed in both interactive and Runner (headless) environments |
 
 ## Stop conditions
 

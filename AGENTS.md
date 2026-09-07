@@ -6,7 +6,7 @@
 1. 本文件。
 2. `project-brain/CURRENT_STATE.md`。
 3. `project-brain/RELEASE_PLAN.md`。
-4. 分配的 `specs/SEC-*.md` / `specs/REL-*.md` 和对应 Issue。
+4. 当前分配的 spec（不限于 `specs/SEC-*.md` / `specs/REL-*.md`，也包括 `specs/ORG-*.md` 等其他已分配 spec）和对应 Issue。
 5. 相关代码；需要历史依据时查 `specs/requirements.md`、`specs/design.md`、`specs/tasks.md`、`review/review-notes.md`、`PROJECT_STATUS.md`。
 
 ## 当前工作规则
