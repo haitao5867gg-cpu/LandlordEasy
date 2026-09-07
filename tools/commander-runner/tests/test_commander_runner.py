@@ -36,6 +36,7 @@ class RunnerTestCase(unittest.TestCase):
             enabled_providers=frozenset(runner.WORKERS), enabled_profiles=frozenset(runner.PROFILES),
             enabled_quality_gates=frozenset({"none", "unit"}),
             quality_gates={"none": (), "unit": ((sys.executable, "-c", "print('ok')"),)},
+            delivery_path_allowlists={"unit": frozenset({"allowed.txt"})},
             executable_paths={"kiro": sys.executable, "copilot": sys.executable, "claude": sys.executable},
         )
     def tearDown(self): self.tmp.cleanup()
@@ -74,6 +75,9 @@ class SchemaTests(RunnerTestCase):
         example = json.loads((HERE / "config.example.json").read_text())
         self.assertEqual(example["enabled_profiles"], ["repo_read"])
         self.assertEqual(example["enabled_quality_gates"], ["none"])
+        self.assertEqual(example["delivery_path_allowlists"]["org002_python"], [
+            "AGENTS.md", "project-brain/CURRENT_STATE.md", "project-brain/RELEASE_PLAN.md",
+            "project-brain/RISKS.md", "specs/ORG-002-LOCAL-COMMANDER-RUNNER.md"])
         self.assertNotEqual(example["commander_login"], example["executor_login"])
         runner.validate_github_login(example["commander_login"], "commander_login")
         runner.validate_github_login(example["executor_login"], "executor_login")
@@ -159,14 +163,69 @@ class SchemaTests(RunnerTestCase):
             self.config, enabled_profiles=frozenset({"repo_delivery"}),
             enabled_quality_gates=frozenset({"unit"}))
         valid = runner.Job.from_comment(
-            self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref="approval-17"),
+            self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref="  approval-17  "),
             delivery_config)
         self.assertEqual(valid.human_approval_ref, "approval-17")
-        for value in ({"unexpected": True}, "x" * 513, "approval; run something"):
+        for value in (None, "", "   ", {"unexpected": True}, "x" * 513, "approval; run something"):
             with self.subTest(value=value), self.assertRaises(runner.ValidationError):
                 runner.Job.from_comment(
                     self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref=value),
                     delivery_config)
+        with self.assertRaises(runner.ValidationError):
+            runner.Job.from_comment(self.comment(profile="repo_delivery", quality_gate="unit"), delivery_config)
+        for profile in ("repo_read", "repo_write_test"):
+            quality_gate = "none" if profile == "repo_read" else "unit"
+            with self.subTest(profile=profile), self.assertRaises(runner.ValidationError):
+                runner.Job.from_comment(
+                    self.comment(profile=profile, quality_gate=quality_gate,
+                                 human_approval_ref="approval-17"), self.config)
+
+    def test_delivery_requires_nonempty_owner_path_allowlist(self):
+        config = runner.dataclasses.replace(
+            self.config, enabled_profiles=frozenset({"repo_delivery"}),
+            enabled_quality_gates=frozenset({"unit"}), delivery_path_allowlists={})
+        with self.assertRaises(runner.ValidationError):
+            runner.Job.from_comment(self.comment(profile="repo_delivery", quality_gate="unit",
+                                                  human_approval_ref="approval-17"), config)
+        write_config = runner.dataclasses.replace(config, enabled_profiles=frozenset({"repo_write_test"}))
+        self.assertEqual(runner.Job.from_comment(
+            self.comment(profile="repo_write_test", quality_gate="unit"), write_config).profile,
+            "repo_write_test")
+
+    def test_delivery_path_allowlist_config_validation_and_optional_default(self):
+        self.assertEqual(runner.Config.load(self.write_config()).delivery_path_allowlists, {})
+        valid = self.config_data()
+        valid["quality_gates"]["unit"] = [[sys.executable, "--version"]]
+        valid["delivery_path_allowlists"] = {"unit": ["AGENTS.md", "project-brain/RISKS.md"]}
+        loaded = runner.Config.load(self.write_config(valid))
+        self.assertEqual(loaded.delivery_path_allowlists["unit"],
+                         frozenset({"AGENTS.md", "project-brain/RISKS.md"}))
+        invalid_paths = ("", "/absolute", ".", "..", "../escape", "a/../b", "a/./b",
+                         "a//b", "trailing/", "a\\b",
+                         "duplicate", "bad\x00path", "bad\npath", "*.md", "file[0].md")
+        for path in invalid_paths:
+            data = json.loads(json.dumps(valid))
+            data["delivery_path_allowlists"] = {"unit": [path, path] if path == "duplicate" else [path]}
+            with self.subTest(path=repr(path)), self.assertRaises(runner.ValidationError):
+                runner.Config.load(self.write_config(data))
+        undefined = json.loads(json.dumps(valid))
+        undefined["delivery_path_allowlists"] = {"missing": ["AGENTS.md"]}
+        with self.assertRaises(runner.ValidationError):
+            runner.Config.load(self.write_config(undefined))
+
+    def test_control_plane_five_file_delivery_passes_static_job_validation(self):
+        paths = frozenset({
+            "AGENTS.md", "project-brain/CURRENT_STATE.md", "project-brain/RELEASE_PLAN.md",
+            "project-brain/RISKS.md", "specs/ORG-002-LOCAL-COMMANDER-RUNNER.md"})
+        config = runner.dataclasses.replace(
+            self.config, enabled_profiles=frozenset({"repo_delivery"}),
+            enabled_quality_gates=frozenset({"unit"}),
+            delivery_path_allowlists={"unit": paths})
+        job = runner.Job.from_comment(
+            self.comment(profile="repo_delivery", quality_gate="unit",
+                         human_approval_ref="commander-approval-17"), config)
+        self.assertEqual(job.profile, "repo_delivery")
+        self.assertEqual(config.delivery_path_allowlists[job.quality_gate], paths)
 
 class SecurityTests(RunnerTestCase):
     def test_shell_fragments_are_rejected(self):
@@ -466,15 +525,78 @@ class ProviderAndQuotaTests(RunnerTestCase):
                 self.assertIsInstance(argv, tuple); self.assertNotIn("sh", Path(argv[0]).name)
 
     def test_delivery_runs_gate_between_two_staged_snapshot_checks(self):
-        job = runner.Job.from_comment(self.comment(profile="repo_delivery", quality_gate="unit"), self.config)
+        job = runner.Job.from_comment(
+            self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref="approval-17"),
+            self.config)
         events = []
-        with mock.patch.object(runner, "stage_and_validate", side_effect=lambda *args: events.append("stage") or ()), \
+        with mock.patch.object(runner, "stage_and_validate",
+                               side_effect=lambda *args, **kwargs: events.append("stage") or ()) as stage, \
              mock.patch.object(runner, "run_quality_gate", side_effect=lambda *args: events.append("gate") or ()), \
-             mock.patch.object(runner, "git_checked", side_effect=["", "", "b" * 40]) as git:
+             mock.patch.object(runner, "git_checked",
+                               side_effect=["c" * 40, "", "c" * 40, "", "b" * 40]) as git:
             self.assertEqual(runner.deliver_worktree(self.config, job, self.repo), "b" * 40)
         self.assertEqual(events, ["stage", "gate", "stage"])
-        self.assertEqual(git.call_args_list[0].args[0][0], "commit")
-        self.assertEqual(git.call_args_list[1].args[0][0], "push")
+        self.assertEqual([call.kwargs["delivery_gate"] for call in stage.call_args_list], ["unit", "unit"])
+        self.assertEqual(git.call_args_list[0].args[0], ["write-tree"])
+        self.assertEqual(git.call_args_list[1].args[0][:3],
+                         ["-c", "core.hooksPath=/dev/null", "commit"])
+        self.assertEqual(git.call_args_list[2].args[0], ["rev-parse", "HEAD^{tree}"])
+        self.assertEqual(git.call_args_list[3].args[0],
+                         ["push", "origin", f"{job.worktree_id}:{job.worktree_id}"])
+
+    def test_committed_tree_mismatch_blocks_push(self):
+        job = runner.Job.from_comment(
+            self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref="approval-17"),
+            self.config)
+        with mock.patch.object(runner, "stage_and_validate", return_value=()), \
+             mock.patch.object(runner, "run_quality_gate", return_value=()), \
+             mock.patch.object(runner, "git_checked",
+                               side_effect=["a" * 40, "", "b" * 40]) as git, \
+             self.assertRaises(runner.RunnerError):
+            runner.deliver_worktree(self.config, job, self.repo)
+        self.assertFalse(any(call.args[0][0] == "push" for call in git.call_args_list))
+
+    def test_delivery_allowlist_checks_add_modify_and_delete_paths_exactly(self):
+        allowed = frozenset({"new.md", "changed.md", "deleted.md"})
+        entries = (("000000", "100644", "new.md"), ("100644", "100644", "changed.md"),
+                   ("100644", "000000", "deleted.md"))
+        runner.validate_delivery_snapshot(entries, "safe", allowed)
+        for entry in entries:
+            out_of_scope = (entry[0], entry[1], "outside.md")
+            with self.subTest(entry=entry), self.assertRaises(runner.RunnerError):
+                runner.validate_delivery_snapshot((out_of_scope,), "safe", allowed)
+
+    def test_quality_gate_toctou_extra_file_blocks_commit_and_push(self):
+        git = shutil.which("git")
+        self.assertIsNotNone(git)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self.assertEqual(runner.execute([git, "init", "--quiet"], timeout=10, cap=8192,
+                                            cwd=repo).returncode, 0)
+            allowed = repo / "allowed.txt"
+            allowed.write_text("baseline\n")
+            self.assertEqual(runner.execute([git, "add", "--all"], timeout=10, cap=8192,
+                                            cwd=repo).returncode, 0)
+            self.assertEqual(runner.execute(
+                [git, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--quiet", "-m", "baseline"], timeout=10, cap=8192,
+                cwd=repo).returncode, 0)
+            allowed.write_text("approved change\n")
+            config = runner.dataclasses.replace(
+                self.config, operational_executables={**self.config.operational_executables, "git": git},
+                delivery_path_allowlists={"unit": frozenset({"allowed.txt"})})
+            job = runner.Job.from_comment(
+                self.comment(profile="repo_delivery", quality_gate="unit",
+                             human_approval_ref="approval-17"), config)
+            def gate_side_effect(*args):
+                (repo / "outside.txt").write_text("late change\n")
+                return ()
+            with mock.patch.object(runner, "run_quality_gate", side_effect=gate_side_effect), \
+                 self.assertRaises(runner.RunnerError):
+                runner.deliver_worktree(config, job, repo)
+            count = runner.execute([git, "rev-list", "--count", "HEAD"], timeout=10, cap=8192,
+                                   cwd=repo)
+            self.assertEqual(count.output.strip(), "1")
 
     def test_quota_windows_and_unknown_balance(self):
         jan = runner.dt.datetime(2026, 1, 31, 23, tzinfo=runner.dt.timezone.utc)

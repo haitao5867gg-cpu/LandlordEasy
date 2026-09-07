@@ -25,7 +25,7 @@ import sys
 import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 SCHEMA = "COMMANDER_JOB_V1"
@@ -120,6 +120,7 @@ class Config:
     enabled_profiles: frozenset[str]
     enabled_quality_gates: frozenset[str]
     quality_gates: Mapping[str, tuple[tuple[str, ...], ...]]
+    delivery_path_allowlists: Mapping[str, frozenset[str]] = dataclasses.field(default_factory=dict)
     poll_seconds: int = 60
     lease_seconds: int = 180
     executable_paths: Mapping[str, str] = dataclasses.field(default_factory=dict)
@@ -138,10 +139,11 @@ class Config:
             "canonical_repo", "worktree_root", "state_dir", "origin_url", "runtime_dir",
             "operational_executables", "enabled_providers", "enabled_profiles",
             "enabled_quality_gates", "quality_gates", "poll_seconds", "lease_seconds",
-            "executable_paths", "provider_failover",
+            "executable_paths", "provider_failover", "delivery_path_allowlists",
         }
+        required = expected - {"delivery_path_allowlists"}
         unknown = set(raw) - expected
-        missing = expected - set(raw)
+        missing = required - set(raw)
         if unknown or missing:
             raise ValidationError("local config has unknown or missing fields")
         if not isinstance(raw["queue_issue"], int) or raw["queue_issue"] < 1:
@@ -173,6 +175,8 @@ class Config:
         enabled_providers = validate_enabled(raw["enabled_providers"], WORKERS, "enabled_providers")
         enabled_profiles = validate_enabled(raw["enabled_profiles"], PROFILES, "enabled_profiles")
         quality_gates = validate_quality_gates(raw["quality_gates"])
+        delivery_path_allowlists = validate_delivery_path_allowlists(
+            raw.get("delivery_path_allowlists", {}), frozenset(quality_gates))
         enabled_gates = validate_enabled(raw["enabled_quality_gates"], frozenset(quality_gates),
                                          "enabled_quality_gates")
         if "none" not in quality_gates or quality_gates["none"]:
@@ -186,6 +190,7 @@ class Config:
             runtime_dir=absolute_path(raw["runtime_dir"]), operational_executables=operational,
             enabled_providers=enabled_providers, enabled_profiles=enabled_profiles,
             enabled_quality_gates=enabled_gates, quality_gates=quality_gates,
+            delivery_path_allowlists=delivery_path_allowlists,
             poll_seconds=bounded_int(raw["poll_seconds"], 15, 3600, "poll_seconds"),
             lease_seconds=bounded_int(raw["lease_seconds"], 30, 900, "lease_seconds"),
             executable_paths={str(k): str(absolute_path(v)) for k, v in raw["executable_paths"].items()},
@@ -260,12 +265,17 @@ class Job:
             raise ValidationError("repo_read requires the none quality gate")
         if data["profile"] != "repo_read" and data["quality_gate"] == "none":
             raise ValidationError("write and delivery profiles require an enabled quality gate")
+        has_approval = "human_approval_ref" in data
         approval = data.get("human_approval_ref")
-        if data["profile"] != "repo_delivery" and approval is not None:
-            raise ValidationError("approval reference is only valid for a future privileged profile")
-        if approval is not None and (not isinstance(approval, str) or not approval.strip()
-                                     or len(approval) > 512):
-            raise ValidationError("human_approval_ref must be a bounded non-empty string")
+        if data["profile"] != "repo_delivery" and has_approval:
+            raise ValidationError("approval reference is only valid for repo_delivery")
+        if data["profile"] == "repo_delivery":
+            if (not has_approval or not isinstance(approval, str) or len(approval) > 512
+                    or not approval.strip()):
+                raise ValidationError("repo_delivery requires a bounded non-empty human_approval_ref")
+            approval = approval.strip()
+            if not config.delivery_path_allowlists.get(data["quality_gate"]):
+                raise ValidationError("repo_delivery requires a non-empty owner path allowlist")
         for key in ("assigned", "expected_evidence"):
             if not isinstance(data[key], str) or not data[key].strip() or len(data[key]) > 512:
                 raise ValidationError(f"{key} must be a bounded non-empty string")
@@ -278,7 +288,9 @@ class Job:
             raise ValidationError("job text contains a shell fragment")
         timeout = bounded_int(data["timeout_seconds"], 1, MAX_TIMEOUT_SECONDS, "timeout_seconds")
         cap = bounded_int(data["output_limit_bytes"], 1, MAX_OUTPUT_BYTES, "output_limit_bytes")
-        return cls(**{k: data.get(k) for k in cls.__dataclass_fields__})
+        values = {k: data.get(k) for k in cls.__dataclass_fields__}
+        values["human_approval_ref"] = approval
+        return cls(**values)
 
 def bounded_int(value: Any, low: int, high: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
@@ -332,6 +344,31 @@ def validate_quality_gates(value: Any) -> dict[str, tuple[tuple[str, ...], ...]]
                 raise ValidationError("shell executables are forbidden in quality gates")
             checked.append(tuple([str(executable), *argv[1:]]))
         result[gate_id] = tuple(checked)
+    return result
+
+def validate_delivery_path_allowlists(value: Any,
+                                      quality_gate_ids: frozenset[str]) -> dict[str, frozenset[str]]:
+    if not isinstance(value, dict):
+        raise ValidationError("delivery_path_allowlists must be an object")
+    result: dict[str, frozenset[str]] = {}
+    pattern_syntax = re.compile(r"[*?\[\]{}()+^$|]")
+    for gate_id, paths in value.items():
+        if gate_id not in quality_gate_ids:
+            raise ValidationError("delivery path allowlist references an undefined quality gate")
+        if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+            raise ValidationError("delivery path allowlist must be a unique list of paths")
+        if len(paths) != len(set(paths)):
+            raise ValidationError("delivery path allowlist must be a unique list of paths")
+        checked: set[str] = set()
+        for path in paths:
+            pure = PurePosixPath(path)
+            if (not path or path in {".", ".."} or pure.is_absolute() or pure.as_posix() != path
+                    or "\\" in path or any(part in {".", ".."} for part in pure.parts)
+                    or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                    or pattern_syntax.search(path)):
+                raise ValidationError("delivery path allowlist contains a non-exact repository path")
+            checked.add(path)
+        result[gate_id] = frozenset(checked)
     return result
 
 def valid_uuid(value: str) -> bool:
@@ -899,10 +936,13 @@ def parse_staged_entries(raw: str) -> tuple[tuple[str, str, str], ...]:
         index += 2
     return tuple(entries)
 
-def validate_delivery_snapshot(entries: Sequence[tuple[str, str, str]], snapshot: str) -> None:
+def validate_delivery_snapshot(entries: Sequence[tuple[str, str, str]], snapshot: str,
+                               allowed_paths: frozenset[str] | None = None) -> None:
     forbidden = re.compile(r"(?i)(?:^|/)(?:\.env(?:\.|$)|.*(?:credential|secret|token|keychain|id_rsa|id_ed25519).*)")
     allowed_modes = {"000000", "100644", "100755"}
     for old_mode, new_mode, path in entries:
+        if allowed_paths is not None and path not in allowed_paths:
+            raise RunnerError("delivery contains a path outside the owner allowlist")
         if old_mode not in allowed_modes or new_mode not in allowed_modes:
             raise RunnerError("delivery contains a symlink, submodule, or special file mode")
         if (not path or "\x00" in path or "\ufffd" in path or path.startswith("/")
@@ -912,7 +952,8 @@ def validate_delivery_snapshot(entries: Sequence[tuple[str, str, str]], snapshot
     if HIGH_RISK_RE.search(snapshot) or re.search(r"/Users/[A-Za-z0-9._-]+/", snapshot):
         raise RunnerError("delivery snapshot contains sensitive material or a device-specific path")
 
-def stage_and_validate(config: Config, worktree: Path) -> tuple[tuple[str, str, str], ...]:
+def stage_and_validate(config: Config, worktree: Path, *,
+                       delivery_gate: str | None = None) -> tuple[tuple[str, str, str], ...]:
     git = config.operational_executables["git"]
     git_checked(["add", "--all"], worktree, executable=git)
     git_checked(["diff", "--cached", "--check"], worktree, executable=git,
@@ -944,7 +985,12 @@ def stage_and_validate(config: Config, worktree: Path) -> tuple[tuple[str, str, 
         if snapshot_bytes > MAX_STAGED_SNAPSHOT_BYTES:
             raise RunnerError("staged snapshot exceeds the safety scan limit")
         snapshot_parts.extend((f"FILE:{path}", result.output))
-    validate_delivery_snapshot(entries, "\n".join(snapshot_parts))
+    allowed_paths = None
+    if delivery_gate is not None:
+        allowed_paths = config.delivery_path_allowlists.get(delivery_gate)
+        if not allowed_paths:
+            raise RunnerError("delivery path allowlist is missing or empty")
+    validate_delivery_snapshot(entries, "\n".join(snapshot_parts), allowed_paths)
     return entries
 
 def run_quality_gate(config: Config, job: Job, worktree: Path) -> tuple[Result, ...]:
@@ -966,11 +1012,14 @@ def deliver_worktree(config: Config, job: Job, worktree: Path) -> str:
     if job.profile != "repo_delivery":
         return ""
     git = config.operational_executables["git"]
-    stage_and_validate(config, worktree)
+    stage_and_validate(config, worktree, delivery_gate=job.quality_gate)
     run_quality_gate(config, job, worktree)
-    stage_and_validate(config, worktree)
-    git_checked(["commit", "-m", f"commander job {job.job_id}"], worktree,
+    stage_and_validate(config, worktree, delivery_gate=job.quality_gate)
+    validated_tree = git_checked(["write-tree"], worktree, executable=git)
+    git_checked(["-c", "core.hooksPath=/dev/null", "commit", "-m", f"commander job {job.job_id}"], worktree,
                 executable=git, timeout=120)
+    if git_checked(["rev-parse", "HEAD^{tree}"], worktree, executable=git) != validated_tree:
+        raise RunnerError("committed tree differs from the validated staged snapshot")
     # The branch was created from the UUID-derived worktree ID and cannot be main/dev.
     git_checked(["push", "origin", f"{job.worktree_id}:{job.worktree_id}"], worktree,
                 executable=git, timeout=120)

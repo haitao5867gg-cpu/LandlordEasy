@@ -12,6 +12,8 @@ Provider subprocesses receive a fixed environment allowlist. `USER` is resolved 
 
 `enabled_providers`, `enabled_profiles`, and `enabled_quality_gates` are explicit owner-only activation switches. The first activation configuration enables only `repo_read`; write and delivery remain implemented but disabled until Phase 2 approval. Disabled providers do not block `doctor`, so a provider that fails later workspace-sentinel validation can be turned off independently.
 
+`delivery_path_allowlists` is an optional owner-only mapping from quality-gate ID to exact repository-relative POSIX file paths. It defaults to empty. It accepts no absolute paths, traversal, glob, regex, duplicate or control-character paths. A `repo_delivery` job is rejected unless its enabled gate has a non-empty allowlist, and every staged addition, modification or deletion must be an exact member both before and after the quality gate. Job text and provider output cannot expand this boundary.
+
 ## Commands
 
 All examples are manual Mac-mini enrollment actions. They are **not** run by this implementation delivery.
@@ -49,7 +51,7 @@ Kiro is pinned to `gpt-5.6-luna`, `gpt-5.6-terra`, or exceptional `gpt-5.6-sol`;
 
 `repo_read` grants read tools only and requires the `none` quality gate. Write and delivery profiles require an enabled non-`none` gate. Gate commands are validated direct argv arrays with absolute executables; shell programs and job-provided arguments are forbidden. The Runner—not the AI output—executes every selected gate with bounded output and timeout.
 
-`repo_delivery` is the sole profile that may commit/push. It stages with `git add --all`, checks the complete bounded `git diff --cached --binary`, validates staged file modes, rejects symlinks, submodules, special modes, sensitive paths, simulated secret patterns and device-specific paths, runs the quality gate, then repeats final staging and validation before the fixed commit and same-name non-force push. Any failure leaves the worktree intact for audit and prevents commit/push.
+`repo_delivery` is the sole profile that may commit/push and requires a bounded non-empty `human_approval_ref` audit value. That value is never interpreted as a command, path or permission. Delivery stages with `git add --all`, checks the complete bounded `git diff --cached --binary`, validates every path against the gate-specific owner allowlist and validates staged file modes, rejects symlinks, submodules, special modes, sensitive paths, simulated secret patterns and device-specific paths, runs the quality gate, then repeats final staging and all validation. Commit hooks are disabled; the Runner records the validated Git tree and requires the committed `HEAD` tree to match it exactly before the same-name non-force push. Any failure leaves the worktree intact for audit and prevents push.
 
 ## Safety and operations
 

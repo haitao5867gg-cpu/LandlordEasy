@@ -45,7 +45,9 @@ A job comment contains exactly one fenced JSON object with:
 - permission profile from the fixed profiles below;
 - assigned Spec/Issue and prompt;
 - timeout, output limit and expected evidence;
-- optional human-approval reference for a future privileged profile.
+- mandatory bounded human-approval reference for `repo_delivery`; other profiles reject it.
+
+For `repo_delivery`, the human-approval reference is mandatory, bounded to 512 characters, treated only as audit text and never interpreted as a command, path or permission.
 
 Reject unknown fields, duplicate IDs, malformed JSON, moving refs where an exact SHA is required, unsupported models/profiles, unexpected authors and all shell fragments supplied as job data.
 
@@ -70,6 +72,8 @@ Reject unknown fields, duplicate IDs, malformed JSON, moving refs where an exact
 - Adds fixed Git status/diff/check, commit and explicit same-name branch push operations.
 - No force push, rebase, branch deletion, tags, PR merge or main/dev direct writes.
 - Requires exact base SHA and clean-state checks.
+- Requires a non-empty owner-controlled exact-path allowlist for the selected quality gate. All staged additions, modifications and deletions must match it both before and after the gate; jobs, prompts and provider output cannot expand it.
+- Disables commit hooks and verifies the committed tree exactly matches the final validated staged tree before push.
 
 No production, SSH, real database, deployment, payment, OAuth, WeiQian or user-notification profile exists in V1. Such actions remain manual, separately authorized Human Actions.
 
