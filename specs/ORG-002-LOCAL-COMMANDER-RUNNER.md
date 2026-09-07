@@ -83,7 +83,7 @@ Adapters build subprocess argument arrays directly; never use a shell.
 
 - Kiro: explicit non-interactive mode, pinned model and exact trusted tool list.
 - Copilot: explicit available/allowed/denied tools, built-in MCP disabled, URLs denied and allow-all suppressed.
-- Claude: print mode, no session persistence, inline `remoteControlAtStartup=false`, explicit allowed/disallowed tools, no MCP/subagent/Web.
+- Claude: print mode, no session persistence, inline `remoteControlAtStartup=false`, identical explicit `--tools` and `--allowedTools` sets, explicit disallowed tools, no bypass-permissions mode and no MCP/subagent/Web.
 - Each adapter enforces a timeout, output cap, exit-code capture and process-group termination.
 - The job cannot supply raw CLI flags.
 - Provider subprocesses receive only the fixed safe-environment allowlist. The runner derives `USER` from `pwd.getpwuid(os.getuid()).pw_name`, never from inherited environment data, and fails closed if that user record is unavailable or invalid. It does not forward `LOGNAME`, `SSH_AUTH_SOCK`, arbitrary `CLAUDE_`/`ANTHROPIC_` variables or a complete shell environment.

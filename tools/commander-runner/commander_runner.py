@@ -48,7 +48,7 @@ PROVIDER_REQUIRED_FLAGS = {
                 "--no-ask-user", "--disallow-temp-dir"),
     "claude": ("--print", "--no-session-persistence", "--model", "--settings", "--setting-sources",
                "--strict-mcp-config", "--mcp-config", "--permission-mode", "--permission-prompts",
-               "--tools", "--disallowedTools"),
+               "--tools", "--allowedTools", "--disallowedTools"),
 }
 INTERNAL_STATES = frozenset({"queued", "claimed", "running", "succeeded", "failed", "blocked"})
 STATE_TRANSITIONS = {
@@ -644,7 +644,7 @@ def adapter_argv(job: Job, executable_paths: Mapping[str, str]) -> list[str]:
         return [executable, "--print", prompt, "--no-session-persistence", "--model", job.model,
                 "--settings", settings, "--setting-sources", "", "--strict-mcp-config",
                 "--mcp-config", '{"mcpServers":{}}', "--permission-mode", "dontAsk",
-                "--permission-prompts", "none", "--tools", tools,
+                "--permission-prompts", "none", "--tools", tools, "--allowedTools", tools,
                 "--disallowedTools", "Bash,WebFetch,WebSearch,Task,TaskOutput",
                 "--output-format", "json"]
     raise ValidationError("unknown worker")

@@ -244,6 +244,41 @@ class SecurityTests(RunnerTestCase):
         self.assertIn("--no-interactive", read_text)
         self.assertIn("--trust-tools=fs_read", read_text); self.assertNotIn("fs_read,fs_write", read_text)
         self.assertNotIn("--model auto", read_text)
+
+    def test_claude_tools_and_explicit_allowed_tools_match_each_profile(self):
+        cases = (
+            ("repo_read", "none", None, {"Read", "Glob", "Grep"}),
+            ("repo_write_test", "unit", None, {"Read", "Glob", "Grep", "Edit", "Write"}),
+            ("repo_delivery", "unit", "approval-17", {"Read", "Glob", "Grep", "Edit", "Write"}),
+        )
+        for profile, gate, approval, expected in cases:
+            changes = {"worker": "claude", "model": "claude-sonnet-5",
+                       "profile": profile, "quality_gate": gate}
+            if approval is not None:
+                changes["human_approval_ref"] = approval
+            job = runner.Job.from_comment(self.comment(**changes), self.config)
+            argv = runner.adapter_argv(job, self.config.executable_paths)
+            def value(flag): return argv[argv.index(flag) + 1]
+            visible = set(value("--tools").split(","))
+            allowed = set(value("--allowedTools").split(","))
+            with self.subTest(profile=profile):
+                self.assertEqual(visible, expected); self.assertEqual(allowed, expected)
+                self.assertEqual(visible, allowed)
+                self.assertEqual(value("--permission-mode"), "dontAsk")
+                self.assertEqual(value("--permission-prompts"), "none")
+                self.assertIn("--no-session-persistence", argv)
+                self.assertIn("--strict-mcp-config", argv)
+                self.assertEqual(json.loads(value("--mcp-config")), {"mcpServers": {}})
+                self.assertEqual(json.loads(value("--settings"))["remoteControlAtStartup"], False)
+                self.assertEqual(set(value("--disallowedTools").split(",")),
+                                 {"Bash", "WebFetch", "WebSearch", "Task", "TaskOutput"})
+                self.assertNotIn("Bash", allowed)
+                self.assertNotIn("--dangerously-skip-permissions", argv)
+                self.assertNotIn("--bypassPermissions", argv)
+        self.assertEqual(
+            {"Read", "Glob", "Grep", "Edit", "Write"} - {"Read", "Glob", "Grep"},
+            {"Edit", "Write"})
+        self.assertIn("--allowedTools", runner.PROVIDER_REQUIRED_FLAGS["claude"])
     def test_path_environment_and_redaction_controls(self):
         with self.assertRaises(runner.ValidationError): runner.checked_child(self.worktrees, "../../escape", True)
         link = self.worktrees / "job-abc"
