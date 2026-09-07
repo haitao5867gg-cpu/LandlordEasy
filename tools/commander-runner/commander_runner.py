@@ -73,6 +73,9 @@ COMMENT_RE = re.compile(
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 WORKTREE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$")
+GITHUB_LOGIN_RE = re.compile(
+    r"(?=.{1,39}\Z)(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\Z"
+)
 SHELL_FRAGMENT_RE = re.compile(r"(?:\$\(|`|&&|\|\||;|(?:^|\s)[|<>](?:\s|$))")
 HIGH_RISK_RE = re.compile(
     r"(?i)(?:BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|"
@@ -104,6 +107,7 @@ class Config:
     repository: str
     queue_issue: int
     commander_login: str
+    executor_login: str
     runner_id: str
     canonical_repo: Path
     worktree_root: Path
@@ -129,7 +133,7 @@ class Config:
         except (OSError, json.JSONDecodeError) as exc:
             raise ValidationError(f"invalid local config: {exc}") from exc
         expected = {
-            "repository", "queue_issue", "commander_login", "runner_id",
+            "repository", "queue_issue", "commander_login", "executor_login", "runner_id",
             "canonical_repo", "worktree_root", "state_dir", "origin_url", "runtime_dir",
             "operational_executables", "enabled_providers", "enabled_profiles",
             "enabled_quality_gates", "quality_gates", "poll_seconds", "lease_seconds",
@@ -141,9 +145,13 @@ class Config:
             raise ValidationError("local config has unknown or missing fields")
         if not isinstance(raw["queue_issue"], int) or raw["queue_issue"] < 1:
             raise ValidationError("queue_issue must be a positive integer")
-        for field in ("repository", "commander_login", "runner_id", "origin_url"):
+        for field in ("repository", "runner_id", "origin_url"):
             if not isinstance(raw[field], str) or not raw[field].strip():
                 raise ValidationError(f"{field} must be a non-empty string")
+        commander_login = validate_github_login(raw["commander_login"], "commander_login")
+        executor_login = validate_github_login(raw["executor_login"], "executor_login")
+        if commander_login.casefold() == executor_login.casefold():
+            raise ValidationError("commander and executor GitHub identities must be different")
         if not ID_RE.fullmatch(raw["runner_id"]):
             raise ValidationError("runner_id has invalid characters")
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", raw["repository"]):
@@ -170,7 +178,7 @@ class Config:
             raise ValidationError("quality gate none must exist and contain no commands")
         return cls(
             repository=raw["repository"], queue_issue=raw["queue_issue"],
-            commander_login=raw["commander_login"], runner_id=raw["runner_id"],
+            commander_login=commander_login, executor_login=executor_login, runner_id=raw["runner_id"],
             canonical_repo=absolute_path(raw["canonical_repo"]),
             worktree_root=absolute_path(raw["worktree_root"]),
             state_dir=absolute_path(raw["state_dir"]), origin_url=raw["origin_url"],
@@ -275,6 +283,14 @@ def bounded_int(value: Any, low: int, high: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
         raise ValidationError(f"{name} must be an integer in [{low}, {high}]")
     return value
+
+def validate_github_login(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not GITHUB_LOGIN_RE.fullmatch(value):
+        raise ValidationError(f"{name} must be a valid GitHub login")
+    return value
+
+def github_login_matches(value: Any, expected: str) -> bool:
+    return isinstance(value, str) and value.casefold() == expected.casefold()
 
 def absolute_path(value: Any) -> Path:
     if not isinstance(value, str) or not value:
@@ -973,7 +989,8 @@ class GitHubClient:
         if result.returncode or result.timed_out or result.overflow: raise RunnerError("unable to verify GitHub login")
         try: login = json.loads(result.output).get("login")
         except (json.JSONDecodeError, AttributeError) as exc: raise RunnerError("invalid GitHub login response") from exc
-        if login != self.config.commander_login: raise RunnerError("unexpected GitHub login")
+        if not github_login_matches(login, self.config.executor_login):
+            raise RunnerError("unexpected executor GitHub login")
     def comments(self, page: int = 1) -> list[dict[str, Any]]:
         if not isinstance(page, int) or page < 1 or page > 1_000_000:
             raise ValidationError("queue page is outside the bounded cursor range")
@@ -1100,7 +1117,9 @@ def run_once(config: Config, dry_run: bool = False) -> str:
             for comment in comments:
                 author = ((comment.get("user") or {}).get("login"))
                 body, comment_id = comment.get("body"), str(comment.get("id", ""))
-                if author != config.commander_login or not isinstance(body, str) or not comment_id: continue
+                if (not github_login_matches(author, config.commander_login)
+                        or not isinstance(body, str) or not comment_id):
+                    continue
                 try: job = Job.from_comment(body, config)
                 except ValidationError: continue
                 digest = comment_hash(body)
@@ -1110,7 +1129,8 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                 claimed = state.claim(comment_id, job.job_id, digest)
                 if not claimed: continue
                 latest = client.comment(comment_id, queue_page)
-                if ((latest.get("user") or {}).get("login") != config.commander_login
+                if (not github_login_matches((latest.get("user") or {}).get("login"),
+                                             config.commander_login)
                         or not isinstance(latest.get("body"), str)
                         or comment_hash(latest["body"]) != digest):
                     state.set_status(comment_id, "blocked")

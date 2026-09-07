@@ -1,7 +1,8 @@
 {
   "repository": "haitao5867gg-cpu/LandlordEasy",
   "queue_issue": 17,
-  "commander_login": "SET_CONFIGURED_COMMANDER_LOGIN",
+  "commander_login": "set-commander-login",
+  "executor_login": "set-executor-login",
   "runner_id": "SET_IMMUTABLE_RUNNER_ID",
   "canonical_repo": "~/LandLordEasy",
   "worktree_root": "~/LandLordEasy-runner-worktrees",

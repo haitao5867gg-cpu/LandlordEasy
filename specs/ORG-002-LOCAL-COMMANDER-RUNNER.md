@@ -11,8 +11,9 @@ Haitao may direct the cloud Commander from a phone or MacBook; neither device is
 ## Architecture
 
 - Queue: one dedicated GitHub Issue in `haitao5867gg-cpu/LandlordEasy`.
-- Dispatcher: Commander creates structured `COMMANDER_JOB_V1` comments.
+- Dispatcher identity: the configured Commander GitHub login creates structured `COMMANDER_JOB_V1` comments and is the only accepted job author.
 - Executor: Python 3 standard-library runner under `tools/commander-runner/`.
+- Executor identity: a distinct configured GitHub login authenticated by the Mac mini `gh` CLI reads the fixed Issue, posts lifecycle comments and performs only controlled delivery pushes. It is never treated as a job author.
 - Executor node: the dedicated Mac mini M4, identified by a configured immutable runner ID; MacBook execution is disabled after migration.
 - Scheduler: user-level macOS LaunchAgent on the Mac mini, disabled until Haitao performs final activation.
 - State: local, gitignored replay-protection database under an application-specific state directory.
@@ -87,7 +88,9 @@ Model routing follows `specs/ORG-001-AI-CLI-ONBOARDING.md`.
 ## GitHub trust boundary
 
 - Hard-code the repository and queue Issue.
-- Accept jobs only from the configured GitHub login after verifying it through `gh api`.
+- Require separate, strictly validated `commander_login` and `executor_login` values and reject enrollment when they identify the same GitHub login.
+- Accept jobs only from `commander_login`; verify the local `gh api user` identity against `executor_login` before reading or acting on the queue.
+- Ignore all Executor-authored lifecycle comments as non-jobs. Never include either login in logs, status, or public lifecycle output.
 - Require the exact `COMMANDER_JOB_V1` marker and schema.
 - Require the configured runner ID and acquire a queue lease before claiming work; a second host must fail closed.
 - Record comment ID + job ID before execution using an atomic claim so restarts cannot replay work.

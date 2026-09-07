@@ -28,7 +28,8 @@ class RunnerTestCase(unittest.TestCase):
                                                                root / "state", root / "runtime")
         self.repo.mkdir(); self.worktrees.mkdir()
         self.config = runner.Config(
-            repository="owner/repo", queue_issue=42, commander_login="commander", runner_id="runner-001",
+            repository="owner/repo", queue_issue=42, commander_login="commander",
+            executor_login="executor", runner_id="runner-001",
             canonical_repo=self.repo, worktree_root=self.worktrees, state_dir=self.state,
             origin_url="https://example.invalid/owner/repo.git", runtime_dir=self.runtime,
             operational_executables={"gh": sys.executable, "git": sys.executable, "python": sys.executable},
@@ -52,6 +53,7 @@ class RunnerTestCase(unittest.TestCase):
     def config_data(self):
         return {
             "repository": "owner/repo", "queue_issue": 42, "commander_login": "commander",
+            "executor_login": "executor",
             "runner_id": "runner-001", "canonical_repo": str(self.repo),
             "worktree_root": str(self.worktrees), "state_dir": str(self.state),
             "origin_url": "https://example.invalid/owner/repo.git", "runtime_dir": str(self.runtime),
@@ -72,6 +74,9 @@ class SchemaTests(RunnerTestCase):
         example = json.loads((HERE / "config.example.json").read_text())
         self.assertEqual(example["enabled_profiles"], ["repo_read"])
         self.assertEqual(example["enabled_quality_gates"], ["none"])
+        self.assertNotEqual(example["commander_login"], example["executor_login"])
+        runner.validate_github_login(example["commander_login"], "commander_login")
+        runner.validate_github_login(example["executor_login"], "executor_login")
     def test_valid_job_and_derived_worktree(self):
         job = runner.Job.from_comment(self.comment(), self.config)
         self.assertEqual(job.job_id, JOB_ID)
@@ -130,6 +135,21 @@ class SchemaTests(RunnerTestCase):
         invalid_runner = self.config_data(); invalid_runner["runner_id"] = "bad runner"; cases.append(invalid_runner)
         invalid_failover = self.config_data(); invalid_failover["provider_failover"] = "yes"; cases.append(invalid_failover)
         invalid_operational = self.config_data(); del invalid_operational["operational_executables"]["gh"]; cases.append(invalid_operational)
+        for data in cases:
+            with self.subTest(data=data), self.assertRaises(runner.ValidationError):
+                runner.Config.load(self.write_config(data))
+
+    def test_config_requires_distinct_strict_commander_and_executor_logins(self):
+        valid = runner.Config.load(self.write_config())
+        self.assertEqual(valid.commander_login, "commander")
+        self.assertEqual(valid.executor_login, "executor")
+        cases = []
+        for field in ("commander_login", "executor_login"):
+            missing = self.config_data(); del missing[field]; cases.append(missing)
+        same = self.config_data(); same["executor_login"] = "COMMANDER"; cases.append(same)
+        for field in ("commander_login", "executor_login"):
+            for invalid in ("", "-leading", "trailing-", "double--hyphen", "under_score", "a" * 40):
+                data = self.config_data(); data[field] = invalid; cases.append(data)
         for data in cases:
             with self.subTest(data=data), self.assertRaises(runner.ValidationError):
                 runner.Config.load(self.write_config(data))
@@ -240,6 +260,47 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         FixtureClient.outer = self
         with mock.patch.object(runner, "GitHubClient", FixtureClient):
             self.assertEqual(runner.run_once(self.config), "NO_JOB")
+    def test_executor_authored_job_shaped_comment_is_ignored(self):
+        class FixtureClient:
+            def __init__(self, config): pass
+            def verify_login(self): pass
+            def comments(self, page):
+                return [{"id": 1, "user": {"login": "executor"}, "body": self.outer.comment()}]
+            def post(self, body): raise AssertionError("executor lifecycle comment must not execute")
+        FixtureClient.outer = self
+        with mock.patch.object(runner, "GitHubClient", FixtureClient), \
+             mock.patch.object(runner, "verify_target") as verify_target:
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        verify_target.assert_not_called()
+
+    def test_commander_authored_job_is_accepted(self):
+        class FixtureClient:
+            def __init__(self, config): pass
+            def verify_login(self): pass
+            def comments(self, page):
+                return [{"id": 1, "user": {"login": "COMMANDER"}, "body": self.outer.comment()}]
+            def post(self, body): raise AssertionError("dry-run must not post")
+        FixtureClient.outer = self
+        with mock.patch.object(runner, "GitHubClient", FixtureClient), \
+             mock.patch.object(runner, "verify_target") as verify_target:
+            self.assertEqual(runner.run_once(self.config, dry_run=True), f"VALIDATED {JOB_ID}")
+        verify_target.assert_called_once()
+
+    def test_github_client_verifies_executor_identity_only(self):
+        client = runner.GitHubClient(self.config)
+        success = runner.Result(0, json.dumps({"login": "EXECUTOR"}), False, False, 0.1)
+        with mock.patch.object(runner, "execute", return_value=success):
+            client.verify_login()
+        wrong = runner.Result(0, json.dumps({"login": "commander"}), False, False, 0.1)
+        with mock.patch.object(runner, "execute", return_value=wrong), \
+             self.assertRaises(runner.RunnerError):
+            client.verify_login()
+
+    def test_lifecycle_output_contains_no_github_login_identity(self):
+        job = runner.Job.from_comment(self.comment(), self.config)
+        body = runner.lifecycle(job, "CLAIMED")
+        self.assertNotIn(self.config.commander_login, body)
+        self.assertNotIn(self.config.executor_login, body)
     def test_incremental_cursor_finds_latest_job_after_large_history(self):
         class FixtureClient:
             outer = None
