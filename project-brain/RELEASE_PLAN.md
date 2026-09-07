@@ -1,7 +1,7 @@
 # V1.0 release plan
 Planning anchor: Day 1 = 2026-09-05, day boundaries for planning only. Dates are targets, not promised launch dates. Freeze remains active.
 
-Immediate next work (as of 2026-09-07 UTC): review and integrate the ORG-002 Commander Runner control-plane delivery (Commander Runner baseline `77487255a60502ae5cef9f753380629289ba39e1`), then resume the OPS-001 isolated rehearsal and complete M19–M21 end-to-end verification. This is scoped-development-execution progress only; it does not change the NO-GO release decision or the feature freeze.
+Immediate next work (as of 2026-09-07 UTC): ORG-002 integration is complete and the OPS-001 isolated rehearsal is now active, followed by M19–M21 end-to-end verification. This is scoped-development-execution progress only; it does not change the NO-GO release decision or the feature freeze.
 
 | Window | Target dates | Deliverable / exit |
 |---|---|---|
