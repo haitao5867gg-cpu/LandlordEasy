@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import shutil
 import sys
 import tempfile
 import types
@@ -23,10 +24,19 @@ class RunnerTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        self.repo, self.worktrees, self.state = root / "repo", root / "worktrees", root / "state"
+        self.repo, self.worktrees, self.state, self.runtime = (root / "repo", root / "worktrees",
+                                                               root / "state", root / "runtime")
         self.repo.mkdir(); self.worktrees.mkdir()
-        self.config = runner.Config("owner/repo", 42, "commander", "runner-001", self.repo,
-                                    self.worktrees, self.state, "https://example.invalid/owner/repo.git")
+        self.config = runner.Config(
+            repository="owner/repo", queue_issue=42, commander_login="commander", runner_id="runner-001",
+            canonical_repo=self.repo, worktree_root=self.worktrees, state_dir=self.state,
+            origin_url="https://example.invalid/owner/repo.git", runtime_dir=self.runtime,
+            operational_executables={"gh": sys.executable, "git": sys.executable, "python": sys.executable},
+            enabled_providers=frozenset(runner.WORKERS), enabled_profiles=frozenset(runner.PROFILES),
+            enabled_quality_gates=frozenset({"none", "unit"}),
+            quality_gates={"none": (), "unit": ((sys.executable, "-c", "print('ok')"),)},
+            executable_paths={"kiro": sys.executable, "copilot": sys.executable, "claude": sys.executable},
+        )
     def tearDown(self): self.tmp.cleanup()
     def data(self, **changes):
         value = {
@@ -34,13 +44,34 @@ class RunnerTestCase(unittest.TestCase):
             "target_sha": SHA, "worktree_id": runner.derive_worktree_id(JOB_ID), "runner_id": "runner-001",
             "worker": "kiro", "model": "gpt-5.6-luna", "profile": "repo_read", "assigned": "ORG-002",
             "prompt": "Read the assigned specification.", "timeout_seconds": 30, "output_limit_bytes": 1024,
-            "expected_evidence": "summary",
+            "expected_evidence": "summary", "quality_gate": "none",
         }
         value.update(changes); return value
     def comment(self, **changes):
         return "COMMANDER_JOB_V1\n```json\n" + json.dumps(self.data(**changes)) + "\n```"
+    def config_data(self):
+        return {
+            "repository": "owner/repo", "queue_issue": 42, "commander_login": "commander",
+            "runner_id": "runner-001", "canonical_repo": str(self.repo),
+            "worktree_root": str(self.worktrees), "state_dir": str(self.state),
+            "origin_url": "https://example.invalid/owner/repo.git", "runtime_dir": str(self.runtime),
+            "operational_executables": {"gh": sys.executable, "git": sys.executable, "python": sys.executable},
+            "enabled_providers": ["kiro"], "enabled_profiles": ["repo_read"],
+            "enabled_quality_gates": ["none"], "quality_gates": {"none": []},
+            "poll_seconds": 60, "lease_seconds": 180, "provider_failover": True,
+            "executable_paths": {"kiro": sys.executable, "copilot": sys.executable, "claude": sys.executable},
+        }
+    def write_config(self, data=None, mode=0o600):
+        path = Path(self.tmp.name) / f"config-{uuid.uuid4()}.json"
+        path.write_text(json.dumps(self.config_data() if data is None else data))
+        os.chmod(path, mode)
+        return path
 
 class SchemaTests(RunnerTestCase):
+    def test_example_starts_read_only(self):
+        example = json.loads((HERE / "config.example.json").read_text())
+        self.assertEqual(example["enabled_profiles"], ["repo_read"])
+        self.assertEqual(example["enabled_quality_gates"], ["none"])
     def test_valid_job_and_derived_worktree(self):
         job = runner.Job.from_comment(self.comment(), self.config)
         self.assertEqual(job.job_id, JOB_ID)
@@ -58,9 +89,64 @@ class SchemaTests(RunnerTestCase):
             {"repository": "other/repo"}, {"queue_issue": 43}, {"runner_id": "other-runner"},
             {"target_sha": "main"}, {"worktree_id": "../../x"}, {"worker": "kiro", "model": "unknown"},
             {"profile": "production"}, {"timeout_seconds": 0}, {"output_limit_bytes": runner.MAX_OUTPUT_BYTES + 1},
+            {"quality_gate": "unknown"}, {"command": ["python", "-m", "test"]},
         ):
             with self.subTest(changes=changes), self.assertRaises(runner.ValidationError):
                 runner.Job.from_comment(self.comment(**changes), self.config)
+    def test_explicit_provider_profile_and_gate_enablement(self):
+        read_only = runner.dataclasses.replace(
+            self.config, enabled_providers=frozenset({"kiro"}),
+            enabled_profiles=frozenset({"repo_read"}), enabled_quality_gates=frozenset({"none"}))
+        for changes in ({"worker": "copilot", "model": "default"},
+                        {"profile": "repo_write_test", "quality_gate": "unit"},
+                        {"quality_gate": "unit"}):
+            with self.subTest(changes=changes), self.assertRaises(runner.ValidationError):
+                runner.Job.from_comment(self.comment(**changes), read_only)
+        with self.assertRaises(runner.ValidationError):
+            runner.validate_quality_gates({"bad": [["/bin/sh", "-c", "echo injected"]], "none": []})
+
+    def test_config_load_rejects_insecure_mode_missing_and_unknown_fields(self):
+        with self.assertRaises(runner.ValidationError):
+            runner.Config.load(self.write_config(mode=0o644))
+        for mutation in ("missing", "unknown"):
+            data = self.config_data()
+            if mutation == "missing": del data["runtime_dir"]
+            else: data["unexpected"] = True
+            with self.subTest(mutation=mutation), self.assertRaises(runner.ValidationError):
+                runner.Config.load(self.write_config(data))
+
+    def test_config_load_rejects_relative_executables_and_commands_for_none_gate(self):
+        cases = []
+        provider = self.config_data(); provider["executable_paths"]["kiro"] = "kiro-cli"; cases.append(provider)
+        operational = self.config_data(); operational["operational_executables"]["git"] = "git"; cases.append(operational)
+        none_gate = self.config_data(); none_gate["quality_gates"]["none"] = [[sys.executable, "--version"]]; cases.append(none_gate)
+        for data in cases:
+            with self.subTest(data=data), self.assertRaises(runner.ValidationError):
+                runner.Config.load(self.write_config(data))
+
+    def test_config_load_rejects_invalid_scalar_and_executable_map_contracts(self):
+        cases = []
+        invalid_issue = self.config_data(); invalid_issue["queue_issue"] = 0; cases.append(invalid_issue)
+        invalid_runner = self.config_data(); invalid_runner["runner_id"] = "bad runner"; cases.append(invalid_runner)
+        invalid_failover = self.config_data(); invalid_failover["provider_failover"] = "yes"; cases.append(invalid_failover)
+        invalid_operational = self.config_data(); del invalid_operational["operational_executables"]["gh"]; cases.append(invalid_operational)
+        for data in cases:
+            with self.subTest(data=data), self.assertRaises(runner.ValidationError):
+                runner.Config.load(self.write_config(data))
+
+    def test_delivery_approval_reference_is_bounded_text_without_shell_fragments(self):
+        delivery_config = runner.dataclasses.replace(
+            self.config, enabled_profiles=frozenset({"repo_delivery"}),
+            enabled_quality_gates=frozenset({"unit"}))
+        valid = runner.Job.from_comment(
+            self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref="approval-17"),
+            delivery_config)
+        self.assertEqual(valid.human_approval_ref, "approval-17")
+        for value in ({"unexpected": True}, "x" * 513, "approval; run something"):
+            with self.subTest(value=value), self.assertRaises(runner.ValidationError):
+                runner.Job.from_comment(
+                    self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref=value),
+                    delivery_config)
 
 class SecurityTests(RunnerTestCase):
     def test_shell_fragments_are_rejected(self):
@@ -70,11 +156,12 @@ class SecurityTests(RunnerTestCase):
     def test_adapter_snapshots_have_no_dangerous_tools(self):
         for worker, model in (("kiro", "gpt-5.6-luna"), ("copilot", "claude-sonnet-5"), ("claude", "claude-sonnet-5")):
             job = runner.Job.from_comment(self.comment(worker=worker, model=model), self.config)
-            text = " ".join(runner.adapter_argv(job, {})).lower()
+            text = " ".join(runner.adapter_argv(job, self.config.executable_paths)).lower()
             with self.subTest(worker=worker):
                 self.assertNotIn("--allow-all", text); self.assertNotIn("--yolo", text)
                 self.assertIn("--model", text)
-        read_text = " ".join(runner.adapter_argv(runner.Job.from_comment(self.comment(), self.config), {}))
+        read_text = " ".join(runner.adapter_argv(runner.Job.from_comment(self.comment(), self.config),
+                                                  self.config.executable_paths))
         self.assertIn("--no-interactive", read_text)
         self.assertIn("--trust-tools=fs_read", read_text); self.assertNotIn("fs_read,fs_write", read_text)
         self.assertNotIn("--model auto", read_text)
@@ -86,10 +173,29 @@ class SecurityTests(RunnerTestCase):
             with self.assertRaises(runner.ValidationError): runner.checked_child(self.worktrees, "job-abc", True)
         finally:
             if link.exists() or link.is_symlink(): link.unlink()
-        env = runner.safe_environment({"PATH": "/bin", "TOKEN": "secret", "HOME": "/safe"})
+        env = runner.safe_environment({"PATH": "/bin", "TOKEN": "sec" + "ret", "HOME": "/safe"})
         self.assertEqual(env, {"PATH": "/bin", "HOME": "/safe"})
-        safe = runner.ensure_safe_post("token=verysecretvalue ghp_abcdefghijklmnopqrstuv")
+        simulated_value = "token=" + "verysecretvalue"
+        simulated_classic_token = "ghp_" + "abcdefghijklmnopqrstuv"
+        safe = runner.ensure_safe_post(simulated_value + " " + simulated_classic_token)
         self.assertNotIn("verysecretvalue", safe); self.assertNotIn("ghp_", safe)
+        cloud_key = "AKIA" + "A" * 16
+        private_key = "-----BEGIN " + "PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"
+        cleaned = runner.redact(cloud_key + " " + private_key)
+        self.assertNotIn(cloud_key, cleaned); self.assertNotIn("PRIVATE KEY", cleaned)
+
+    def test_terminal_lifecycle_falls_back_to_fixed_safe_evidence(self):
+        job = runner.Job.from_comment(self.comment(), self.config)
+        class FixtureClient:
+            def __init__(self): self.bodies = []
+            def post(self, body):
+                self.bodies.append(body)
+                if len(self.bodies) == 1: raise runner.UnsafeOutputError("fixture rejection")
+        client = FixtureClient()
+        runner.post_terminal_lifecycle(client, job, "FAILED", "unsafe fixture evidence")
+        self.assertEqual(len(client.bodies), 2)
+        self.assertIn("evidence withheld: high-risk pattern detected", client.bodies[1])
+        self.assertNotIn("unsafe fixture evidence", client.bodies[1])
     def test_output_cap_is_enforced_without_shell(self):
         result = runner.execute([sys.executable, "-c", "print('x'*10000)"], timeout=10, cap=100)
         self.assertTrue(result.overflow); self.assertLessEqual(len(result.output.encode()), 100)
@@ -129,11 +235,30 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         class FixtureClient:
             def __init__(self, config): pass
             def verify_login(self): pass
-            def comments(self): return [{"id": 1, "user": {"login": "attacker"}, "body": self.outer.comment()}]
+            def comments(self, page): return [{"id": 1, "user": {"login": "attacker"}, "body": self.outer.comment()}]
             def post(self, body): raise AssertionError("no post")
         FixtureClient.outer = self
         with mock.patch.object(runner, "GitHubClient", FixtureClient):
             self.assertEqual(runner.run_once(self.config), "NO_JOB")
+    def test_incremental_cursor_finds_latest_job_after_large_history(self):
+        class FixtureClient:
+            outer = None
+            def __init__(self, config): pass
+            def verify_login(self): pass
+            def comments(self, page):
+                if page < 51:
+                    return [{"id": page * 100 + index, "user": {"login": "observer"}, "body": "history"}
+                            for index in range(runner.QUEUE_PAGE_SIZE)]
+                return [{"id": 999999, "user": {"login": "commander"}, "body": self.outer.comment()}]
+            def post(self, body): raise AssertionError("dry-run must not post")
+        FixtureClient.outer = self
+        with mock.patch.object(runner, "GitHubClient", FixtureClient), \
+             mock.patch.object(runner, "verify_target"):
+            for _ in range(50):
+                self.assertEqual(runner.run_once(self.config, dry_run=True), "QUEUE_CURSOR_ADVANCED")
+            self.assertTrue(runner.run_once(self.config, dry_run=True).startswith("VALIDATED "))
+        state = runner.State(self.state)
+        self.assertEqual(state.queue_page(), 51); state.close()
     def test_launchagent_rendering_is_inert_and_bounded_to_fixture(self):
         rendered = runner.make_launchagent({"Label": "com.landlordeasy.commander-runner", "KeepAlive": True},
                                            "/fixture/python", "/fixture/runner.py", "/fixture/config.json", "/fixture/state")
@@ -143,15 +268,7 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         self.assertIn("/fixture/state", data["StandardOutPath"])
 
     def test_install_stop_uninstall_use_temporary_home_fixture(self):
-        config_path = Path(self.tmp.name) / "config.json"
-        config_path.write_text(json.dumps({
-            "repository": "owner/repo", "queue_issue": 42, "commander_login": "commander", "runner_id": "runner-001",
-            "canonical_repo": str(self.repo), "worktree_root": str(self.worktrees), "state_dir": str(self.state),
-            "origin_url": "https://example.invalid/owner/repo.git", "poll_seconds": 60, "lease_seconds": 180,
-            "provider_failover": True,
-            "executable_paths": {"kiro": sys.executable, "copilot": sys.executable, "claude": sys.executable},
-        }))
-        os.chmod(config_path, 0o600)
+        config_path = self.write_config()
         fixture_home = Path(self.tmp.name) / "home"; fixture_home.mkdir()
         args = types.SimpleNamespace(config=str(config_path), confirm=True)
         with mock.patch.object(runner.Path, "home", return_value=fixture_home), \
@@ -159,11 +276,25 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
             self.assertEqual(runner.command_install(args), 0)
             launchagent = fixture_home / "Library/LaunchAgents/com.landlordeasy.commander-runner.plist"
             self.assertTrue(launchagent.exists())
+            runtime_script = self.runtime / "commander_runner.py"
+            manifest = json.loads((self.runtime / "runtime-manifest.json").read_text())
+            plist = plistlib.loads(launchagent.read_bytes())
+            self.assertTrue(runtime_script.exists())
+            self.assertEqual(plist["ProgramArguments"][1], str(runtime_script))
+            self.assertEqual(manifest["sha256"], runner.hashlib.sha256(runtime_script.read_bytes()).hexdigest())
+            with self.assertRaises(runner.RunnerError):
+                runner.install_stable_runtime(self.config, HERE / "commander_runner.py")
             with mock.patch.object(runner, "run_launchctl") as launchctl:
                 self.assertEqual(runner.command_stop(), 0)
                 self.assertEqual(runner.command_uninstall(args), 0)
                 self.assertGreaterEqual(launchctl.call_count, 2)
             self.assertFalse(launchagent.exists())
+
+    def test_stable_runtime_must_be_outside_repository_and_worktree_roots(self):
+        config = runner.dataclasses.replace(self.config, runtime_dir=self.repo / "installed")
+        self.assertFalse(runner.stable_runtime_is_isolated(config))
+        with self.assertRaises(runner.RunnerError):
+            runner.install_stable_runtime(config, HERE / "commander_runner.py")
 
 class ProviderAndQuotaTests(RunnerTestCase):
     def test_normalizes_plain_fenced_and_claude_wrapped_json(self):
@@ -201,6 +332,44 @@ class ProviderAndQuotaTests(RunnerTestCase):
                 self.assertEqual(len(attempts), 1); self.assertEqual(execute.call_count, 1)
                 self.assertIn(attempt.error_category, {"RUNTIME", "TIMEOUT"})
 
+    def test_dirty_write_worktree_prevents_safe_error_failover(self):
+        job = runner.Job.from_comment(self.comment(profile="repo_write_test", quality_gate="unit"), self.config)
+        auth = runner.Result(1, "authentication required", False, False, 0.1)
+        config = runner.dataclasses.replace(self.config, provider_failover=True)
+        with mock.patch.object(runner, "execute", return_value=auth) as execute, \
+             mock.patch.object(runner, "worktree_is_clean", return_value=False):
+            attempt, attempts = runner.execute_with_failover(job, config, self.repo)
+        self.assertEqual(attempt.error_category, "WORKTREE_DIRTY")
+        self.assertEqual(len(attempts), 1); self.assertEqual(execute.call_count, 1)
+
+    def test_quality_gate_success_failure_timeout_and_overflow(self):
+        job = runner.Job.from_comment(self.comment(profile="repo_write_test", quality_gate="unit"), self.config)
+        cases = (
+            (runner.Result(0, "ok", False, False, 0.1), None),
+            (runner.Result(1, "failed", False, False, 0.1), runner.RunnerError),
+            (runner.Result(-15, "", True, False, 30.0), runner.RunnerError),
+            (runner.Result(-15, "", False, True, 0.1), runner.RunnerError),
+        )
+        for result, error in cases:
+            with self.subTest(result=result), mock.patch.object(runner, "execute", return_value=result) as execute:
+                if error:
+                    with self.assertRaises(error): runner.run_quality_gate(self.config, job, self.repo)
+                else:
+                    self.assertEqual(len(runner.run_quality_gate(self.config, job, self.repo)), 1)
+                argv = execute.call_args.args[0]
+                self.assertIsInstance(argv, tuple); self.assertNotIn("sh", Path(argv[0]).name)
+
+    def test_delivery_runs_gate_between_two_staged_snapshot_checks(self):
+        job = runner.Job.from_comment(self.comment(profile="repo_delivery", quality_gate="unit"), self.config)
+        events = []
+        with mock.patch.object(runner, "stage_and_validate", side_effect=lambda *args: events.append("stage") or ()), \
+             mock.patch.object(runner, "run_quality_gate", side_effect=lambda *args: events.append("gate") or ()), \
+             mock.patch.object(runner, "git_checked", side_effect=["", "", "b" * 40]) as git:
+            self.assertEqual(runner.deliver_worktree(self.config, job, self.repo), "b" * 40)
+        self.assertEqual(events, ["stage", "gate", "stage"])
+        self.assertEqual(git.call_args_list[0].args[0][0], "commit")
+        self.assertEqual(git.call_args_list[1].args[0][0], "push")
+
     def test_quota_windows_and_unknown_balance(self):
         jan = runner.dt.datetime(2026, 1, 31, 23, tzinfo=runner.dt.timezone.utc)
         feb = runner.dt.datetime(2026, 2, 1, 0, tzinfo=runner.dt.timezone.utc)
@@ -212,9 +381,9 @@ class ProviderAndQuotaTests(RunnerTestCase):
     def test_all_kiro_models_and_default_copilot_route_are_supported(self):
         for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
             job = runner.Job.from_comment(self.comment(model=model), self.config)
-            self.assertIn(model, runner.adapter_argv(job, {}))
+            self.assertIn(model, runner.adapter_argv(job, self.config.executable_paths))
         copilot = runner.Job.from_comment(self.comment(worker="copilot", model="default"), self.config)
-        argv = runner.adapter_argv(copilot, {})
+        argv = runner.adapter_argv(copilot, self.config.executable_paths)
         self.assertNotIn("--model", argv)
         self.assertIn("--disable-builtin-mcps", argv)
         self.assertIn("--no-remote", argv)
@@ -234,11 +403,86 @@ class ProviderAndQuotaTests(RunnerTestCase):
         self.assertNotIn("192.0.2.1", cleaned); self.assertNotIn("person@example.test", cleaned)
 
     def test_delivery_snapshot_rejects_sensitive_paths_secrets_and_device_paths(self):
-        cases = (("?? .env", "safe"), (" M src/app.py", "token=verysecretvalue"),
-                 (" M src/app.py", "+ path=/Users/example/private"))
-        for changes, diff in cases:
-            with self.subTest(changes=changes, diff=diff), self.assertRaises(runner.RunnerError):
-                runner.validate_delivery_snapshot(changes, diff)
+        cases = ((("000000", "100644", ".env"),), "safe"), \
+                ((("100644", "100644", "src/app.py"),), "token=" + "verysecretvalue"), \
+                ((("100644", "100644", "src/app.py"),), "+ path=/" + "Users/example/private"), \
+                ((("000000", "120000", "link"),), "safe"), \
+                ((("000000", "160000", "submodule"),), "safe")
+        for entries, diff in cases:
+            with self.subTest(entries=entries, diff=diff), self.assertRaises(runner.RunnerError):
+                runner.validate_delivery_snapshot(entries, diff)
+
+    def test_new_staged_files_with_secret_or_device_path_are_rejected(self):
+        git = shutil.which("git")
+        self.assertIsNotNone(git)
+        for filename, content in (("new.txt", "token=" + "verysecretvalue\n"),
+                                  ("device.txt", "path=/" + "Users/example/private\n"),
+                                  (".env", "harmless=true\n")):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory)
+                init = runner.execute([git, "init", "--quiet"], timeout=10, cap=8192, cwd=repo)
+                self.assertEqual(init.returncode, 0)
+                (repo / filename).write_text(content)
+                config = runner.dataclasses.replace(
+                    self.config, operational_executables={**self.config.operational_executables, "git": git})
+                with self.assertRaises(runner.RunnerError): runner.stage_and_validate(config, repo)
+
+    def test_deleting_sensitive_content_scans_the_final_snapshot_not_removed_lines(self):
+        git = shutil.which("git")
+        self.assertIsNotNone(git)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self.assertEqual(runner.execute([git, "init", "--quiet"], timeout=10, cap=8192,
+                                            cwd=repo).returncode, 0)
+            target = repo / "fixture.txt"
+            target.write_text("token=" + "verysecretvalue\n")
+            self.assertEqual(runner.execute([git, "add", "--all"], timeout=10, cap=8192,
+                                            cwd=repo).returncode, 0)
+            runner.execute([git, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                            "commit", "--quiet", "-m", "fixture"], timeout=10, cap=8192, cwd=repo)
+            target.write_text("safe replacement\n")
+            config = runner.dataclasses.replace(
+                self.config, operational_executables={**self.config.operational_executables, "git": git})
+            self.assertEqual(len(runner.stage_and_validate(config, repo)), 1)
+
+    def test_staged_binary_file_is_rejected(self):
+        git = shutil.which("git")
+        self.assertIsNotNone(git)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self.assertEqual(runner.execute([git, "init", "--quiet"], timeout=10, cap=8192,
+                                            cwd=repo).returncode, 0)
+            (repo / "binary.dat").write_bytes(bytes((0, 255, 0, 254)))
+            config = runner.dataclasses.replace(
+                self.config, operational_executables={**self.config.operational_executables, "git": git})
+            with self.assertRaises(runner.RunnerError):
+                runner.stage_and_validate(config, repo)
+
+    def test_pure_staged_deletion_skips_absent_index_content(self):
+        git = shutil.which("git")
+        self.assertIsNotNone(git)
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self.assertEqual(runner.execute([git, "init", "--quiet"], timeout=10, cap=8192,
+                                            cwd=repo).returncode, 0)
+            target = repo / "safe.txt"
+            target.write_text("safe fixture\n")
+            self.assertEqual(runner.execute([git, "add", "--all"], timeout=10, cap=8192,
+                                            cwd=repo).returncode, 0)
+            committed = runner.execute(
+                [git, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--quiet", "-m", "fixture"], timeout=10, cap=8192, cwd=repo)
+            self.assertEqual(committed.returncode, 0)
+            target.unlink()
+            config = runner.dataclasses.replace(
+                self.config, operational_executables={**self.config.operational_executables, "git": git})
+            entries = runner.stage_and_validate(config, repo)
+            self.assertEqual(entries, (("100644", "000000", "safe.txt"),))
+
+    def test_worktree_clean_check_includes_all_change_classes(self):
+        with mock.patch.object(runner, "git_checked", return_value="") as checked:
+            self.assertTrue(runner.worktree_is_clean(self.config, self.repo))
+        self.assertIn("--untracked-files=all", checked.call_args.args[0])
 
     def test_provider_health_verifies_required_cli_contracts(self):
         config = runner.dataclasses.replace(self.config, executable_paths={
@@ -249,12 +493,34 @@ class ProviderAndQuotaTests(RunnerTestCase):
             health = runner.provider_health(config)
         self.assertTrue(all(item["interface_ok"] for item in health.values()))
 
-    def test_comments_flattens_paginated_queue_results(self):
+    def test_operational_executable_health_is_independent_of_path(self):
+        outputs = ("gh version 1", "git version 2", "Python 3")
+        with mock.patch.object(runner, "execute", side_effect=[
+                runner.Result(0, output, False, False, 0.1) for output in outputs]):
+            health = runner.operational_health(self.config)
+        self.assertTrue(all(item["available"] and item["interface_ok"] for item in health.values()))
+
+    def test_disabled_provider_does_not_block_doctor(self):
+        providers = {
+            "kiro": {"enabled": True, "available": True, "interface_ok": True},
+            "copilot": {"enabled": False, "available": False, "interface_ok": None},
+            "claude": {"enabled": False, "available": False, "interface_ok": None},
+        }
+        operational = {name: {"available": True, "interface_ok": True} for name in ("gh", "git", "python")}
+        config = runner.dataclasses.replace(self.config, enabled_providers=frozenset({"kiro"}),
+                                            enabled_quality_gates=frozenset({"none"}))
+        with mock.patch.object(runner, "provider_health", return_value=providers), \
+             mock.patch.object(runner, "operational_health", return_value=operational), \
+             mock.patch.object(runner, "quality_gate_health", return_value={"none": True}):
+            self.assertTrue(runner.doctor(config)["ok"])
+
+    def test_comments_uses_one_bounded_incremental_page(self):
         client = runner.GitHubClient(self.config)
-        pages = [[{"id": 1}], [{"id": 2}]]
-        with mock.patch.object(client, "_api", return_value=pages) as api:
-            self.assertEqual([item["id"] for item in client.comments()], [1, 2])
-        self.assertTrue(api.call_args.kwargs["paginate"])
+        page = [{"id": 1001}, {"id": 1002}]
+        with mock.patch.object(client, "_api", return_value=page) as api:
+            self.assertEqual([item["id"] for item in client.comments(51)], [1001, 1002])
+        self.assertIn("page=51", api.call_args.args[1])
+        self.assertEqual(api.call_args.kwargs["cap"], runner.MAX_QUEUE_PAGE_BYTES)
 
 if __name__ == "__main__":
     unittest.main()

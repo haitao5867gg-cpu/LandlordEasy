@@ -58,11 +58,14 @@ STATE_TRANSITIONS = {
 }
 ERROR_CATEGORIES = frozenset({
     "AUTH", "RATE_LIMIT", "QUOTA", "MODEL", "RUNTIME", "TIMEOUT",
-    "OUTPUT_LIMIT", "OUTPUT_VALIDATION", "PERMISSION", "UNAVAILABLE", "UNKNOWN",
+    "OUTPUT_LIMIT", "OUTPUT_VALIDATION", "PERMISSION", "UNAVAILABLE", "WORKTREE_DIRTY", "UNKNOWN",
 })
 SAFE_FAILOVER_CATEGORIES = frozenset({"AUTH", "RATE_LIMIT", "QUOTA", "MODEL", "UNAVAILABLE"})
 MAX_TIMEOUT_SECONDS = 3_600
 MAX_OUTPUT_BYTES = 65_536
+MAX_STAGED_SNAPSHOT_BYTES = 2_000_000
+MAX_QUEUE_PAGE_BYTES = 2_000_000
+QUEUE_PAGE_SIZE = 20
 MAX_PROMPT_CHARS = 12_000
 COMMENT_RE = re.compile(
     r"\A\s*COMMANDER_JOB_V1\s*\n```json\s*\n(\{.*\})\s*\n```\s*\Z", re.DOTALL
@@ -78,7 +81,10 @@ HIGH_RISK_RE = re.compile(
     r"(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?):\/\/[^\s]+)"
 )
 REDACTION_RE = re.compile(
-    r"(?i)(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+    r"(?i)(?:-----?BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----?[\s\S]*?"
+    r"-----?END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----?|"
+    r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[A-Z0-9]{16}|"
+    r"ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{16,}|"
     r"(?:password|token|secret|api[_-]?key)\s*[:=]\s*[^\s]+|"
     r"(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?):\/\/[^\s]+)"
@@ -103,6 +109,12 @@ class Config:
     worktree_root: Path
     state_dir: Path
     origin_url: str
+    runtime_dir: Path
+    operational_executables: Mapping[str, str]
+    enabled_providers: frozenset[str]
+    enabled_profiles: frozenset[str]
+    enabled_quality_gates: frozenset[str]
+    quality_gates: Mapping[str, tuple[tuple[str, ...], ...]]
     poll_seconds: int = 60
     lease_seconds: int = 180
     executable_paths: Mapping[str, str] = dataclasses.field(default_factory=dict)
@@ -118,9 +130,10 @@ class Config:
             raise ValidationError(f"invalid local config: {exc}") from exc
         expected = {
             "repository", "queue_issue", "commander_login", "runner_id",
-            "canonical_repo", "worktree_root", "state_dir", "origin_url",
-            "poll_seconds", "lease_seconds", "executable_paths",
-            "provider_failover",
+            "canonical_repo", "worktree_root", "state_dir", "origin_url", "runtime_dir",
+            "operational_executables", "enabled_providers", "enabled_profiles",
+            "enabled_quality_gates", "quality_gates", "poll_seconds", "lease_seconds",
+            "executable_paths", "provider_failover",
         }
         unknown = set(raw) - expected
         missing = expected - set(raw)
@@ -144,12 +157,26 @@ class Config:
                 raise ValidationError("provider executable path must be absolute")
         if not isinstance(raw["provider_failover"], bool):
             raise ValidationError("provider_failover must be a boolean")
+        if (not isinstance(raw["operational_executables"], dict)
+                or set(raw["operational_executables"]) != {"gh", "git", "python"}):
+            raise ValidationError("operational_executables must contain gh, git, and python")
+        operational = {str(k): str(absolute_path(v)) for k, v in raw["operational_executables"].items()}
+        enabled_providers = validate_enabled(raw["enabled_providers"], WORKERS, "enabled_providers")
+        enabled_profiles = validate_enabled(raw["enabled_profiles"], PROFILES, "enabled_profiles")
+        quality_gates = validate_quality_gates(raw["quality_gates"])
+        enabled_gates = validate_enabled(raw["enabled_quality_gates"], frozenset(quality_gates),
+                                         "enabled_quality_gates")
+        if "none" not in quality_gates or quality_gates["none"]:
+            raise ValidationError("quality gate none must exist and contain no commands")
         return cls(
             repository=raw["repository"], queue_issue=raw["queue_issue"],
             commander_login=raw["commander_login"], runner_id=raw["runner_id"],
             canonical_repo=absolute_path(raw["canonical_repo"]),
             worktree_root=absolute_path(raw["worktree_root"]),
             state_dir=absolute_path(raw["state_dir"]), origin_url=raw["origin_url"],
+            runtime_dir=absolute_path(raw["runtime_dir"]), operational_executables=operational,
+            enabled_providers=enabled_providers, enabled_profiles=enabled_profiles,
+            enabled_quality_gates=enabled_gates, quality_gates=quality_gates,
             poll_seconds=bounded_int(raw["poll_seconds"], 15, 3600, "poll_seconds"),
             lease_seconds=bounded_int(raw["lease_seconds"], 30, 900, "lease_seconds"),
             executable_paths={str(k): str(absolute_path(v)) for k, v in raw["executable_paths"].items()},
@@ -172,6 +199,7 @@ class Job:
     timeout_seconds: int
     output_limit_bytes: int
     expected_evidence: str
+    quality_gate: str
     human_approval_ref: str | None = None
 
     @classmethod
@@ -188,7 +216,7 @@ class Job:
         required = {
             "schema", "job_id", "repository", "queue_issue", "target_sha", "worktree_id",
             "runner_id", "worker", "model", "profile", "assigned", "prompt",
-            "timeout_seconds", "output_limit_bytes", "expected_evidence",
+            "timeout_seconds", "output_limit_bytes", "expected_evidence", "quality_gate",
         }
         allowed = required | {"human_approval_ref"}
         if set(data) != required and not (required | {"human_approval_ref"}) == set(data):
@@ -208,18 +236,36 @@ class Job:
             raise ValidationError("worktree_id is not the derived isolated worktree ID")
         if data["worker"] not in WORKERS or data["model"] not in MODEL_ALLOWLIST.get(data["worker"], ()):
             raise ValidationError("worker or model is not allowed")
+        if data["worker"] not in config.enabled_providers:
+            raise ValidationError("provider is not enabled")
         if data["worker"] == "kiro" and data["model"] == "auto":
             raise ValidationError("Kiro auto model is forbidden")
         if data["profile"] not in PROFILES:
             raise ValidationError("permission profile is not allowed")
-        if data["profile"] != "repo_delivery" and data.get("human_approval_ref") is not None:
+        if data["profile"] not in config.enabled_profiles:
+            raise ValidationError("permission profile is not enabled")
+        if (not isinstance(data["quality_gate"], str)
+                or data["quality_gate"] not in config.enabled_quality_gates):
+            raise ValidationError("quality gate is not enabled")
+        if data["profile"] == "repo_read" and data["quality_gate"] != "none":
+            raise ValidationError("repo_read requires the none quality gate")
+        if data["profile"] != "repo_read" and data["quality_gate"] == "none":
+            raise ValidationError("write and delivery profiles require an enabled quality gate")
+        approval = data.get("human_approval_ref")
+        if data["profile"] != "repo_delivery" and approval is not None:
             raise ValidationError("approval reference is only valid for a future privileged profile")
+        if approval is not None and (not isinstance(approval, str) or not approval.strip()
+                                     or len(approval) > 512):
+            raise ValidationError("human_approval_ref must be a bounded non-empty string")
         for key in ("assigned", "expected_evidence"):
             if not isinstance(data[key], str) or not data[key].strip() or len(data[key]) > 512:
                 raise ValidationError(f"{key} must be a bounded non-empty string")
         if not isinstance(data["prompt"], str) or not data["prompt"].strip() or len(data["prompt"]) > MAX_PROMPT_CHARS:
             raise ValidationError("prompt must be a bounded non-empty string")
-        if any(SHELL_FRAGMENT_RE.search(data[key]) for key in ("assigned", "expected_evidence", "prompt")):
+        text_fields = [data[key] for key in ("assigned", "expected_evidence", "prompt")]
+        if approval is not None:
+            text_fields.append(approval)
+        if any(SHELL_FRAGMENT_RE.search(value) for value in text_fields):
             raise ValidationError("job text contains a shell fragment")
         timeout = bounded_int(data["timeout_seconds"], 1, MAX_TIMEOUT_SECONDS, "timeout_seconds")
         cap = bounded_int(data["output_limit_bytes"], 1, MAX_OUTPUT_BYTES, "output_limit_bytes")
@@ -242,6 +288,34 @@ def absolute_path(value: Any) -> Path:
     if not path.is_absolute():
         raise ValidationError("configured path must be absolute")
     return path
+
+def validate_enabled(value: Any, allowed: frozenset[str], name: str) -> frozenset[str]:
+    if (not isinstance(value, list) or any(not isinstance(item, str) for item in value)
+            or len(value) != len(set(value)) or not set(value).issubset(allowed)):
+        raise ValidationError(f"{name} must be a unique subset of configured values")
+    return frozenset(value)
+
+def validate_quality_gates(value: Any) -> dict[str, tuple[tuple[str, ...], ...]]:
+    if not isinstance(value, dict) or not value:
+        raise ValidationError("quality_gates must be a non-empty object")
+    result: dict[str, tuple[tuple[str, ...], ...]] = {}
+    forbidden_executables = {"sh", "bash", "zsh", "fish", "osascript", "env"}
+    for gate_id, commands in value.items():
+        if not isinstance(gate_id, str) or not ID_RE.fullmatch(gate_id):
+            raise ValidationError("quality gate ID is invalid")
+        if not isinstance(commands, list) or len(commands) > 20:
+            raise ValidationError("quality gate commands must be a bounded list")
+        checked: list[tuple[str, ...]] = []
+        for argv in commands:
+            if (not isinstance(argv, list) or not argv or len(argv) > 50
+                    or any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in argv)):
+                raise ValidationError("quality gate command must be a bounded argv array")
+            executable = absolute_path(argv[0])
+            if executable.name.lower() in forbidden_executables:
+                raise ValidationError("shell executables are forbidden in quality gates")
+            checked.append(tuple([str(executable), *argv[1:]]))
+        result[gate_id] = tuple(checked)
+    return result
 
 def valid_uuid(value: str) -> bool:
     try:
@@ -327,6 +401,8 @@ class State:
         CREATE TABLE IF NOT EXISTS lease (
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1), runner_id TEXT NOT NULL,
           expires_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS metadata (
+          key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
     def close(self) -> None:
         self.db.close()
@@ -397,7 +473,17 @@ class State:
     def summary(self) -> dict[str, Any]:
         rows = self.db.execute("SELECT status, count(*) FROM claims GROUP BY status").fetchall()
         lease = self.db.execute("SELECT runner_id, expires_at FROM lease WHERE singleton=1").fetchone()
-        return {"jobs": dict(rows), "lease": {"active": bool(lease and lease[1] > int(time.time()))} if lease else None}
+        return {"jobs": dict(rows), "lease": {"active": bool(lease and lease[1] > int(time.time()))} if lease else None,
+                "queue_page": self.queue_page()}
+    def queue_page(self) -> int:
+        row = self.db.execute("SELECT value FROM metadata WHERE key='queue_page'").fetchone()
+        try: return max(1, int(row[0])) if row else 1
+        except (TypeError, ValueError): return 1
+    def set_queue_page(self, page: int) -> None:
+        if not isinstance(page, int) or page < 1 or page > 1_000_000:
+            raise ValidationError("queue page is outside the bounded cursor range")
+        self.db.execute("INSERT INTO metadata(key,value) VALUES ('queue_page',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(page),))
 
 class ProcessLock:
     def __init__(self, state_dir: Path): self.path = state_dir / "runner.lock"; self.handle = None
@@ -464,7 +550,9 @@ def execute(argv: Sequence[str], *, timeout: int, cap: int, cwd: Path | None = N
     return Result(proc.returncode or 0, output.decode("utf-8", "replace"), timed_out, overflow, time.monotonic()-started)
 
 def adapter_argv(job: Job, executable_paths: Mapping[str, str]) -> list[str]:
-    executable = executable_paths.get(job.worker, job.worker)
+    if job.worker not in executable_paths or not os.path.isabs(executable_paths[job.worker]):
+        raise ValidationError("provider executable must be configured as an absolute path")
+    executable = executable_paths[job.worker]
     # Prompt remains one inert argv element; no job field is interpreted as a flag.
     policy = ("Repository-only task. Obey the assigned spec and profile. Do not use web, MCP, "
               "remote control, subagents, servers, databases, or providers.\n\n")
@@ -606,7 +694,8 @@ class QuotaLedger:
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle: handle.write(payload)
 
-def route_candidates(job: Job, allow_failover: bool = True) -> list[tuple[str, str]]:
+def route_candidates(job: Job, allow_failover: bool = True,
+                     enabled: frozenset[str] = WORKERS) -> list[tuple[str, str]]:
     order = {
         "kiro": ("kiro", "copilot", "claude"),
         "copilot": ("copilot", "kiro", "claude"),
@@ -614,6 +703,7 @@ def route_candidates(job: Job, allow_failover: bool = True) -> list[tuple[str, s
     }[job.worker]
     if not allow_failover:
         order = order[:1]
+    order = tuple(worker for worker in order if worker in enabled)
     return [(worker, job.model if worker == job.worker else PROVIDER_DEFAULT_MODEL[worker]) for worker in order]
 
 def with_provider(job: Job, worker: str, model: str) -> Job:
@@ -623,11 +713,12 @@ def provider_health(config: Config) -> dict[str, dict[str, Any]]:
     ledger = QuotaLedger(config.state_dir)
     health: dict[str, dict[str, Any]] = {}
     for worker in sorted(WORKERS):
-        executable = config.executable_paths.get(worker, worker)
+        enabled = worker in config.enabled_providers
+        executable = config.executable_paths[worker]
         resolved = executable if os.path.isabs(executable) else shutil.which(executable)
-        available = bool(resolved and Path(resolved).is_file())
-        interface_ok = False
-        if available:
+        available = bool(resolved and Path(resolved).is_file() and os.access(resolved, os.X_OK))
+        interface_ok: bool | None = None
+        if enabled and available:
             help_argv = [str(resolved), "chat", "--help"] if worker == "kiro" else [str(resolved), "--help"]
             try:
                 result = execute(help_argv, timeout=15, cap=MAX_OUTPUT_BYTES, env=safe_environment())
@@ -636,6 +727,7 @@ def provider_health(config: Config) -> dict[str, dict[str, Any]]:
             except OSError:
                 interface_ok = False
         health[worker] = {
+            "enabled": enabled,
             "available": available,
             "interface_ok": interface_ok,
             "quota_balance": ledger.balance(worker),
@@ -643,10 +735,51 @@ def provider_health(config: Config) -> dict[str, dict[str, Any]]:
         }
     return health
 
+def operational_health(config: Config) -> dict[str, dict[str, bool]]:
+    health: dict[str, dict[str, bool]] = {}
+    expected = {"gh": "gh version", "git": "git version", "python": "python"}
+    for name, executable in config.operational_executables.items():
+        path = Path(executable)
+        available = path.is_file() and os.access(path, os.X_OK)
+        interface_ok = False
+        if available:
+            try:
+                result = execute([str(path), "--version"], timeout=10, cap=8192, env=safe_environment())
+                interface_ok = not (result.returncode or result.timed_out or result.overflow) and expected[name] in result.output.lower()
+            except OSError:
+                interface_ok = False
+        health[name] = {"available": available, "interface_ok": interface_ok}
+    return health
+
+def quality_gate_health(config: Config) -> dict[str, bool]:
+    health: dict[str, bool] = {}
+    for gate_id in sorted(config.enabled_quality_gates):
+        commands = config.quality_gates[gate_id]
+        health[gate_id] = all(Path(argv[0]).is_file() and os.access(argv[0], os.X_OK)
+                              for argv in commands)
+    return health
+
+def worktree_is_clean(config: Config, worktree: Path) -> bool:
+    try:
+        output = git_checked(["status", "--porcelain", "--untracked-files=all"], worktree,
+                             executable=config.operational_executables["git"], cap=MAX_OUTPUT_BYTES)
+        return not output
+    except RunnerError:
+        return False
+
+def failover_allowed_after(attempt: ProviderAttempt, job: Job, config: Config, worktree: Path) -> bool:
+    if attempt.error_category not in SAFE_FAILOVER_CATEGORIES:
+        return False
+    if job.profile == "repo_read":
+        return True
+    return worktree_is_clean(config, worktree)
+
 def execute_with_failover(job: Job, config: Config, worktree: Path) -> tuple[ProviderAttempt, list[ProviderAttempt]]:
     attempts: list[ProviderAttempt] = []
     ledger = QuotaLedger(config.state_dir)
-    for worker, model in route_candidates(job, config.provider_failover):
+    candidates = route_candidates(job, config.provider_failover, config.enabled_providers)
+    if not candidates: raise RunnerError("no enabled provider is available for the job")
+    for worker, model in candidates:
         candidate = with_provider(job, worker, model)
         try:
             result = execute(adapter_argv(candidate, config.executable_paths), timeout=job.timeout_seconds,
@@ -655,13 +788,21 @@ def execute_with_failover(job: Job, config: Config, worktree: Path) -> tuple[Pro
             category = classify_provider_error(None, exc)
             attempt = ProviderAttempt(worker, model, None, None, category)
             attempts.append(attempt)
-            if category in SAFE_FAILOVER_CATEGORIES: continue
+            if failover_allowed_after(attempt, job, config, worktree): continue
+            if category in SAFE_FAILOVER_CATEGORIES and job.profile != "repo_read":
+                blocked = dataclasses.replace(attempt, error_category="WORKTREE_DIRTY")
+                attempts[-1] = blocked
+                return blocked, attempts
             return attempt, attempts
         if result.returncode or result.timed_out or result.overflow:
             category = classify_provider_error(result)
             attempt = ProviderAttempt(worker, model, result, None, category)
             attempts.append(attempt)
-            if category in SAFE_FAILOVER_CATEGORIES: continue
+            if failover_allowed_after(attempt, job, config, worktree): continue
+            if category in SAFE_FAILOVER_CATEGORIES and job.profile != "repo_read":
+                blocked = dataclasses.replace(attempt, error_category="WORKTREE_DIRTY")
+                attempts[-1] = blocked
+                return blocked, attempts
             return attempt, attempts
         try:
             normalized = normalize_provider_output(result.output)
@@ -677,8 +818,9 @@ def execute_with_failover(job: Job, config: Config, worktree: Path) -> tuple[Pro
         return attempt, attempts
     return attempts[-1], attempts
 
-def git_checked(argv: Sequence[str], cwd: Path, *, timeout: int = 60) -> str:
-    result = execute(["git", *argv], timeout=timeout, cap=8192, cwd=cwd, env=safe_environment())
+def git_checked(argv: Sequence[str], cwd: Path, *, executable: str, timeout: int = 60,
+                cap: int = 8192) -> str:
+    result = execute([executable, *argv], timeout=timeout, cap=cap, cwd=cwd, env=safe_environment())
     if result.returncode or result.timed_out or result.overflow:
         raise RunnerError("bounded git verification failed")
     return result.output.strip()
@@ -688,96 +830,162 @@ def verify_target(config: Config, job: Job) -> None:
         raise ValidationError("canonical repository is missing or a symlink")
     if config.worktree_root.is_symlink() or not config.worktree_root.is_dir():
         raise ValidationError("worktree root is missing or a symlink")
-    remote = git_checked(["remote", "get-url", "origin"], config.canonical_repo)
+    git = config.operational_executables["git"]
+    remote = git_checked(["remote", "get-url", "origin"], config.canonical_repo, executable=git)
     if remote != config.origin_url:
         raise ValidationError("canonical repository origin does not match configured origin")
     # A SHA in job data is never accepted as a ref name or command fragment.
-    git_checked(["fetch", "--no-tags", "origin", job.target_sha], config.canonical_repo, timeout=120)
-    git_checked(["cat-file", "-e", f"{job.target_sha}^{{commit}}"], config.canonical_repo)
+    git_checked(["fetch", "--no-tags", "origin", job.target_sha], config.canonical_repo,
+                executable=git, timeout=120)
+    git_checked(["cat-file", "-e", f"{job.target_sha}^{{commit}}"], config.canonical_repo,
+                executable=git)
 
 def prepare_worktree(config: Config, job: Job) -> Path:
     verify_target(config, job)
     path = checked_child(config.worktree_root, job.worktree_id, must_exist=True)
     if path.exists():
         raise RunnerError("worktree already exists; it will not be reused or deleted")
-    worktree_args = ["git", "worktree", "add"]
+    worktree_args = [config.operational_executables["git"], "worktree", "add"]
     worktree_args += ["-b", job.worktree_id] if job.profile == "repo_delivery" else ["--detach"]
     worktree_args += [str(path), job.target_sha]
     result = execute(worktree_args, timeout=120, cap=8192,
                      cwd=config.canonical_repo, env=safe_environment())
     if result.returncode or result.timed_out or result.overflow:
         raise RunnerError("failed to create clean isolated worktree")
-    if path.is_symlink() or git_checked(["rev-parse", "HEAD"], path) != job.target_sha:
+    git = config.operational_executables["git"]
+    if path.is_symlink() or git_checked(["rev-parse", "HEAD"], path, executable=git) != job.target_sha:
         raise RunnerError("created worktree does not match requested SHA")
-    if git_checked(["status", "--porcelain"], path):
+    if git_checked(["status", "--porcelain", "--untracked-files=all"], path, executable=git):
         raise RunnerError("new isolated worktree is dirty")
     return path
 
-def validate_delivery_snapshot(changes: str, diff: str) -> None:
+def parse_staged_entries(raw: str) -> tuple[tuple[str, str, str], ...]:
+    parts = raw.split("\x00")
+    entries: list[tuple[str, str, str]] = []
+    index = 0
+    while index < len(parts) and parts[index]:
+        header = parts[index]
+        if index + 1 >= len(parts): raise RunnerError("invalid staged metadata")
+        match = re.fullmatch(r":([0-7]{6}) ([0-7]{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])", header)
+        if not match: raise RunnerError("invalid staged metadata")
+        entries.append((match.group(1), match.group(2), parts[index + 1]))
+        index += 2
+    return tuple(entries)
+
+def validate_delivery_snapshot(entries: Sequence[tuple[str, str, str]], snapshot: str) -> None:
     forbidden = re.compile(r"(?i)(?:^|/)(?:\.env(?:\.|$)|.*(?:credential|secret|token|keychain|id_rsa|id_ed25519).*)")
-    for line in changes.splitlines():
-        candidate = line[3:] if len(line) > 3 else ""
-        if forbidden.search(candidate):
+    allowed_modes = {"000000", "100644", "100755"}
+    for old_mode, new_mode, path in entries:
+        if old_mode not in allowed_modes or new_mode not in allowed_modes:
+            raise RunnerError("delivery contains a symlink, submodule, or special file mode")
+        if (not path or "\x00" in path or "\ufffd" in path or path.startswith("/")
+                or any(ord(character) < 32 or ord(character) == 127 for character in path)
+                or forbidden.search(path)):
             raise RunnerError("delivery contains a forbidden sensitive path")
-    if HIGH_RISK_RE.search(diff) or re.search(r"/Users/[A-Za-z0-9._-]+/", diff):
-        raise RunnerError("delivery diff contains sensitive material or a device-specific path")
+    if HIGH_RISK_RE.search(snapshot) or re.search(r"/Users/[A-Za-z0-9._-]+/", snapshot):
+        raise RunnerError("delivery snapshot contains sensitive material or a device-specific path")
+
+def stage_and_validate(config: Config, worktree: Path) -> tuple[tuple[str, str, str], ...]:
+    git = config.operational_executables["git"]
+    git_checked(["add", "--all"], worktree, executable=git)
+    git_checked(["diff", "--cached", "--check"], worktree, executable=git,
+                cap=MAX_STAGED_SNAPSHOT_BYTES)
+    raw = git_checked(["diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames"],
+                      worktree, executable=git, cap=MAX_STAGED_SNAPSHOT_BYTES)
+    entries = parse_staged_entries(raw)
+    if not entries: raise RunnerError("delivery job produced no staged changes")
+    numstat = git_checked(["diff", "--cached", "--numstat", "-z", "--no-renames"], worktree,
+                          executable=git, cap=MAX_STAGED_SNAPSHOT_BYTES)
+    if any(item.startswith("-\t-") for item in numstat.split("\x00") if item):
+        raise RunnerError("delivery contains an unscannable binary file")
+    # Obtain the bounded binary diff as delivery evidence, but scan final index
+    # contents rather than deletion/context lines that are absent from the
+    # snapshot being committed.
+    git_checked(["diff", "--cached", "--no-ext-diff", "--binary"], worktree,
+                executable=git, cap=MAX_STAGED_SNAPSHOT_BYTES)
+    snapshot_parts: list[str] = []
+    snapshot_bytes = 0
+    for _, new_mode, path in entries:
+        if new_mode == "000000":
+            continue
+        result = execute([git, "show", "--no-ext-diff", "--no-textconv", f":{path}"],
+                         timeout=60, cap=MAX_STAGED_SNAPSHOT_BYTES, cwd=worktree,
+                         env=safe_environment())
+        if result.returncode or result.timed_out or result.overflow:
+            raise RunnerError("unable to read bounded staged file content")
+        snapshot_bytes += len(path.encode("utf-8")) + len(result.output.encode("utf-8"))
+        if snapshot_bytes > MAX_STAGED_SNAPSHOT_BYTES:
+            raise RunnerError("staged snapshot exceeds the safety scan limit")
+        snapshot_parts.extend((f"FILE:{path}", result.output))
+    validate_delivery_snapshot(entries, "\n".join(snapshot_parts))
+    return entries
+
+def run_quality_gate(config: Config, job: Job, worktree: Path) -> tuple[Result, ...]:
+    if job.quality_gate == "none": return ()
+    if job.quality_gate not in config.enabled_quality_gates:
+        raise RunnerError("quality gate is not enabled")
+    results: list[Result] = []
+    for argv in config.quality_gates[job.quality_gate]:
+        result = execute(argv, timeout=job.timeout_seconds, cap=job.output_limit_bytes,
+                         cwd=worktree, env=safe_environment())
+        results.append(result)
+        if result.returncode or result.timed_out or result.overflow:
+            reason = "timeout" if result.timed_out else "overflow" if result.overflow else "failed"
+            raise RunnerError(f"quality gate {reason}")
+    return tuple(results)
 
 def deliver_worktree(config: Config, job: Job, worktree: Path) -> str:
     """The only V1 commit/push path; branch name is derived, never job-supplied."""
     if job.profile != "repo_delivery":
         return ""
-    changes = git_checked(["status", "--porcelain"], worktree)
-    if not changes:
-        raise RunnerError("delivery job produced no changes")
-    diff = execute(["git", "diff", "--no-ext-diff", "--binary"], timeout=60,
-                   cap=MAX_OUTPUT_BYTES, cwd=worktree, env=safe_environment())
-    if diff.returncode or diff.timed_out or diff.overflow:
-        raise RunnerError("delivery diff could not be safely bounded")
-    validate_delivery_snapshot(changes, diff.output)
-    git_checked(["add", "--all"], worktree)
-    git_checked(["diff", "--cached", "--check"], worktree)
-    git_checked(["commit", "-m", f"commander job {job.job_id}"], worktree, timeout=120)
+    git = config.operational_executables["git"]
+    stage_and_validate(config, worktree)
+    run_quality_gate(config, job, worktree)
+    stage_and_validate(config, worktree)
+    git_checked(["commit", "-m", f"commander job {job.job_id}"], worktree,
+                executable=git, timeout=120)
     # The branch was created from the UUID-derived worktree ID and cannot be main/dev.
-    git_checked(["push", "origin", f"{job.worktree_id}:{job.worktree_id}"], worktree, timeout=120)
-    return git_checked(["rev-parse", "HEAD"], worktree)
+    git_checked(["push", "origin", f"{job.worktree_id}:{job.worktree_id}"], worktree,
+                executable=git, timeout=120)
+    return git_checked(["rev-parse", "HEAD"], worktree, executable=git)
 
 class GitHubClient:
     """The sole GitHub interface. Every call is an argv list to gh api."""
     def __init__(self, config: Config): self.config = config
     def _api(self, method: str, endpoint: str, fields: Mapping[str, str] | None = None,
-             paginate: bool = False) -> Any:
+             cap: int = MAX_OUTPUT_BYTES) -> Any:
         expected = f"repos/{self.config.repository}/issues/{self.config.queue_issue}"
-        if endpoint not in {expected, f"{expected}/comments"}:
+        comments = f"{expected}/comments"
+        if endpoint not in {expected, comments} and not re.fullmatch(
+                re.escape(comments) + rf"\?per_page={QUEUE_PAGE_SIZE}&page=[1-9][0-9]*", endpoint):
             raise ValidationError("GitHub endpoint outside queue issue")
-        if method not in {"GET", "POST"} or (method == "POST" and endpoint != f"{expected}/comments"):
+        if method not in {"GET", "POST"} or (method == "POST" and endpoint != comments):
             raise ValidationError("GitHub operation outside queue comment boundary")
-        argv = ["gh", "api", "--method", method, endpoint]
-        if paginate:
-            if method != "GET": raise ValidationError("pagination is read-only")
-            argv += ["--paginate", "--slurp"]
+        argv = [self.config.operational_executables["gh"], "api", "--method", method, endpoint]
         for key, value in (fields or {}).items(): argv += ["-f", f"{key}={value}"]
-        result = execute(argv, timeout=30, cap=MAX_OUTPUT_BYTES)
+        result = execute(argv, timeout=30, cap=cap)
         if result.returncode or result.timed_out or result.overflow: raise RunnerError("GitHub API request failed")
         try: return json.loads(result.output)
         except json.JSONDecodeError as exc: raise RunnerError("GitHub returned invalid JSON") from exc
     def verify_login(self) -> None:
         # /user is read-only; it is intentionally the only non-issue endpoint.
-        result = execute(["gh", "api", "user"], timeout=30, cap=8192)
+        result = execute([self.config.operational_executables["gh"], "api", "user"], timeout=30, cap=8192)
         if result.returncode or result.timed_out or result.overflow: raise RunnerError("unable to verify GitHub login")
         try: login = json.loads(result.output).get("login")
         except (json.JSONDecodeError, AttributeError) as exc: raise RunnerError("invalid GitHub login response") from exc
         if login != self.config.commander_login: raise RunnerError("unexpected GitHub login")
-    def comments(self) -> list[dict[str, Any]]:
-        value = self._api("GET", f"repos/{self.config.repository}/issues/{self.config.queue_issue}/comments",
-                          paginate=True)
+    def comments(self, page: int = 1) -> list[dict[str, Any]]:
+        if not isinstance(page, int) or page < 1 or page > 1_000_000:
+            raise ValidationError("queue page is outside the bounded cursor range")
+        endpoint = (f"repos/{self.config.repository}/issues/{self.config.queue_issue}/comments"
+                    f"?per_page={QUEUE_PAGE_SIZE}&page={page}")
+        value = self._api("GET", endpoint, cap=MAX_QUEUE_PAGE_BYTES)
         if not isinstance(value, list): return []
-        if value and all(isinstance(page, list) for page in value):
-            return [comment for page in value for comment in page if isinstance(comment, dict)]
         return [comment for comment in value if isinstance(comment, dict)]
-    def comment(self, comment_id: str) -> dict[str, Any]:
+    def comment(self, comment_id: str, page: int) -> dict[str, Any]:
         if not re.fullmatch(r"[0-9]+", comment_id):
             raise ValidationError("invalid GitHub comment ID")
-        for value in self.comments():
+        for value in self.comments(page):
             if str(value.get("id", "")) == comment_id:
                 return value
         raise RunnerError("claimed comment no longer exists on the queue issue")
@@ -788,6 +996,13 @@ def lifecycle(job: Job, state: str, detail: str = "") -> str:
     detail = ensure_safe_post(detail) if detail else ""
     return (f"COMMANDER_RUNNER_V1 {state}\njob={job.job_id}\nworker={job.worker}\nmodel={job.model}\n"
             f"profile={job.profile}\nsha={job.target_sha}\nrunner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
+
+def post_terminal_lifecycle(client: GitHubClient, job: Job, state: str, detail: str) -> None:
+    """Preserve terminal state even when evidence cannot safely leave the node."""
+    try:
+        client.post(lifecycle(job, state, detail))
+    except UnsafeOutputError:
+        client.post(lifecycle(job, state, "evidence withheld: high-risk pattern detected"))
 
 def make_launchagent(template: Mapping[str, Any], python: str, script: str, config: str, log_dir: str) -> bytes:
     data = dict(template)
@@ -802,7 +1017,7 @@ def launchagent_path() -> Path:
     return Path.home() / "Library/LaunchAgents/com.landlordeasy.commander-runner.plist"
 
 def run_launchctl(*arguments: str) -> None:
-    result = execute(["launchctl", *arguments], timeout=30, cap=8192)
+    result = execute(["/bin/launchctl", *arguments], timeout=30, cap=8192)
     if result.returncode or result.timed_out or result.overflow:
         raise RunnerError("launchctl operation failed")
 
@@ -814,20 +1029,62 @@ def verify_owned_launchagent(path: Path) -> None:
     if data.get("Label") != "com.landlordeasy.commander-runner":
         raise RunnerError("refusing to alter a non-runner LaunchAgent")
 
+def install_stable_runtime(config: Config, source: Path) -> tuple[Path, str]:
+    runtime_dir = config.runtime_dir
+    if not stable_runtime_is_isolated(config):
+        raise RunnerError("stable runtime must be outside repository and worktree roots")
+    if runtime_dir.is_symlink(): raise RunnerError("stable runtime directory may not be a symlink")
+    runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(runtime_dir, 0o700)
+    target = runtime_dir / "commander_runner.py"
+    manifest = runtime_dir / "runtime-manifest.json"
+    if target.exists() or target.is_symlink() or manifest.exists() or manifest.is_symlink():
+        raise RunnerError("stable runtime already exists; refusing to overwrite")
+    try:
+        source_bytes = source.read_bytes()
+    except OSError as exc:
+        raise RunnerError("unable to read validated runner source") from exc
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    with os.fdopen(target_fd, "wb") as handle: handle.write(source_bytes)
+    if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+        raise RunnerError("stable runtime verification failed")
+    manifest_fd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(manifest_fd, "w", encoding="utf-8") as handle:
+        json.dump({"runner_file": target.name, "sha256": digest}, handle, sort_keys=True)
+    return target, digest
+
+def stable_runtime_is_isolated(config: Config) -> bool:
+    runtime = config.runtime_dir.resolve(strict=False)
+    for root in (config.canonical_repo, config.worktree_root):
+        candidate = root.resolve(strict=False)
+        if runtime == candidate or runtime.is_relative_to(candidate):
+            return False
+    return True
+
 def doctor(config: Config) -> dict[str, Any]:
     providers = provider_health(config)
+    operational = operational_health(config)
+    gates = quality_gate_health(config)
     checks = {
         "canonical_repo": config.canonical_repo.is_dir() and not config.canonical_repo.is_symlink(),
         "worktree_root": config.worktree_root.is_dir() and not config.worktree_root.is_symlink(),
         "state_dir": config.state_dir.is_dir() or not config.state_dir.exists(),
-        "absolute_paths": all(path.is_absolute() for path in (config.canonical_repo, config.worktree_root, config.state_dir)),
+        "runtime_dir": (config.runtime_dir.is_dir() and not config.runtime_dir.is_symlink()) or not config.runtime_dir.exists(),
+        "runtime_isolated": stable_runtime_is_isolated(config),
+        "absolute_paths": all(path.is_absolute() for path in (config.canonical_repo, config.worktree_root,
+                                                               config.state_dir, config.runtime_dir)),
         "outbound_policy": "NO_INBOUND_LISTENER_IMPLEMENTED",
         "providers": providers,
+        "operational_executables": operational,
+        "quality_gates": gates,
     }
     booleans_ok = all(value for key, value in checks.items()
-                      if key not in {"providers", "outbound_policy"})
-    checks["ok"] = booleans_ok and all(item["available"] and item["interface_ok"]
-                                        for item in providers.values())
+                      if key not in {"providers", "operational_executables", "quality_gates", "outbound_policy"})
+    provider_ok = all(not item["enabled"] or (item["available"] and item["interface_ok"])
+                      for item in providers.values())
+    operational_ok = all(item["available"] and item["interface_ok"] for item in operational.values())
+    checks["ok"] = booleans_ok and provider_ok and operational_ok and all(gates.values())
     return checks
 
 def run_once(config: Config, dry_run: bool = False) -> str:
@@ -838,7 +1095,9 @@ def run_once(config: Config, dry_run: bool = False) -> str:
             if not state.acquire_lease(config.runner_id, config.lease_seconds): raise RunnerError("active lease belongs to another runner")
             state.recover_incomplete()
             client = GitHubClient(config); client.verify_login()
-            for comment in client.comments():
+            queue_page = state.queue_page()
+            comments = client.comments(queue_page)
+            for comment in comments:
                 author = ((comment.get("user") or {}).get("login"))
                 body, comment_id = comment.get("body"), str(comment.get("id", ""))
                 if author != config.commander_login or not isinstance(body, str) or not comment_id: continue
@@ -850,7 +1109,7 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                     return f"VALIDATED {job.job_id}"
                 claimed = state.claim(comment_id, job.job_id, digest)
                 if not claimed: continue
-                latest = client.comment(comment_id)
+                latest = client.comment(comment_id, queue_page)
                 if ((latest.get("user") or {}).get("login") != config.commander_login
                         or not isinstance(latest.get("body"), str)
                         or comment_hash(latest["body"]) != digest):
@@ -873,7 +1132,10 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                     elif attempt.output and attempt.output.status == "blocked":
                         state_name, internal_state = "FAILED", "blocked"
                     else:
-                        delivered_sha = deliver_worktree(config, job, worktree)
+                        if job.profile == "repo_write_test":
+                            run_quality_gate(config, job, worktree)
+                        elif job.profile == "repo_delivery":
+                            delivered_sha = deliver_worktree(config, job, worktree)
                         state_name, internal_state = "COMPLETED", "succeeded"
                     if result:
                         store_raw_output(config.state_dir, job.job_id, result.output)
@@ -886,12 +1148,18 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                     duration = result.duration_seconds if result else 0.0
                     exit_code = result.returncode if result else -1
                     detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
+                              f"quality_gate={job.quality_gate}; "
                               f"exit={exit_code}; duration={duration:.1f}s; {evidence}")
                 except RunnerError as exc:
                     state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
                 state.set_status(comment_id, internal_state)
-                client.post(lifecycle(job, state_name, detail))
+                post_terminal_lifecycle(client, job, state_name, detail)
                 return f"{state_name} {job.job_id}"
+            if len(comments) == QUEUE_PAGE_SIZE:
+                state.set_queue_page(queue_page + 1)
+                return "QUEUE_CURSOR_ADVANCED"
+            if not comments and queue_page > 1:
+                state.set_queue_page(queue_page - 1)
             return "NO_JOB"
         finally: state.close()
 
@@ -901,10 +1169,13 @@ def command_install(args: argparse.Namespace) -> int:
     if not args.confirm: print("Not installed: pass --confirm after review."); return 0
     destination = launchagent_path()
     if destination.exists(): raise RunnerError("LaunchAgent already exists; refusing to overwrite")
+    runtime_script, digest = install_stable_runtime(config, Path(__file__).resolve())
     template = {"Label": "com.landlordeasy.commander-runner", "RunAtLoad": True, "KeepAlive": True}
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(make_launchagent(template, sys.executable, str(Path(__file__).resolve()), str(Path(args.config).resolve()), str(config.state_dir)))
-    os.chmod(destination, 0o600); print("Installed but not loaded."); return 0
+    destination.write_bytes(make_launchagent(template, config.operational_executables["python"],
+                                             str(runtime_script), str(Path(args.config).resolve()),
+                                             str(config.state_dir)))
+    os.chmod(destination, 0o600); print(f"Installed but not loaded. sha256={digest}"); return 0
 
 def command_start() -> int:
     destination = launchagent_path(); verify_owned_launchagent(destination)

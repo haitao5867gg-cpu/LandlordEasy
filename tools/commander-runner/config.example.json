@@ -6,10 +6,23 @@
   "canonical_repo": "~/LandLordEasy",
   "worktree_root": "~/LandLordEasy-runner-worktrees",
   "state_dir": "~/.local/state/landlordeasy-commander",
+  "runtime_dir": "~/.local/lib/landlordeasy-commander",
   "origin_url": "https://github.com/haitao5867gg-cpu/LandlordEasy.git",
   "poll_seconds": 60,
   "lease_seconds": 180,
   "provider_failover": true,
+  "operational_executables": {
+    "gh": "/ABSOLUTE/PATH/TO/gh",
+    "git": "/ABSOLUTE/PATH/TO/git",
+    "python": "/ABSOLUTE/PATH/TO/python3"
+  },
+  "enabled_providers": ["kiro"],
+  "enabled_profiles": ["repo_read"],
+  "enabled_quality_gates": ["none"],
+  "quality_gates": {
+    "none": [],
+    "org002_python": [["/ABSOLUTE/PATH/TO/python3", "-m", "unittest", "discover", "-s", "tools/commander-runner/tests", "-v"]]
+  },
   "executable_paths": {
     "kiro": "/ABSOLUTE/PATH/TO/kiro-cli",
     "copilot": "/ABSOLUTE/PATH/TO/copilot",
