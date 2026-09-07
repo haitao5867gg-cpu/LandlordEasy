@@ -177,7 +177,7 @@ As of 2026-09-07 UTC, ORG-002 is **ACCEPTED for scoped development execution** a
 - The mandatory bounded human-approval reference was required and checked on every `repo_delivery` job; jobs on other profiles that supplied one were rejected.
 - Provider/profile capability enforcement is independently fail closed per worker, matching the active capability matrix below; failover between providers remains disabled.
 
-This acceptance is scoped to development execution only. It does not constitute Production readiness, deployment, a merge to `main`, object storage access, production database access, real third-party provider verification, or legal approval. Remaining operational follow-ups are: review and integration of this control-plane documentation into normal Commander workflow, and optional later cleanup of retained backups and failed/dirty worktrees.
+This acceptance is scoped to development execution only. It does not constitute Production readiness, deployment, a merge to `main`, object storage access, production database access, real third-party provider verification, or legal approval. Remaining operational follow-ups are review and integration of this control-plane documentation into normal Commander workflow. Retained runtime backups and clean failed-job worktrees may be reviewed for cleanup only under separate explicit authorization.
 
 ### Active capability matrix
 
