@@ -7,7 +7,7 @@ As of 2026-09-07 UTC. Rehearsal candidate: `104de1521cf194c9dc76ccca52741f05a75f
 | R-002 | P1 | Payment report cross-tenant write; handoff, verify code | SEC-002 | Mitigated in rehearsal candidate; not yet verified in rehearsal; not deployed to Production |
 | R-003 | P1 | Termination/transfer partially committed; handoff | REL-001 | Mitigated in rehearsal candidate; not yet verified in rehearsal; not deployed to Production |
 | R-004 | P1 | JWT dev-secret fallback in real/prod; handoff | REL-002 | Mitigated in rehearsal candidate; not yet verified in rehearsal; not deployed to Production |
-| R-005 | P1 | No CI; no .github workflow in pinned tree; branches unprotected | REL-003 | CI Quality Gate passed on rehearsal candidate; branch protection / required-check enforcement still pending |
+| R-005 | P1 | Historical: no CI / no .github workflow in pinned tree pre-REL-003; branches unprotected | REL-003 | CI workflow merged (REL-003); CI Quality Gate passed on rehearsal candidate; branch protection / required-check enforcement still pending |
 | R-006 | Release blocker | Contract fourth/fifth clauses and safety appendix not verbatim approved | HA-001/002 | Unresolved human blocker; not addressed by rehearsal candidate |
 | R-007 | Release blocker | E-sign test watermark/certification unresolved | HA-003 | Unresolved human blocker; not addressed by rehearsal candidate |
 | R-008 | Release blocker | Current full journeys and production rehearsal not verified | RELEASE_GATE.md | Open; OPS-001 isolated rehearsal and M19–M21 E2E still pending |

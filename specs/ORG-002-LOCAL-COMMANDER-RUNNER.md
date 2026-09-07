@@ -170,14 +170,14 @@ As of 2026-09-07 UTC, ORG-002 is **ACCEPTED for scoped development execution** a
 
 - `repo_read` canary jobs completed for Kiro, Copilot and Claude, each round-tripped through the queue Issue with a sanitized result comment.
 - Stop/restart checks proved no job replay after the runner was stopped and restarted mid-queue.
-- A `repo_write_test` canary ran a reversible repository-local build/typecheck/test command inside an isolated worktree with no push.
+- A `repo_write_test` canary made a reversible file write inside an isolated worktree, followed by a run of the fixed `org002_python` test gate; the canary write itself was not a build or typecheck command.
 - Dispatcher (`commander_login`) and Executor (`executor_login`) GitHub identities were confirmed distinct and independently validated; Executor-authored comments were confirmed ignored as non-jobs.
 - The runner ran stably across the canary sequence with no unexpected macOS approval, network destination, or permission escalation.
-- `repo_delivery` exact-path allowlist enforcement was exercised: staged changes outside the owner-controlled allowlist were rejected both before and after the quality gate.
+- `repo_delivery` exact-path allowlist enforcement and TOCTOU (stage-time vs. commit-time) rejection are covered by offline security tests and static negative validation (see `tools/commander-runner/tests/test_commander_runner.py`), not by a live out-of-scope delivery attempt.
 - The mandatory bounded human-approval reference was required and checked on every `repo_delivery` job; jobs on other profiles that supplied one were rejected.
 - Provider/profile capability enforcement is independently fail closed per worker, matching the active capability matrix below; failover between providers remains disabled.
 
-This acceptance is scoped to development execution only. It does not constitute Production readiness, deployment, a merge to `main`, object storage access, production database access, real third-party provider verification, or legal approval. Mac mini physical enrollment/activation steps not covered by the canary evidence above remain to be completed per the "Activation acceptance" checklist.
+This acceptance is scoped to development execution only. It does not constitute Production readiness, deployment, a merge to `main`, object storage access, production database access, real third-party provider verification, or legal approval. Remaining operational follow-ups are: review and integration of this control-plane documentation into normal Commander workflow, and optional later cleanup of retained backups and failed/dirty worktrees.
 
 ### Active capability matrix
 
