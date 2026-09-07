@@ -1,11 +1,13 @@
 # Current state
 
-As of 2026-09-06 UTC. Release decision: **NO-GO**.
+As of 2026-09-07 UTC. Release decision: **NO-GO**. Production V1 feature freeze remains active.
 
 ## Verified baselines
 
 - `main`: `c3b5b2d849745d7ed4e0c2b5d674900d1f4bf286` — M18 production baseline.
-- `dev`: `22c8a9bc00e17b01bc6f64bbfbe04c56337d2b94` — M21 candidate plus merged Project Commander control plane and read-only CI quality gate.
+- `origin/dev`: `2ce0281f38f943372d9c1d7eb51d3880d7bc6dfe` — M21 candidate plus merged Project Commander control plane and read-only CI quality gate.
+- Rehearsal candidate: `104de1521cf194c9dc76ccca52741f05a75f1180` — contains the SEC-001, SEC-002, REL-001 and REL-002 changes. Its CI Quality Gate passed. It is **not** deployed to Production and not merged to `main`.
+- Commander Runner baseline (ORG-002, `tools/commander-runner/`): `77487255a60502ae5cef9f753380629289ba39e1`.
 - PR #6 merged the control plane into `dev`; its push and pull-request quality-gate runs passed.
 - `main` remains the production baseline. No blocker implementation has been deployed or merged into `main`.
 - Branch protection / required-check enforcement is still pending; green CI is evidence, not permission to merge.
@@ -26,7 +28,7 @@ Historical production evidence includes real WeChat OAuth and a ¥0.01 JSAPI pay
 | REL-001 | P1 | REVIEWED / MYSQL_RUNTIME_BLOCKED | `fix/rel001-transaction-safety` / Draft PR #11 at `defa102` | real MySQL rollback, locking/deadlock, concurrent approval and provider-recovery evidence |
 | REL-003 | P1 | CI MERGED / ENFORCEMENT_PENDING | workflow merged through PR #6; superseded PR #9 closed | configure enforceable required checks / branch rules |
 
-The blocker PRs are intentionally stacked: `dev` → SEC-001 → SEC-002 → REL-002 → REL-001. Do not merge or deploy the stack merely because CI is green.
+The blocker PRs are intentionally stacked: `dev` → SEC-001 → SEC-002 → REL-002 → REL-001. Do not merge or deploy the stack merely because CI is green. The rehearsal candidate `104de1521cf194c9dc76ccca52741f05a75f1180` aggregates these four changes with a passing CI Quality Gate; that is evidence the gate passed on that exact candidate, not that the fixes are verified in a running rehearsal environment or deployed to Production.
 
 ## AI organization
 
@@ -40,8 +42,21 @@ ORG-001 is **ACCEPTED**.
 
 Routing and quota rules are authoritative in `specs/ORG-001-AI-CLI-ONBOARDING.md`. Commander retains scope, priority, risk, acceptance and release decisions; worker output always requires independent verification.
 
+ORG-002 (Local Commander Runner) is **ACCEPTED for scoped development execution** at Commander Runner baseline `77487255a60502ae5cef9f753380629289ba39e1`. Acceptance is grounded in: repo_read canaries completed independently for Kiro, Copilot and Claude; stop/restart checks proving no job replay; a reversible `repo_write_test` canary; strict identity separation between the Commander (dispatcher) and Executor GitHub logins; a stable runner runtime; exact-path allowlists enforced on every `repo_delivery` quality gate; a mandatory bounded human-approval reference required on every `repo_delivery` job; and independently fail-closed provider/profile capability enforcement. Failover between providers remains disabled.
+
+Active capability matrix (see `specs/ORG-002-LOCAL-COMMANDER-RUNNER.md`):
+
+- Kiro: `repo_read`, `repo_write_test`, `repo_delivery`.
+- GitHub Copilot: `repo_read` only — Copilot CLI 1.0.83 headless write behavior has not been validated, so write/delivery jobs are rejected at parse time and never routed to Copilot.
+- Claude: `repo_read`, `repo_write_test`, `repo_delivery` — enabled after stable authentication was confirmed in both interactive and Runner (headless) environments.
+
+`repo_delivery` only creates and pushes a UUID-derived branch; it cannot push `main`, `dev`, or the infra Commander Runner branch directly. Controlled delivery branch pushes are permitted only through this hardened `repo_delivery` profile; every other GitHub action (Issue edits, labels, PR actions, releases, workflow or repository-settings changes) stays outside the Runner entirely.
+
+This acceptance authorizes scoped development execution only. It is not a claim of Production readiness, deployment, merge to `main`, object storage access, production database access, real third-party provider verification, or legal approval.
+
 ## Next execution wave
 
+0. Review and integrate the ORG-002 Commander Runner control-plane delivery (Commander Runner baseline `77487255a60502ae5cef9f753380629289ba39e1`) into normal Commander workflow, then resume the queue.
 1. [#12 OPS-001 connected dev rehearsal](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/12)
    - Pin an isolated MySQL/dev environment.
    - Prove transaction rollback/concurrency.
@@ -58,4 +73,4 @@ Routing and quota rules are authoritative in `specs/ORG-001-AI-CLI-ONBOARDING.md
 
 Contract wording and the safety undertaking remain deferred for a dedicated Commander–Haitao discussion. Watermark strategy, stale CREATED e-sign data, initial tenant records and pilot users remain human actions. Alipay is outside the active critical path pending the owner's final V1 exclusion decision.
 
-No production/dev deployment, real DB mutation, provider call or real-user notification has been authorized by this checkpoint. Release remains **NO-GO**.
+No production/dev deployment, real DB mutation, provider call or real-user notification has been authorized by this checkpoint. Release remains **NO-GO**. Production V1 feature freeze remains in force pending SEC/REL blocker closure and full M19–M21 verification.
