@@ -5,10 +5,11 @@ As of 2026-09-07 UTC. Release decision: **NO-GO**. Production V1 feature freeze 
 ## Verified baselines
 
 - `main`: `c3b5b2d849745d7ed4e0c2b5d674900d1f4bf286` — M18 production baseline.
-- `origin/dev`: `2ce0281f38f943372d9c1d7eb51d3880d7bc6dfe` — M21 candidate plus merged Project Commander control plane and read-only CI quality gate.
+- `origin/dev`: `02ce4f8a2c9d769e9d5c614cd96df3d728041b1d` — M21 candidate plus merged Project Commander control plane and read-only CI quality gate; accepted ORG-002 Runner integration.
 - Rehearsal candidate: `104de1521cf194c9dc76ccca52741f05a75f1180` — contains the SEC-001, SEC-002, REL-001 and REL-002 changes. Its CI Quality Gate passed. It is **not** deployed to Production and not merged to `main`.
 - Commander Runner baseline (ORG-002, `tools/commander-runner/`): `77487255a60502ae5cef9f753380629289ba39e1`.
 - PR #6 merged the control plane into `dev`; its push and pull-request quality-gate runs passed.
+- PR #18 merged the accepted ORG-002 Runner into `dev` after CI passed on head `51143ead031fdf6c3dd90ec7fe286d371056bcc0`.
 - `main` remains the production baseline. No blocker implementation has been deployed or merged into `main`.
 - Branch protection / required-check enforcement is still pending; green CI is evidence, not permission to merge.
 
@@ -56,8 +57,8 @@ This acceptance authorizes scoped development execution only. It is not a claim 
 
 ## Next execution wave
 
-0. Review and integrate the ORG-002 Commander Runner control-plane delivery (Commander Runner baseline `77487255a60502ae5cef9f753380629289ba39e1`) into normal Commander workflow, then resume the queue.
-1. [#12 OPS-001 connected dev rehearsal](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/12)
+0. **Completed checkpoint:** PR #18 merged the accepted ORG-002 Runner into `dev` after CI passed on head `51143ead031fdf6c3dd90ec7fe286d371056bcc0`. The Commander Runner runtime baseline remains `77487255a60502ae5cef9f753380629289ba39e1` because runtime code did not change.
+1. **ACTIVE — [#12 OPS-001 connected dev rehearsal](https://github.com/haitao5867gg-cpu/LandlordEasy/issues/12)**
    - Pin an isolated MySQL/dev environment.
    - Prove transaction rollback/concurrency.
    - Rehearse private contract migration and loaded proxy configuration.
