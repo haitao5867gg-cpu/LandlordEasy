@@ -31,6 +31,11 @@ from typing import Any, Iterable, Mapping, Sequence
 SCHEMA = "COMMANDER_JOB_V1"
 PROFILES = frozenset({"repo_read", "repo_write_test", "repo_delivery"})
 WORKERS = frozenset({"kiro", "copilot", "claude"})
+PROVIDER_PROFILE_CAPABILITIES = {
+    "kiro": frozenset({"repo_read", "repo_write_test", "repo_delivery"}),
+    "copilot": frozenset({"repo_read"}),
+    "claude": frozenset({"repo_read", "repo_write_test", "repo_delivery"}),
+}
 MODEL_ALLOWLIST = {
     "kiro": frozenset({"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}),
     "copilot": frozenset({"default", "claude-sonnet-5"}),
@@ -256,6 +261,8 @@ class Job:
             raise ValidationError("Kiro auto model is forbidden")
         if data["profile"] not in PROFILES:
             raise ValidationError("permission profile is not allowed")
+        if data["profile"] not in PROVIDER_PROFILE_CAPABILITIES[data["worker"]]:
+            raise ValidationError("provider does not support permission profile")
         if data["profile"] not in config.enabled_profiles:
             raise ValidationError("permission profile is not enabled")
         if (not isinstance(data["quality_gate"], str)
@@ -767,10 +774,13 @@ def route_candidates(job: Job, allow_failover: bool = True,
     }[job.worker]
     if not allow_failover:
         order = order[:1]
-    order = tuple(worker for worker in order if worker in enabled)
+    order = tuple(worker for worker in order
+                  if worker in enabled and job.profile in PROVIDER_PROFILE_CAPABILITIES[worker])
     return [(worker, job.model if worker == job.worker else PROVIDER_DEFAULT_MODEL[worker]) for worker in order]
 
 def with_provider(job: Job, worker: str, model: str) -> Job:
+    if worker not in WORKERS or job.profile not in PROVIDER_PROFILE_CAPABILITIES[worker]:
+        raise ValidationError("provider does not support permission profile")
     return dataclasses.replace(job, worker=worker, model=model)
 
 def provider_health(config: Config) -> dict[str, dict[str, Any]]:

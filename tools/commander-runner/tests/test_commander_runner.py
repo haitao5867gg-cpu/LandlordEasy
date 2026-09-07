@@ -114,6 +114,35 @@ class SchemaTests(RunnerTestCase):
         with self.assertRaises(runner.ValidationError):
             runner.validate_quality_gates({"bad": [["/bin/sh", "-c", "echo injected"]], "none": []})
 
+    def test_provider_profile_capability_matrix_all_combinations(self):
+        expected = {
+            "kiro": {"repo_read", "repo_write_test", "repo_delivery"},
+            "copilot": {"repo_read"},
+            "claude": {"repo_read", "repo_write_test", "repo_delivery"},
+        }
+        self.assertEqual(
+            {worker: set(profiles) for worker, profiles in runner.PROVIDER_PROFILE_CAPABILITIES.items()},
+            expected,
+        )
+        models = {"kiro": "gpt-5.6-luna", "copilot": "default", "claude": "claude-sonnet-5"}
+        for worker in sorted(runner.WORKERS):
+            for profile in sorted(runner.PROFILES):
+                changes = {
+                    "worker": worker,
+                    "model": models[worker],
+                    "profile": profile,
+                    "quality_gate": "none" if profile == "repo_read" else "unit",
+                }
+                if profile == "repo_delivery":
+                    changes["human_approval_ref"] = "approval-17"
+                with self.subTest(worker=worker, profile=profile):
+                    if profile in expected[worker]:
+                        job = runner.Job.from_comment(self.comment(**changes), self.config)
+                        self.assertEqual((job.worker, job.profile), (worker, profile))
+                    else:
+                        with self.assertRaises(runner.ValidationError):
+                            runner.Job.from_comment(self.comment(**changes), self.config)
+
     def test_config_load_rejects_insecure_mode_missing_and_unknown_fields(self):
         with self.assertRaises(runner.ValidationError):
             runner.Config.load(self.write_config(mode=0o644))
@@ -522,6 +551,33 @@ class ProviderAndQuotaTests(RunnerTestCase):
         with mock.patch.object(runner, "execute", side_effect=fake_execute):
             attempt, attempts = runner.execute_with_failover(job, config, self.repo)
         self.assertEqual(attempt.worker, "copilot"); self.assertEqual(len(attempts), 2)
+
+    def test_write_failover_never_selects_copilot(self):
+        auth = runner.Result(1, "authentication required", False, False, 0.1)
+        success = runner.Result(
+            0, '{"status":"ok","summary":"done","evidence":[]}', False, False, 0.1)
+        config = runner.dataclasses.replace(self.config, provider_failover=True)
+        for profile in ("repo_write_test", "repo_delivery"):
+            changes = {"profile": profile, "quality_gate": "unit"}
+            if profile == "repo_delivery":
+                changes["human_approval_ref"] = "approval-17"
+            job = runner.Job.from_comment(self.comment(**changes), config)
+            candidates = runner.route_candidates(job, True, config.enabled_providers)
+            self.assertEqual([worker for worker, _ in candidates], ["kiro", "claude"])
+            calls = []
+
+            def fake_execute(argv, **kwargs):
+                calls.append(Path(argv[0]).name)
+                return auth if len(calls) == 1 else success
+
+            with self.subTest(profile=profile), \
+                 mock.patch.object(runner, "execute", side_effect=fake_execute), \
+                 mock.patch.object(runner, "worktree_is_clean", return_value=True):
+                attempt, attempts = runner.execute_with_failover(job, config, self.repo)
+            self.assertEqual(attempt.worker, "claude")
+            self.assertEqual([item.worker for item in attempts], ["kiro", "claude"])
+            with self.assertRaises(runner.ValidationError):
+                runner.with_provider(job, "copilot", "default")
 
     def test_runtime_and_timeout_do_not_repeat_ambiguous_work(self):
         job = runner.Job.from_comment(self.comment(), self.config)

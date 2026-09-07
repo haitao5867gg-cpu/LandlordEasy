@@ -88,6 +88,8 @@ Adapters build subprocess argument arrays directly; never use a shell.
 - The job cannot supply raw CLI flags.
 - Provider subprocesses receive only the fixed safe-environment allowlist. The runner derives `USER` from `pwd.getpwuid(os.getuid()).pw_name`, never from inherited environment data, and fails closed if that user record is unavailable or invalid. It does not forward `LOGNAME`, `SSH_AUTH_SOCK`, arbitrary `CLAUDE_`/`ANTHROPIC_` variables or a complete shell environment.
 
+Provider/profile capability is independently fail closed: Kiro and Claude support `repo_read`, `repo_write_test`, and `repo_delivery`; Copilot supports only `repo_read`. Copilot CLI 1.0.83 read-only behavior is accepted, but headless write behavior is not accepted, so parsing rejects Copilot write/delivery jobs and failover never routes either write profile to Copilot. The retained Copilot adapter implementation does not grant a capability absent from this matrix. Any future Copilot CLI upgrade must pass a new isolated write canary before the matrix can be expanded.
+
 Model routing follows `specs/ORG-001-AI-CLI-ONBOARDING.md`.
 
 ## GitHub trust boundary
