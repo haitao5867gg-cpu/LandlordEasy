@@ -374,9 +374,16 @@ class ProbeHelperTests(OperationTestCase):
         socket_path.write_text("metadata fixture")
         record = type("Record", (), {"pw_dir": str(trusted_home)})()
         metadata = SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=os.geteuid())
+        real_lstat = os.lstat
+
+        def selective_lstat(path):
+            if Path(path) == socket_path:
+                return metadata
+            return real_lstat(path)
+
         with mock.patch.dict(os.environ, {"HOME": str(root / "forged-home")}), \
              mock.patch.object(helper.pwd, "getpwuid", return_value=record), \
-             mock.patch.object(helper.os, "lstat", return_value=metadata):
+             mock.patch.object(helper.os, "lstat", side_effect=selective_lstat):
             host = helper.trusted_local_docker_host()
         self.assertEqual(host, "unix://" + str(socket_path.resolve()))
 
@@ -422,12 +429,21 @@ class ProbeHelperTests(OperationTestCase):
         escape_metadata = SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=os.geteuid())
         cases.append((escape_home, None, escape_metadata))
 
+        real_lstat = os.lstat
         for home, effective_uid, metadata in cases:
             record = type("Record", (), {"pw_dir": str(home)})()
             uid_patch = (mock.patch.object(helper.os, "geteuid", return_value=effective_uid)
                          if effective_uid is not None else mock.patch.object(
                              helper.os, "geteuid", wraps=helper.os.geteuid))
-            lstat_patch = (mock.patch.object(helper.os, "lstat", return_value=metadata)
+            socket_path = home / ".docker" / "run" / "docker.sock"
+
+            def selective_lstat(path, *, expected=socket_path, fake=metadata):
+                if fake is not None and Path(path) == expected:
+                    return fake
+                return real_lstat(path)
+
+            lstat_patch = (mock.patch.object(
+                               helper.os, "lstat", side_effect=selective_lstat)
                            if metadata is not None else mock.patch.object(
                                helper.os, "lstat", wraps=os.lstat))
             with self.subTest(home=home.name), \
