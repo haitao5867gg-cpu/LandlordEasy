@@ -1,6 +1,7 @@
 {
   "repository": "haitao5867gg-cpu/LandlordEasy",
   "queue_issue": 17,
+  "wake_pull_request": null,
   "commander_login": "set-commander-login",
   "executor_login": "set-executor-login",
   "runner_id": "SET_IMMUTABLE_RUNNER_ID",
