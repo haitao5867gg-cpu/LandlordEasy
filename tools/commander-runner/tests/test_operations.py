@@ -281,14 +281,23 @@ class OperationExecutionTests(OperationTestCase):
         self.assertNotIn("192.0.2.1", redacted.summary)
 
     def test_claim_replay_edit_and_crash_recovery_apply_to_operation_ids(self):
+        job = runner.OperationJob.from_comment(self.comment(), self.config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
         state = runner.State(self.state)
         try:
             digest = runner.comment_hash(self.comment())
-            self.assertTrue(state.claim("9001", JOB_ID, digest))
+            self.assertTrue(state.claim("9001", JOB_ID, digest, recovery))
             self.assertFalse(state.claim("9001", JOB_ID, digest))
             with self.assertRaises(runner.ValidationError):
                 state.claim("9001", JOB_ID, "0" * 64)
-            self.assertEqual(state.recover_incomplete(), 1)
+            self.assertEqual(runner.recover_incomplete_jobs(object(), state, self.config), 1)
+            self.assertEqual(state.summary()["jobs"].get("claimed"), 1)
+            class TerminalClient:
+                config = self.config
+                @staticmethod
+                def post(body): return "9101"
+            self.assertTrue(runner.drain_terminal_outbox(TerminalClient(), state, self.config))
             self.assertEqual(state.summary()["jobs"].get("blocked"), 1)
         finally:
             state.close()
@@ -371,13 +380,15 @@ class ProbeHelperTests(OperationTestCase):
         trusted_home = root / "trusted-home"
         socket_path = trusted_home / ".docker" / "run" / "docker.sock"
         socket_path.parent.mkdir(parents=True)
+        os.chmod(trusted_home / ".docker", 0o700)
+        os.chmod(trusted_home / ".docker" / "run", 0o700)
         socket_path.write_text("metadata fixture")
         record = type("Record", (), {"pw_dir": str(trusted_home)})()
         metadata = SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=os.geteuid())
         real_lstat = os.lstat
 
         def selective_lstat(path):
-            if Path(path) == socket_path:
+            if Path(path).name == "docker.sock":
                 return metadata
             return real_lstat(path)
 

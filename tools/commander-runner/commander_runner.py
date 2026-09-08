@@ -713,34 +713,14 @@ class State:
         except Exception:
             with contextlib.suppress(sqlite3.Error): self.db.execute("ROLLBACK")
             raise
-    def recover_incomplete(self, config: Config | None = None) -> int:
-        """Queue a durable terminal for ambiguous work before blocking it."""
+    def incomplete_claims(self) -> tuple[tuple[str, str, str, str | None], ...]:
         rows = self.db.execute(
-            "SELECT comment_id, job_id, recovery_body FROM claims "
-            "WHERE status IN ('claimed','running') ORDER BY claimed_at, comment_id"
-        ).fetchall()
-        for comment_id, job_id, recovery_body in rows:
-            pending = self.db.execute(
-                "SELECT 1 FROM terminal_outbox WHERE job_id=? AND completed_at IS NULL",
-                (job_id,),
-            ).fetchone()
-            if pending is not None:
-                continue
-            if config is not None and isinstance(recovery_body, str) and recovery_body:
-                self.queue_terminal(
-                    str(comment_id), str(job_id), recovery_body, "blocked", "FAILED", config)
-            elif config is not None:
-                continue
-            else:
-                self.set_status(str(comment_id), "blocked")
-        return len(rows)
-    def incomplete_claims(self) -> tuple[tuple[str, str, str | None], ...]:
-        rows = self.db.execute(
-            "SELECT comment_id,job_id,recovery_body FROM claims "
+            "SELECT comment_id,job_id,content_hash,recovery_body FROM claims "
             "WHERE status IN ('claimed','running') ORDER BY claimed_at,comment_id"
         ).fetchall()
-        return tuple((str(comment), str(job), body if isinstance(body, str) else None)
-                     for comment, job, body in rows)
+        return tuple((str(comment), str(job), str(content_hash),
+                      body if isinstance(body, str) else None)
+                     for comment, job, content_hash, body in rows)
     def set_recovery_body(self, comment_id: str, job_id: str, recovery_body: str) -> None:
         recovery_body = ensure_safe_post(recovery_body)
         cursor = self.db.execute(
@@ -1617,7 +1597,7 @@ def drain_terminal_outbox(client: GitHubClient, state_db: State, config: Config)
 
 def recover_incomplete_jobs(client: GitHubClient, state_db: State, config: Config) -> int:
     rows = state_db.incomplete_claims()
-    for comment_id, job_id, recovery_body in rows:
+    for comment_id, job_id, persisted_hash, recovery_body in rows:
         pending = any(record[0] == job_id for record in state_db.pending_terminals(100))
         if pending:
             continue
@@ -1625,8 +1605,14 @@ def recover_incomplete_jobs(client: GitHubClient, state_db: State, config: Confi
             original = client.find_comment(comment_id, state_db.queue_page())
             author = (original.get("user") or {}).get("login")
             body = original.get("body")
-            if not github_login_matches(author, config.commander_login) or not isinstance(body, str):
+            fetched_comment_id = original.get("id")
+            if (str(fetched_comment_id) != comment_id
+                    or not github_login_matches(author, config.commander_login)
+                    or not isinstance(body, str)):
                 raise RunnerError("legacy in-flight claim source is invalid")
+            if not re.fullmatch(r"[0-9a-f]{64}", persisted_hash) \
+                    or comment_hash(body) != persisted_hash:
+                raise RunnerError("legacy in-flight claim content hash mismatch")
             try:
                 if OPERATION_COMMENT_RE.fullmatch(body):
                     job: Job | OperationJob = OperationJob.from_comment(body, config)

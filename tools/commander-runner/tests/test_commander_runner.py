@@ -404,6 +404,26 @@ class SecurityTests(RunnerTestCase):
         self.assertTrue(result.overflow); self.assertLessEqual(len(result.output.encode()), 100)
 
 class StateTests(RunnerTestCase):
+    def legacy_state(self, body, job_id=JOB_ID, content_hash=None):
+        state_dir = Path(self.tmp.name) / f"legacy-{uuid.uuid4()}"
+        state_dir.mkdir()
+        database = sqlite3.connect(state_dir / "state.sqlite3")
+        database.executescript("""
+        CREATE TABLE claims (
+          comment_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL, content_hash TEXT NOT NULL,
+          status TEXT NOT NULL, claimed_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id TEXT NOT NULL,
+          status TEXT NOT NULL, created_at INTEGER NOT NULL);
+        """)
+        database.execute(
+            "INSERT INTO claims VALUES (?, ?, ?, 'running', 1, 1)",
+            ("1", job_id, content_hash if content_hash is not None else runner.comment_hash(body)),
+        )
+        database.commit()
+        database.close()
+        return runner.State(state_dir)
+
     def test_atomic_claim_edit_binding_and_crash_recovery(self):
         state = runner.State(self.state)
         self.assertTrue(state.claim("1", JOB_ID, "hash-a"))
@@ -414,13 +434,12 @@ class StateTests(RunnerTestCase):
         self.assertFalse(restarted.claim("1", JOB_ID, "hash-a"))
         with self.assertRaises(runner.ValidationError): restarted.claim("2", JOB_ID, "hash-a")
         restarted.close()
-    def test_explicit_states_and_restart_recovery(self):
+    def test_incomplete_claim_cannot_be_locally_terminalized_without_public_intent(self):
         state = runner.State(self.state)
         self.assertTrue(state.claim("1", JOB_ID, "hash-a"))
         self.assertEqual(state.summary()["jobs"], {"claimed": 1})
-        self.assertEqual(state.recover_incomplete(), 1)
-        self.assertEqual(state.summary()["jobs"], {"blocked": 1})
-        with self.assertRaises(runner.ValidationError): state.set_status("1", "running")
+        self.assertFalse(hasattr(state, "recover_incomplete"))
+        self.assertEqual(state.summary()["jobs"], {"claimed": 1})
         state.close()
     def test_single_node_lease_and_process_lock(self):
         state = runner.State(self.state)
@@ -478,7 +497,7 @@ class StateTests(RunnerTestCase):
         state.close()
 
         restarted = runner.State(self.state)
-        self.assertEqual(restarted.recover_incomplete(config), 1)
+        self.assertEqual(runner.recover_incomplete_jobs(object(), restarted, config), 1)
         events = []
         class RecoveryClient:
             def __init__(self): self.config = config
@@ -500,7 +519,7 @@ class StateTests(RunnerTestCase):
         state.close()
 
         restarted = runner.State(self.state)
-        self.assertEqual(restarted.recover_incomplete(config), 1)
+        self.assertEqual(runner.recover_incomplete_jobs(object(), restarted, config), 1)
         events = []
         class RecoveryClient:
             def __init__(self): self.config = config
@@ -511,6 +530,114 @@ class StateTests(RunnerTestCase):
         self.assertIn("ambiguous execution recovered after restart", events[0])
         self.assertEqual(restarted.summary()["jobs"], {"blocked": 1})
         restarted.close()
+
+    def test_legacy_migration_accepts_worker_and_operation_envelopes(self):
+        definition = runner.OperationDefinition(
+            argv=(sys.executable, str(self.runtime / "rehearsal_operations.py"),
+                  "--docker", str(self.runtime / "docker")),
+            mode="read_only", allowed_target_shas=frozenset({runner.OPS001_TARGET_SHA}),
+            max_timeout_seconds=120, max_output_bytes=8192,
+            require_clean_worktree=True, description="fixture operation",
+        )
+        operation_config = runner.dataclasses.replace(
+            self.config, enabled_operations=frozenset({"ops001_mysql_probe"}),
+            operation_definitions={"ops001_mysql_probe": definition})
+        operation_data = {
+            "schema": runner.OPERATION_SCHEMA, "job_id": JOB_ID,
+            "repository": "owner/repo", "queue_issue": 42,
+            "target_sha": runner.OPS001_TARGET_SHA,
+            "worktree_id": runner.derive_worktree_id(JOB_ID), "runner_id": "runner-001",
+            "operation_id": "ops001_mysql_probe", "timeout_seconds": 60,
+            "output_limit_bytes": 4096, "expected_evidence": "bounded evidence",
+            "human_approval_ref": "commander-approval",
+        }
+        operation = "COMMANDER_OPERATION_V1\n```json\n" + json.dumps(operation_data) + "\n```"
+        for body, config in ((self.comment(), self.config), (operation, operation_config)):
+            state = self.legacy_state(body)
+            class Client:
+                @staticmethod
+                def find_comment(comment_id, max_page):
+                    return {"id": 1, "user": {"login": "commander"}, "body": body}
+            with self.subTest(schema=body.splitlines()[0]):
+                self.assertEqual(runner.recover_incomplete_jobs(Client(), state, config), 1)
+                self.assertEqual(len(state.pending_terminals()), 1)
+                self.assertEqual(state.summary()["jobs"], {"running": 1})
+            state.close()
+
+    def test_legacy_migration_rejects_wrong_author_malformed_edit_and_job_mismatch(self):
+        original = self.comment()
+        other_job = "123e4567-e89b-12d3-a456-426614174099"
+        cases = (
+            (original, runner.comment_hash(original), JOB_ID, "attacker"),
+            ("COMMANDER_JOB_V1\n```json\n{}\n```", None, JOB_ID, "commander"),
+            (self.comment(prompt="edited"), runner.comment_hash(original), JOB_ID, "commander"),
+            (original, runner.comment_hash(original), other_job, "commander"),
+        )
+        for fetched_body, stored_hash, stored_job, author in cases:
+            state = self.legacy_state(
+                fetched_body, job_id=stored_job,
+                content_hash=(runner.comment_hash(fetched_body)
+                              if stored_hash is None else stored_hash))
+            class Client:
+                @staticmethod
+                def find_comment(comment_id, max_page):
+                    return {"id": 1, "user": {"login": author}, "body": fetched_body}
+            with self.subTest(author=author, job=stored_job,
+                              malformed=fetched_body != original), \
+                 self.assertRaises(runner.RunnerError):
+                runner.recover_incomplete_jobs(Client(), state, self.config)
+            self.assertEqual(state.summary()["jobs"], {"running": 1})
+            self.assertEqual(state.pending_terminals(), ())
+            state.close()
+
+    def test_complete_terminal_failure_rolls_back_all_three_state_changes(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, runner.comment_hash(self.comment()), recovery)
+        state.set_status("1", "running")
+        state.queue_terminal("1", JOB_ID, recovery, "blocked", "FAILED", config)
+        history_before = state.db.execute("SELECT count(*) FROM history").fetchone()[0]
+        original_enqueue = state._enqueue_wake_tx
+        def fail_after_wake_insert(*args):
+            original_enqueue(*args)
+            raise RuntimeError("injected transaction failure")
+        with mock.patch.object(state, "_enqueue_wake_tx", side_effect=fail_after_wake_insert), \
+             self.assertRaises(RuntimeError):
+            state.complete_terminal(JOB_ID, "9001")
+        self.assertEqual(state.summary()["jobs"], {"running": 1})
+        self.assertEqual(state.db.execute("SELECT count(*) FROM history").fetchone()[0],
+                         history_before)
+        self.assertEqual(state.pending_wakes(), ())
+        self.assertEqual(len(state.pending_terminals()), 1)
+        state.close()
+
+    def test_pending_terminal_identity_mismatch_blocks_before_post(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, runner.comment_hash(self.comment()), recovery)
+        state.set_status("1", "running")
+        state.queue_terminal("1", JOB_ID, recovery, "blocked", "FAILED", config)
+        changes = (
+            {"repository": "other/repo"}, {"queue_issue": 43},
+            {"runner_id": "other-runner"}, {"wake_pull_request": 23},
+            {"wake_pull_request": None},
+        )
+        for fields in changes:
+            changed = runner.dataclasses.replace(config, **fields)
+            class Client:
+                @staticmethod
+                def post(body): raise AssertionError("identity mismatch must block before POST")
+            with self.subTest(fields=fields), self.assertRaises(runner.RunnerError):
+                runner.drain_terminal_outbox(Client(), state, changed)
+        self.assertEqual(state.summary()["jobs"], {"running": 1})
+        self.assertEqual(len(state.pending_terminals()), 1)
+        state.close()
 
 class GitHubAndLaunchAgentTests(RunnerTestCase):
     def test_github_client_cannot_escape_queue_issue(self):
