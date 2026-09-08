@@ -645,10 +645,28 @@ class State:
           job_id TEXT PRIMARY KEY, terminal_comment_id TEXT NOT NULL,
           terminal_state TEXT NOT NULL, created_at INTEGER NOT NULL,
           delivered_at INTEGER);
+        CREATE TABLE IF NOT EXISTS terminal_outbox (
+          job_id TEXT PRIMARY KEY, comment_id TEXT UNIQUE NOT NULL,
+          terminal_body TEXT NOT NULL, internal_state TEXT NOT NULL,
+          terminal_state TEXT NOT NULL, repository TEXT NOT NULL,
+          terminal_issue INTEGER NOT NULL, runner_id TEXT NOT NULL,
+          wake_pull_request INTEGER, terminal_comment_id TEXT,
+          created_at INTEGER NOT NULL, completed_at INTEGER);
         """)
+        claim_columns = {row[1] for row in self.db.execute("PRAGMA table_info(claims)")}
+        if "recovery_body" not in claim_columns:
+            self.db.execute("ALTER TABLE claims ADD COLUMN recovery_body TEXT")
+        wake_columns = {row[1] for row in self.db.execute("PRAGMA table_info(wake_outbox)")}
+        for name, declaration in (
+            ("repository", "TEXT"), ("terminal_issue", "INTEGER"),
+            ("runner_id", "TEXT"), ("wake_pull_request", "INTEGER"),
+        ):
+            if name not in wake_columns:
+                self.db.execute(f"ALTER TABLE wake_outbox ADD COLUMN {name} {declaration}")
     def close(self) -> None:
         self.db.close()
-    def claim(self, comment_id: str, job_id: str, content_hash_value: str) -> bool:
+    def claim(self, comment_id: str, job_id: str, content_hash_value: str,
+              recovery_body: str | None = None) -> bool:
         now = int(time.time())
         try:
             self.db.execute("BEGIN IMMEDIATE")
@@ -662,8 +680,12 @@ class State:
             if duplicate is not None:
                 self.db.execute("COMMIT")
                 raise ValidationError("duplicate job ID")
-            self.db.execute("INSERT INTO claims VALUES (?, ?, ?, 'queued', ?, ?)",
-                            (comment_id, job_id, content_hash_value, now, now))
+            if recovery_body is not None:
+                recovery_body = ensure_safe_post(recovery_body)
+            self.db.execute(
+                "INSERT INTO claims(comment_id,job_id,content_hash,status,claimed_at,updated_at,recovery_body) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                (comment_id, job_id, content_hash_value, now, now, recovery_body))
             self.db.execute("INSERT INTO history(comment_id,status,created_at) VALUES (?, 'queued', ?)",
                             (comment_id, now))
             self.db.execute("UPDATE claims SET status='claimed', updated_at=? WHERE comment_id=?",
@@ -691,12 +713,24 @@ class State:
         except Exception:
             with contextlib.suppress(sqlite3.Error): self.db.execute("ROLLBACK")
             raise
-    def recover_incomplete(self) -> int:
-        """Fail closed after a crash; never replay an ambiguously started worker."""
-        now = int(time.time())
-        rows = self.db.execute("SELECT comment_id FROM claims WHERE status IN ('claimed','running')").fetchall()
-        for (comment_id,) in rows:
-            self.set_status(comment_id, "blocked")
+    def recover_incomplete(self, config: Config | None = None) -> int:
+        """Queue a durable terminal for ambiguous work before blocking it."""
+        rows = self.db.execute(
+            "SELECT comment_id, job_id, recovery_body FROM claims "
+            "WHERE status IN ('claimed','running') ORDER BY claimed_at, comment_id"
+        ).fetchall()
+        for comment_id, job_id, recovery_body in rows:
+            pending = self.db.execute(
+                "SELECT 1 FROM terminal_outbox WHERE job_id=? AND completed_at IS NULL",
+                (job_id,),
+            ).fetchone()
+            if pending is not None:
+                continue
+            if config is not None and isinstance(recovery_body, str) and recovery_body:
+                self.queue_terminal(
+                    str(comment_id), str(job_id), recovery_body, "blocked", "FAILED", config)
+            else:
+                self.set_status(str(comment_id), "blocked")
         return len(rows)
     def acquire_lease(self, runner_id: str, seconds: int) -> bool:
         now = int(time.time())
@@ -726,36 +760,136 @@ class State:
             raise ValidationError("queue page is outside the bounded cursor range")
         self.db.execute("INSERT INTO metadata(key,value) VALUES ('queue_page',?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(page),))
-    def enqueue_wake(self, job_id: str, terminal_comment_id: str, terminal_state: str) -> None:
-        if (not valid_uuid(job_id) or not re.fullmatch(r"[1-9][0-9]*", terminal_comment_id)
-                or terminal_state not in {"COMPLETED", "FAILED", "TIMED_OUT", "REJECTED"}):
-            raise ValidationError("invalid wake outbox record")
+    def queue_terminal(self, comment_id: str, job_id: str, terminal_body: str,
+                       internal_state: str, terminal_state: str, config: Config) -> None:
+        if (not re.fullmatch(r"[1-9][0-9]*", comment_id) or not valid_uuid(job_id)
+                or internal_state not in {"succeeded", "failed", "blocked"}
+                or terminal_state not in {"COMPLETED", "FAILED", "TIMED_OUT", "REJECTED"}
+                or not isinstance(terminal_body, str)):
+            raise ValidationError("invalid terminal outbox record")
+        terminal_body = ensure_safe_post(terminal_body)
         now = int(time.time())
         self.db.execute("BEGIN IMMEDIATE")
         try:
+            row = self.db.execute(
+                "SELECT job_id FROM claims WHERE comment_id=? AND status IN ('claimed','running')",
+                (comment_id,),
+            ).fetchone()
+            if row is None or row[0] != job_id:
+                raise ValidationError("terminal outbox claim identity mismatch")
             existing = self.db.execute(
-                "SELECT terminal_comment_id, terminal_state FROM wake_outbox WHERE job_id=?",
+                "SELECT comment_id,terminal_body,internal_state,terminal_state,repository,"
+                "terminal_issue,runner_id,wake_pull_request FROM terminal_outbox WHERE job_id=?",
                 (job_id,),
             ).fetchone()
-            if existing is not None and existing != (terminal_comment_id, terminal_state):
-                raise ValidationError("wake outbox job identity mismatch")
+            identity = (comment_id, terminal_body, internal_state, terminal_state,
+                        config.repository, config.queue_issue, config.runner_id,
+                        config.wake_pull_request)
+            if existing is not None and existing != identity:
+                raise ValidationError("terminal outbox job identity mismatch")
             if existing is None:
                 self.db.execute(
-                    "INSERT INTO wake_outbox VALUES (?, ?, ?, ?, NULL)",
-                    (job_id, terminal_comment_id, terminal_state, now),
+                    "INSERT INTO terminal_outbox VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)",
+                    (job_id, comment_id, terminal_body, internal_state, terminal_state,
+                     config.repository, config.queue_issue, config.runner_id,
+                     config.wake_pull_request, now),
                 )
             self.db.execute("COMMIT")
         except Exception:
             with contextlib.suppress(sqlite3.Error): self.db.execute("ROLLBACK")
             raise
-    def pending_wakes(self, limit: int = 20) -> tuple[tuple[str, str, str], ...]:
+
+    def pending_terminals(self, limit: int = 20) -> tuple[tuple[Any, ...], ...]:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
+            raise ValidationError("terminal outbox limit is invalid")
+        rows = self.db.execute(
+            "SELECT job_id,comment_id,terminal_body,internal_state,terminal_state,repository,"
+            "terminal_issue,runner_id,wake_pull_request FROM terminal_outbox "
+            "WHERE completed_at IS NULL ORDER BY created_at,job_id LIMIT ?", (limit,),
+        ).fetchall()
+        return tuple(tuple(row) for row in rows)
+
+    def complete_terminal(self, job_id: str, terminal_comment_id: str) -> None:
+        if not valid_uuid(job_id) or not re.fullmatch(r"[1-9][0-9]*", terminal_comment_id):
+            raise ValidationError("invalid terminal completion identity")
+        now = int(time.time())
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute(
+                "SELECT comment_id,internal_state,terminal_state,repository,terminal_issue,"
+                "runner_id,wake_pull_request FROM terminal_outbox "
+                "WHERE job_id=? AND completed_at IS NULL", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValidationError("terminal outbox record is missing or completed")
+            comment_id, internal_state, terminal_state, repository, terminal_issue, runner_id, wake_pr = row
+            current = self.db.execute(
+                "SELECT status FROM claims WHERE comment_id=? AND job_id=?", (comment_id, job_id)
+            ).fetchone()
+            if current is None or internal_state not in STATE_TRANSITIONS.get(current[0], ()):
+                raise ValidationError("invalid terminal claim transition")
+            self.db.execute("UPDATE claims SET status=?,updated_at=? WHERE comment_id=?",
+                            (internal_state, now, comment_id))
+            self.db.execute("INSERT INTO history(comment_id,status,created_at) VALUES (?,?,?)",
+                            (comment_id, internal_state, now))
+            if wake_pr is not None:
+                self._enqueue_wake_tx(job_id, terminal_comment_id, terminal_state, repository,
+                                      terminal_issue, runner_id, wake_pr, now)
+            self.db.execute(
+                "UPDATE terminal_outbox SET terminal_comment_id=?,completed_at=? WHERE job_id=?",
+                (terminal_comment_id, now, job_id),
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            with contextlib.suppress(sqlite3.Error): self.db.execute("ROLLBACK")
+            raise
+
+    def _enqueue_wake_tx(self, job_id: str, terminal_comment_id: str, terminal_state: str,
+                         repository: str, terminal_issue: int, runner_id: str,
+                         wake_pull_request: int, now: int) -> None:
+        existing = self.db.execute(
+            "SELECT terminal_comment_id,terminal_state,repository,terminal_issue,runner_id,"
+            "wake_pull_request FROM wake_outbox WHERE job_id=?", (job_id,),
+        ).fetchone()
+        identity = (terminal_comment_id, terminal_state, repository, terminal_issue,
+                    runner_id, wake_pull_request)
+        if existing is not None and existing != identity:
+            raise ValidationError("wake outbox job identity mismatch")
+        if existing is None:
+            self.db.execute(
+                "INSERT INTO wake_outbox(job_id,terminal_comment_id,terminal_state,created_at,"
+                "delivered_at,repository,terminal_issue,runner_id,wake_pull_request) "
+                "VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)",
+                (job_id, terminal_comment_id, terminal_state, now, repository,
+                 terminal_issue, runner_id, wake_pull_request),
+            )
+
+    def enqueue_wake(self, job_id: str, terminal_comment_id: str, terminal_state: str,
+                     config: Config | None = None) -> None:
+        if (not valid_uuid(job_id) or not re.fullmatch(r"[1-9][0-9]*", terminal_comment_id)
+                or terminal_state not in {"COMPLETED", "FAILED", "TIMED_OUT", "REJECTED"}):
+            raise ValidationError("invalid wake outbox record")
+        if config is None or config.wake_pull_request is None:
+            raise ValidationError("wake outbox requires immutable configured identity")
+        now = int(time.time())
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self._enqueue_wake_tx(job_id, terminal_comment_id, terminal_state,
+                                  config.repository, config.queue_issue, config.runner_id,
+                                  config.wake_pull_request, now)
+            self.db.execute("COMMIT")
+        except Exception:
+            with contextlib.suppress(sqlite3.Error): self.db.execute("ROLLBACK")
+            raise
+    def pending_wakes(self, limit: int = 20) -> tuple[tuple[Any, ...], ...]:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
             raise ValidationError("wake outbox limit is invalid")
         rows = self.db.execute(
-            "SELECT job_id, terminal_comment_id, terminal_state FROM wake_outbox "
+            "SELECT job_id,terminal_comment_id,terminal_state,repository,terminal_issue,"
+            "runner_id,wake_pull_request FROM wake_outbox "
             "WHERE delivered_at IS NULL ORDER BY created_at, job_id LIMIT ?", (limit,),
         ).fetchall()
-        return tuple((str(job), str(comment), str(state)) for job, comment, state in rows)
+        return tuple(tuple(row) for row in rows)
     def mark_wake_delivered(self, job_id: str) -> None:
         if not valid_uuid(job_id):
             raise ValidationError("invalid wake job ID")
@@ -1409,41 +1543,69 @@ def lifecycle(job: Job | OperationJob, state: str, detail: str = "") -> str:
     return (f"COMMANDER_RUNNER_V1 {state}\njob={job.job_id}\nworker={job.worker}\nmodel={job.model}\n"
             f"profile={job.profile}\nsha={job.target_sha}\nrunner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
 
-def wake_lifecycle(config: Config, job_id: str, terminal_comment_id: str,
-                   state: str) -> str:
-    if (config.wake_pull_request is None or not valid_uuid(job_id)
+def wake_lifecycle(repository: str, terminal_issue: int, runner_id: str,
+                   job_id: str, terminal_comment_id: str, state: str) -> str:
+    if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+            or isinstance(terminal_issue, bool) or not isinstance(terminal_issue, int)
+            or terminal_issue < 1 or not ID_RE.fullmatch(runner_id) or not valid_uuid(job_id)
             or not re.fullmatch(r"[1-9][0-9]*", terminal_comment_id)
             or state not in {"COMPLETED", "FAILED", "TIMED_OUT", "REJECTED"}):
         raise ValidationError("invalid wake lifecycle")
-    return (f"COMMANDER_WAKE_V1\njob={job_id}\nterminal_issue={config.queue_issue}\n"
-            f"terminal_comment={terminal_comment_id}\nstate={state}\nrunner={config.runner_id}")
+    return (f"COMMANDER_WAKE_V1\njob={job_id}\nterminal_issue={terminal_issue}\n"
+            f"terminal_comment={terminal_comment_id}\nstate={state}\nrunner={runner_id}")
 
 def drain_wake_outbox(client: GitHubClient, state_db: State,
                       config: Config | None = None) -> bool:
     active_config = config if config is not None else client.config
     if active_config.wake_pull_request is None:
         return True
-    for job_id, terminal_comment_id, terminal_state in state_db.pending_wakes():
+    for (job_id, terminal_comment_id, terminal_state, repository, terminal_issue,
+         runner_id, wake_pull_request) in state_db.pending_wakes():
+        if (repository != active_config.repository or terminal_issue != active_config.queue_issue
+                or runner_id != active_config.runner_id
+                or wake_pull_request != active_config.wake_pull_request):
+            raise RunnerError("pending wake identity differs from active configuration")
         try:
             client.post_wake(wake_lifecycle(
-                active_config, job_id, terminal_comment_id, terminal_state))
+                repository, terminal_issue, runner_id, job_id,
+                terminal_comment_id, terminal_state))
         except RunnerError:
             return False
         state_db.mark_wake_delivered(job_id)
     return True
 
+def drain_terminal_outbox(client: GitHubClient, state_db: State, config: Config) -> bool:
+    for (job_id, _comment_id, terminal_body, _internal_state, _terminal_state,
+         repository, terminal_issue, runner_id, wake_pull_request) in state_db.pending_terminals():
+        if (repository != config.repository or terminal_issue != config.queue_issue
+                or runner_id != config.runner_id or wake_pull_request != config.wake_pull_request):
+            raise RunnerError("pending terminal identity differs from active configuration")
+        try:
+            terminal_comment_id = client.post(terminal_body)
+        except RunnerError:
+            return False
+        state_db.complete_terminal(job_id, terminal_comment_id)
+    return drain_wake_outbox(client, state_db, config)
+
 def post_terminal_lifecycle(client: GitHubClient, job: Job | OperationJob,
-                            state: str, detail: str, state_db: State | None = None) -> bool:
-    """Preserve terminal state even when evidence cannot safely leave the node."""
+                            state: str, detail: str, state_db: State | None = None,
+                            comment_id: str | None = None,
+                            internal_state: str | None = None) -> bool:
+    """Durably queue terminal intent before any external terminal or wake post."""
     try:
-        terminal_comment_id = client.post(lifecycle(job, state, detail))
+        body = lifecycle(job, state, detail)
     except UnsafeOutputError:
-        terminal_comment_id = client.post(
-            lifecycle(job, state, "evidence withheld: high-risk pattern detected"))
-    if state_db is None or client.config.wake_pull_request is None:
+        body = lifecycle(job, state, "evidence withheld: high-risk pattern detected")
+    if state_db is None:
+        try:
+            client.post(body)
+        except UnsafeOutputError:
+            client.post(lifecycle(job, state, "evidence withheld: high-risk pattern detected"))
         return True
-    state_db.enqueue_wake(job.job_id, terminal_comment_id, state)
-    return drain_wake_outbox(client, state_db)
+    if comment_id is None or internal_state is None:
+        raise ValidationError("durable terminal posting requires claim identity")
+    state_db.queue_terminal(comment_id, job.job_id, body, internal_state, state, client.config)
+    return drain_terminal_outbox(client, state_db, client.config)
 
 def make_launchagent(template: Mapping[str, Any], python: str, script: str, config: str, log_dir: str) -> bytes:
     data = dict(template)
@@ -1587,9 +1749,9 @@ def run_once(config: Config, dry_run: bool = False) -> str:
         state = State(config.state_dir)
         try:
             if not state.acquire_lease(config.runner_id, config.lease_seconds): raise RunnerError("active lease belongs to another runner")
-            state.recover_incomplete()
             client = GitHubClient(config); client.verify_login()
-            if not drain_wake_outbox(client, state, config):
+            state.recover_incomplete(config)
+            if not drain_terminal_outbox(client, state, config):
                 return "WAKE_PENDING"
             queue_page = state.queue_page()
             comments = client.comments(queue_page)
@@ -1610,16 +1772,18 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                 if dry_run:
                     verify_target(config, job)
                     return f"VALIDATED {job.job_id}"
-                claimed = state.claim(comment_id, job.job_id, digest)
+                recovery_body = lifecycle(
+                    job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+                claimed = state.claim(comment_id, job.job_id, digest, recovery_body)
                 if not claimed: continue
                 latest = client.comment(comment_id, queue_page)
                 if (not github_login_matches((latest.get("user") or {}).get("login"),
                                              config.commander_login)
                         or not isinstance(latest.get("body"), str)
                         or comment_hash(latest["body"]) != digest):
-                    state.set_status(comment_id, "blocked")
                     delivered = post_terminal_lifecycle(
-                        client, job, "REJECTED", "claimed comment was edited or author changed", state)
+                        client, job, "REJECTED", "claimed comment was edited or author changed",
+                        state, comment_id, "blocked")
                     return f"REJECTED {job.job_id}" if delivered else f"WAKE_PENDING {job.job_id}"
                 client.post(lifecycle(job, "CLAIMED"))
                 try:
@@ -1682,8 +1846,8 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                                   f"exit={exit_code}; duration={duration:.1f}s; {evidence}")
                 except RunnerError as exc:
                     state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
-                state.set_status(comment_id, internal_state)
-                delivered = post_terminal_lifecycle(client, job, state_name, detail, state)
+                delivered = post_terminal_lifecycle(
+                    client, job, state_name, detail, state, comment_id, internal_state)
                 return (f"{state_name} {job.job_id}" if delivered
                         else f"WAKE_PENDING {job.job_id}")
             if len(comments) == QUEUE_PAGE_SIZE:
