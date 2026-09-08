@@ -3,6 +3,7 @@ import json
 import os
 import plistlib
 import shutil
+import sqlite3
 import sys
 import tempfile
 import types
@@ -658,13 +659,69 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         config = runner.dataclasses.replace(self.config, wake_pull_request=22)
         state = runner.State(self.state)
         state.enqueue_wake(JOB_ID, "9001", "FAILED", config)
-        changed = runner.dataclasses.replace(config, wake_pull_request=23)
-        class FixtureClient:
-            def __init__(self): self.config = changed
-            def post_wake(self, body): raise AssertionError("mismatch must block before POST")
-        with self.assertRaises(runner.RunnerError):
-            runner.drain_wake_outbox(FixtureClient(), state, changed)
+        for wake_pull_request in (23, None):
+            changed = runner.dataclasses.replace(config, wake_pull_request=wake_pull_request)
+            class FixtureClient:
+                def __init__(self): self.config = changed
+                def post_wake(self, body): raise AssertionError("mismatch must block before POST")
+            with self.subTest(wake_pull_request=wake_pull_request), self.assertRaises(runner.RunnerError):
+                runner.drain_wake_outbox(FixtureClient(), state, changed)
         state.close()
+
+    def test_disabled_wake_config_with_pending_record_blocks_queue_scan(self):
+        enabled = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        state = runner.State(self.state)
+        state.enqueue_wake(JOB_ID, "9001", "FAILED", enabled)
+        state.close()
+        disabled = runner.dataclasses.replace(enabled, wake_pull_request=None)
+        class FixtureClient:
+            def __init__(self, supplied): self.config = supplied
+            def verify_login(self): pass
+            def post_wake(self, body): raise AssertionError("mismatch must block before POST")
+            def comments(self, page): raise AssertionError("must not scan while wake identity differs")
+        with mock.patch.object(runner, "GitHubClient", FixtureClient), self.assertRaises(runner.RunnerError):
+            runner.run_once(disabled)
+
+    def test_legacy_inflight_claim_is_reconstructed_and_gets_public_terminal(self):
+        self.state.mkdir()
+        database = sqlite3.connect(self.state / "state.sqlite3")
+        database.executescript("""
+        CREATE TABLE claims (
+          comment_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL, content_hash TEXT NOT NULL,
+          status TEXT NOT NULL, claimed_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id TEXT NOT NULL,
+          status TEXT NOT NULL, created_at INTEGER NOT NULL);
+        """)
+        body = self.comment()
+        database.execute(
+            "INSERT INTO claims VALUES (?, ?, ?, 'running', 1, 1)",
+            ("1", JOB_ID, runner.comment_hash(body)),
+        )
+        database.commit()
+        database.close()
+        events = []
+        class FixtureClient:
+            outer = None
+            def __init__(self, supplied): self.config = supplied
+            def verify_login(self): pass
+            def comments(self, page):
+                return [{"id": 1, "user": {"login": "commander"}, "body": self.outer.comment()}]
+            def find_comment(self, comment_id, max_page):
+                return self.comments(1)[0]
+            def post(self, terminal): events.append(terminal); return "9101"
+        FixtureClient.outer = self
+        with mock.patch.object(runner, "GitHubClient", FixtureClient), \
+             mock.patch.object(runner, "verify_target") as verify_target:
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        verify_target.assert_not_called()
+        self.assertEqual(len(events), 1)
+        self.assertIn("COMMANDER_RUNNER_V1 FAILED", events[0])
+        self.assertIn("ambiguous execution recovered after restart", events[0])
+        recovered = runner.State(self.state)
+        self.assertEqual(recovered.summary()["jobs"], {"blocked": 1})
+        self.assertEqual(recovered.pending_terminals(), ())
+        recovered.close()
     def test_incremental_cursor_finds_latest_job_after_large_history(self):
         class FixtureClient:
             outer = None
