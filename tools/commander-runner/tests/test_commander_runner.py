@@ -75,6 +75,8 @@ class SchemaTests(RunnerTestCase):
         example = json.loads((HERE / "config.example.json").read_text())
         self.assertEqual(example["enabled_profiles"], ["repo_read"])
         self.assertEqual(example["enabled_quality_gates"], ["none"])
+        self.assertEqual(example["enabled_operations"], [])
+        self.assertEqual(set(example["operation_definitions"]), {"ops001_mysql_probe"})
         self.assertEqual(example["delivery_path_allowlists"]["org002_python"], [
             "AGENTS.md", "project-brain/CURRENT_STATE.md", "project-brain/RELEASE_PLAN.md",
             "project-brain/RISKS.md", "specs/ORG-002-LOCAL-COMMANDER-RUNNER.md"])
@@ -510,7 +512,16 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
             plist = plistlib.loads(launchagent.read_bytes())
             self.assertTrue(runtime_script.exists())
             self.assertEqual(plist["ProgramArguments"][1], str(runtime_script))
-            self.assertEqual(manifest["sha256"], runner.hashlib.sha256(runtime_script.read_bytes()).hexdigest())
+            self.assertEqual(manifest["version"], 2)
+            self.assertEqual(manifest["entrypoint"], "commander_runner.py")
+            self.assertEqual(
+                manifest["files"]["commander_runner.py"],
+                runner.hashlib.sha256(runtime_script.read_bytes()).hexdigest())
+            helper = self.runtime / "rehearsal_operations.py"
+            self.assertTrue(helper.exists())
+            self.assertEqual(
+                manifest["files"]["rehearsal_operations.py"],
+                runner.hashlib.sha256(helper.read_bytes()).hexdigest())
             with self.assertRaises(runner.RunnerError):
                 runner.install_stable_runtime(self.config, HERE / "commander_runner.py")
             with mock.patch.object(runner, "run_launchctl") as launchctl:

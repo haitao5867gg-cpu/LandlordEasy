@@ -1,6 +1,6 @@
 # Local Commander Runner (ORG-002)
 
-This is the V1 development-only executor for a single Commander queue Issue. It uses Python's standard library only. It accepts one exact `COMMANDER_JOB_V1` fenced JSON comment from the configured Commander identity, creates a SHA-pinned isolated worktree, invokes exactly one CLI with a fixed adapter, and posts bounded redacted lifecycle output through a separate Executor identity. It has no production, database, provider, remote-shell, inbound-listener, or automatic activation capability.
+This is the V1 development-only executor for a single Commander queue Issue. It uses Python's standard library only. It accepts exact `COMMANDER_JOB_V1` development jobs and exact `COMMANDER_OPERATION_V1` owner-registered local rehearsal operations from the configured Commander identity. Both paths use SHA-pinned isolated worktrees and bounded redacted lifecycle output through a separate Executor identity. The operation path is not a general shell and never invokes or fails over to an AI provider. It has no Production, remote-shell, inbound-listener, or automatic activation capability.
 
 ## Local configuration
 
@@ -13,6 +13,8 @@ Provider subprocesses receive a fixed environment allowlist. `USER` is resolved 
 `enabled_providers`, `enabled_profiles`, and `enabled_quality_gates` are explicit owner-only activation switches. The first activation configuration enables only `repo_read`; write and delivery remain implemented but disabled until Phase 2 approval. Disabled providers do not block `doctor`, so a provider that fails later workspace-sentinel validation can be turned off independently.
 
 `delivery_path_allowlists` is an optional owner-only mapping from quality-gate ID to exact repository-relative POSIX file paths. It defaults to empty. It accepts no absolute paths, traversal, glob, regex, duplicate or control-character paths. A `repo_delivery` job is rejected unless its enabled gate has a non-empty allowlist, and every staged addition, modification or deletion must be an exact member both before and after the quality gate. Job text and provider output cannot expand this boundary.
+
+`enabled_operations` and `operation_definitions` are owner-only activation controls for ORG-003. The implementation recognizes only `ops001_mysql_probe`. Its definition fixes the absolute Python/helper/Docker argv, `read_only` mode, the single approved rehearsal SHA, timeout/output maxima, clean-worktree postcondition and bounded public description. A queue comment cannot supply a command, argv, environment, path, provider, model, prompt, URL, quality gate or failover instruction. The dedicated helper is installed and hashed alongside the Runner; a missing, partial or mismatched runtime fails `doctor`.
 
 ## Commands
 
@@ -56,6 +58,12 @@ Kiro is pinned to `gpt-5.6-luna`, `gpt-5.6-terra`, or exceptional `gpt-5.6-sol`;
 ## Safety and operations
 
 The state database is owner-only SQLite and atomically binds comment ID, job ID, and comment hash before work begins. A process lock and single-node expiring lease fail closed. Failed/dirty worktrees are retained; worker jobs are never automatically retried. Raw bounded output stays in the local state directory; result comments pass redaction and high-risk secret detection. Results never intentionally include file bodies or inherited environment values.
+
+## Bounded local operation envelope
+
+An operation comment contains only the exact `COMMANDER_OPERATION_V1` fenced JSON schema documented in `specs/ORG-003-BOUNDED-LOCAL-OPERATIONS.md`. It includes identity/routing fields, the derived worktree ID, an enabled `operation_id`, bounded timeout/output requests, expected-evidence audit text and a human-approval reference. Unknown fields and job-controlled execution parameters are rejected.
+
+The initial `ops001_mysql_probe` helper filters only the fixed Docker Compose project/service, requires one healthy container with the approved image identity, exact loopback binding, tmpfs database storage and no Docker volumes, then runs only fixed read-only SQL for MySQL version, current synthetic database and application-table count. It neither enumerates unrelated resources nor constructs Docker/database mutation commands. Guard failures return normalized, non-sensitive evidence and are never retried automatically.
 
 Internally each accepted job records `queued`, `claimed`, `running`, then exactly one of `succeeded`, `failed`, or `blocked`. A restart converts ambiguous `claimed`/`running` work to `blocked` instead of replaying it. Provider output is accepted only after normalization to validated `status`, `summary`, and `evidence` fields. When configured, `repo_read` can fail over after definitive availability failures. Write/delivery failover additionally requires a completely clean tracked, staged, and untracked worktree; any partial write immediately blocks without starting another provider. Runtime, timeout, output overflow, permission, dirty-worktree and malformed-output results never trigger duplicate execution.
 

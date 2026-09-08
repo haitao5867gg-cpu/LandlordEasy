@@ -199,3 +199,7 @@ Stop without broadening permissions on unexpected macOS approval, unknown GitHub
 - Automatic production deployment or provider access.
 - Bypassing subscription limits, account controls or human approvals.
 - Providing a production uptime guarantee; queued development work resumes after any Mac mini outage.
+
+## ORG-003 extension
+
+`specs/ORG-003-BOUNDED-LOCAL-OPERATIONS.md` defines a separate, fail-closed `COMMANDER_OPERATION_V1` channel for explicitly implemented and owner-enabled local synthetic rehearsal operations. It does not broaden any `COMMANDER_JOB_V1` provider/profile capability, delivery path, GitHub permission or Production boundary described here.

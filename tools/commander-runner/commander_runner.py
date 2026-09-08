@@ -29,6 +29,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 SCHEMA = "COMMANDER_JOB_V1"
+OPERATION_SCHEMA = "COMMANDER_OPERATION_V1"
+OPERATION_IDS = frozenset({"ops001_mysql_probe"})
+OPS001_TARGET_SHA = "104de1521cf194c9dc76ccca52741f05a75f1180"
 PROFILES = frozenset({"repo_read", "repo_write_test", "repo_delivery"})
 WORKERS = frozenset({"kiro", "copilot", "claude"})
 PROVIDER_PROFILE_CAPABILITIES = {
@@ -76,6 +79,9 @@ MAX_PROMPT_CHARS = 12_000
 COMMENT_RE = re.compile(
     r"\A\s*COMMANDER_JOB_V1\s*\n```json\s*\n(\{.*\})\s*\n```\s*\Z", re.DOTALL
 )
+OPERATION_COMMENT_RE = re.compile(
+    r"\A\s*COMMANDER_OPERATION_V1\s*\n```json\s*\n(\{.*\})\s*\n```\s*\Z", re.DOTALL
+)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 WORKTREE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$")
@@ -109,6 +115,16 @@ class UnsafeOutputError(RunnerError):
     pass
 
 @dataclasses.dataclass(frozen=True)
+class OperationDefinition:
+    argv: tuple[str, ...]
+    mode: str
+    allowed_target_shas: frozenset[str]
+    max_timeout_seconds: int
+    max_output_bytes: int
+    require_clean_worktree: bool
+    description: str
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     repository: str
     queue_issue: int
@@ -126,6 +142,8 @@ class Config:
     enabled_quality_gates: frozenset[str]
     quality_gates: Mapping[str, tuple[tuple[str, ...], ...]]
     delivery_path_allowlists: Mapping[str, frozenset[str]] = dataclasses.field(default_factory=dict)
+    enabled_operations: frozenset[str] = dataclasses.field(default_factory=frozenset)
+    operation_definitions: Mapping[str, OperationDefinition] = dataclasses.field(default_factory=dict)
     poll_seconds: int = 60
     lease_seconds: int = 180
     executable_paths: Mapping[str, str] = dataclasses.field(default_factory=dict)
@@ -136,7 +154,7 @@ class Config:
         try:
             if path.stat().st_mode & 0o077:
                 raise ValidationError("local config must not be group/world accessible")
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = strict_json_loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValidationError(f"invalid local config: {exc}") from exc
         expected = {
@@ -145,8 +163,9 @@ class Config:
             "operational_executables", "enabled_providers", "enabled_profiles",
             "enabled_quality_gates", "quality_gates", "poll_seconds", "lease_seconds",
             "executable_paths", "provider_failover", "delivery_path_allowlists",
+            "enabled_operations", "operation_definitions",
         }
-        required = expected - {"delivery_path_allowlists"}
+        required = expected - {"delivery_path_allowlists", "enabled_operations", "operation_definitions"}
         unknown = set(raw) - expected
         missing = required - set(raw)
         if unknown or missing:
@@ -177,6 +196,11 @@ class Config:
                 or set(raw["operational_executables"]) != {"gh", "git", "python"}):
             raise ValidationError("operational_executables must contain gh, git, and python")
         operational = {str(k): str(absolute_path(v)) for k, v in raw["operational_executables"].items()}
+        runtime_dir = absolute_path(raw["runtime_dir"])
+        operation_definitions = validate_operation_definitions(
+            raw.get("operation_definitions", {}), operational, runtime_dir)
+        enabled_operations = validate_enabled(
+            raw.get("enabled_operations", []), frozenset(operation_definitions), "enabled_operations")
         enabled_providers = validate_enabled(raw["enabled_providers"], WORKERS, "enabled_providers")
         enabled_profiles = validate_enabled(raw["enabled_profiles"], PROFILES, "enabled_profiles")
         quality_gates = validate_quality_gates(raw["quality_gates"])
@@ -192,10 +216,11 @@ class Config:
             canonical_repo=absolute_path(raw["canonical_repo"]),
             worktree_root=absolute_path(raw["worktree_root"]),
             state_dir=absolute_path(raw["state_dir"]), origin_url=raw["origin_url"],
-            runtime_dir=absolute_path(raw["runtime_dir"]), operational_executables=operational,
+            runtime_dir=runtime_dir, operational_executables=operational,
             enabled_providers=enabled_providers, enabled_profiles=enabled_profiles,
             enabled_quality_gates=enabled_gates, quality_gates=quality_gates,
             delivery_path_allowlists=delivery_path_allowlists,
+            enabled_operations=enabled_operations, operation_definitions=operation_definitions,
             poll_seconds=bounded_int(raw["poll_seconds"], 15, 3600, "poll_seconds"),
             lease_seconds=bounded_int(raw["lease_seconds"], 30, 900, "lease_seconds"),
             executable_paths={str(k): str(absolute_path(v)) for k, v in raw["executable_paths"].items()},
@@ -227,7 +252,7 @@ class Job:
         if not match:
             raise ValidationError("comment is not exactly one COMMANDER_JOB_V1 fenced JSON object")
         try:
-            data = json.loads(match.group(1))
+            data = strict_json_loads(match.group(1))
         except json.JSONDecodeError as exc:
             raise ValidationError("job JSON is invalid") from exc
         if not isinstance(data, dict):
@@ -299,10 +324,85 @@ class Job:
         values["human_approval_ref"] = approval
         return cls(**values)
 
+@dataclasses.dataclass(frozen=True)
+class OperationJob:
+    job_id: str
+    repository: str
+    queue_issue: int
+    target_sha: str
+    worktree_id: str
+    runner_id: str
+    operation_id: str
+    timeout_seconds: int
+    output_limit_bytes: int
+    expected_evidence: str
+    human_approval_ref: str
+
+    @classmethod
+    def from_comment(cls, text: str, config: Config) -> "OperationJob":
+        match = OPERATION_COMMENT_RE.fullmatch(text)
+        if not match:
+            raise ValidationError("comment is not exactly one COMMANDER_OPERATION_V1 fenced JSON object")
+        try:
+            data = strict_json_loads(match.group(1))
+        except json.JSONDecodeError as exc:
+            raise ValidationError("operation JSON is invalid") from exc
+        required = {
+            "schema", "job_id", "repository", "queue_issue", "target_sha", "worktree_id",
+            "runner_id", "operation_id", "timeout_seconds", "output_limit_bytes",
+            "expected_evidence", "human_approval_ref",
+        }
+        if not isinstance(data, dict) or set(data) != required:
+            raise ValidationError("operation has unknown or missing fields")
+        if data["schema"] != OPERATION_SCHEMA:
+            raise ValidationError("unsupported operation schema")
+        if data["repository"] != config.repository or data["queue_issue"] != config.queue_issue:
+            raise ValidationError("operation repository or queue issue mismatch")
+        if data["runner_id"] != config.runner_id:
+            raise ValidationError("operation targets a different runner")
+        if not isinstance(data["job_id"], str) or not valid_uuid(data["job_id"]):
+            raise ValidationError("job_id must be a UUID")
+        if not isinstance(data["target_sha"], str) or not SHA_RE.fullmatch(data["target_sha"]):
+            raise ValidationError("target_sha must be an exact lowercase SHA")
+        if (data["worktree_id"] != derive_worktree_id(data["job_id"])
+                or not WORKTREE_RE.fullmatch(data["worktree_id"])):
+            raise ValidationError("worktree_id is not the derived isolated worktree ID")
+        operation_id = data["operation_id"]
+        if not isinstance(operation_id, str) or operation_id not in config.enabled_operations:
+            raise ValidationError("operation is unknown or disabled")
+        definition = config.operation_definitions.get(operation_id)
+        if definition is None or data["target_sha"] not in definition.allowed_target_shas:
+            raise ValidationError("operation target SHA is not owner-approved")
+        timeout = bounded_int(data["timeout_seconds"], 1, definition.max_timeout_seconds,
+                              "timeout_seconds")
+        cap = bounded_int(data["output_limit_bytes"], 1, definition.max_output_bytes,
+                          "output_limit_bytes")
+        for key in ("expected_evidence", "human_approval_ref"):
+            value = data[key]
+            if (not isinstance(value, str) or not value.strip() or len(value) > 512
+                    or SHELL_FRAGMENT_RE.search(value)):
+                raise ValidationError(f"{key} must be bounded inert audit text")
+        values = {key: data[key] for key in cls.__dataclass_fields__}
+        values["timeout_seconds"] = timeout
+        values["output_limit_bytes"] = cap
+        values["expected_evidence"] = data["expected_evidence"].strip()
+        values["human_approval_ref"] = data["human_approval_ref"].strip()
+        return cls(**values)
+
 def bounded_int(value: Any, low: int, high: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
         raise ValidationError(f"{name} must be an integer in [{low}, {high}]")
     return value
+
+def strict_json_loads(text: str) -> Any:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValidationError("JSON object contains a duplicate field")
+            value[key] = item
+        return value
+    return json.loads(text, object_pairs_hook=unique_object)
 
 def validate_github_login(value: Any, name: str) -> str:
     if not isinstance(value, str) or not GITHUB_LOGIN_RE.fullmatch(value):
@@ -351,6 +451,54 @@ def validate_quality_gates(value: Any) -> dict[str, tuple[tuple[str, ...], ...]]
                 raise ValidationError("shell executables are forbidden in quality gates")
             checked.append(tuple([str(executable), *argv[1:]]))
         result[gate_id] = tuple(checked)
+    return result
+
+def validate_operation_definitions(value: Any, operational: Mapping[str, str],
+                                   runtime_dir: Path) -> dict[str, OperationDefinition]:
+    if not isinstance(value, dict) or not set(value).issubset(OPERATION_IDS):
+        raise ValidationError("operation_definitions contains an unsupported operation")
+    result: dict[str, OperationDefinition] = {}
+    fields = {
+        "argv", "mode", "allowed_target_shas", "max_timeout_seconds", "max_output_bytes",
+        "require_clean_worktree", "description",
+    }
+    for operation_id, raw in value.items():
+        if not isinstance(raw, dict) or set(raw) != fields:
+            raise ValidationError("operation definition has unknown or missing fields")
+        argv = raw["argv"]
+        if (not isinstance(argv, list) or len(argv) != 4
+                or any(not isinstance(part, str) or not part or "\x00" in part for part in argv)
+                or any(SHELL_FRAGMENT_RE.search(part) for part in argv)):
+            raise ValidationError("operation argv must be the fixed bounded argv")
+        normalized = tuple(str(absolute_path(part)) if index in {0, 1, 3} else part
+                           for index, part in enumerate(argv))
+        helper = runtime_dir / "rehearsal_operations.py"
+        if (normalized[0] != operational["python"] or Path(normalized[1]) != helper
+                or normalized[2] != "--docker" or Path(normalized[3]).name != "docker"):
+            raise ValidationError("operation argv does not match the fixed helper contract")
+        if raw["mode"] != "read_only":
+            raise ValidationError("only the read_only operation mode is implemented")
+        shas = raw["allowed_target_shas"]
+        if (not isinstance(shas, list) or len(shas) != len(set(shas))
+                or any(not isinstance(sha, str) or not SHA_RE.fullmatch(sha) for sha in shas)):
+            raise ValidationError("operation target SHA allowlist is invalid")
+        if operation_id == "ops001_mysql_probe" and frozenset(shas) != {OPS001_TARGET_SHA}:
+            raise ValidationError("OPS-001 probe target SHA must be exact")
+        if raw["require_clean_worktree"] is not True:
+            raise ValidationError("read-only operation must require a clean worktree")
+        description = raw["description"]
+        if (not isinstance(description, str) or not description.strip() or len(description) > 256
+                or SHELL_FRAGMENT_RE.search(description) or "\n" in description
+                or "\r" in description or redact(description) != description):
+            raise ValidationError("operation description must be bounded inert text")
+        result[operation_id] = OperationDefinition(
+            argv=normalized, mode="read_only", allowed_target_shas=frozenset(shas),
+            max_timeout_seconds=bounded_int(raw["max_timeout_seconds"], 1, MAX_TIMEOUT_SECONDS,
+                                            "operation max_timeout_seconds"),
+            max_output_bytes=bounded_int(raw["max_output_bytes"], 1, MAX_OUTPUT_BYTES,
+                                         "operation max_output_bytes"),
+            require_clean_worktree=True, description=description.strip(),
+        )
     return result
 
 def validate_delivery_path_allowlists(value: Any,
@@ -418,6 +566,12 @@ def safe_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
                    if key in allowed and isinstance(value, str)}
     environment["USER"] = username
     return environment
+
+def operation_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Smaller environment for local operations; excludes provider and Docker routing state."""
+    base = safe_environment(source)
+    allowed = {"HOME", "PATH", "LANG", "LC_ALL", "TERM", "TMPDIR", "USER"}
+    return {key: value for key, value in base.items() if key in allowed}
 
 def redact(text: str, limit: int = 4000) -> str:
     value = text.replace(str(Path.home()), "$HOME")
@@ -616,6 +770,11 @@ def execute(argv: Sequence[str], *, timeout: int, cap: int, cwd: Path | None = N
         except subprocess.TimeoutExpired:
             with contextlib.suppress(ProcessLookupError): os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
+        if timed_out or overflow:
+            # The group leader may exit on SIGTERM while a descendant ignores
+            # it.  A final group-wide kill prevents orphaned operation clients.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
         if proc.stdout:
             proc.stdout.close()
     return Result(proc.returncode or 0, output.decode("utf-8", "replace"), timed_out, overflow, time.monotonic()-started)
@@ -713,6 +872,60 @@ def normalize_provider_output(text: str) -> NormalizedOutput:
             continue
         return NormalizedOutput(status, summary.strip(), tuple(item.strip() for item in evidence), usage)
     raise ValidationError("provider output failed structured validation")
+
+def normalize_operation_output(text: str) -> NormalizedOutput:
+    """Operations must emit exactly one normalized JSON object, with no wrapper prose."""
+    try:
+        value = strict_json_loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("operation output is not exact JSON") from exc
+    if not isinstance(value, dict) or set(value) != {"status", "summary", "evidence"}:
+        raise ValidationError("operation output schema is invalid")
+    status, summary, evidence = value["status"], value["summary"], value["evidence"]
+    if status not in {"ok", "blocked"} or not isinstance(summary, str) or not summary.strip() \
+            or len(summary) > 1000:
+        raise ValidationError("operation status or summary is invalid")
+    if (not isinstance(evidence, list) or len(evidence) > 20
+            or any(not isinstance(item, str) or not item.strip() or len(item) > 512
+                   for item in evidence)):
+        raise ValidationError("operation evidence is invalid")
+    cleaned_summary = ensure_safe_post(summary.strip())
+    cleaned_evidence = tuple(ensure_safe_post(item.strip()) for item in evidence)
+    return NormalizedOutput(status, cleaned_summary, cleaned_evidence)
+
+@dataclasses.dataclass(frozen=True)
+class OperationAttempt:
+    result: Result | None
+    output: NormalizedOutput | None
+    error_category: str | None
+
+def execute_operation(job: OperationJob, config: Config, worktree: Path) -> OperationAttempt:
+    definition = config.operation_definitions.get(job.operation_id)
+    if job.operation_id not in config.enabled_operations or definition is None:
+        raise RunnerError("operation is no longer enabled")
+    if job.target_sha not in definition.allowed_target_shas or definition.mode != "read_only":
+        raise RunnerError("operation authorization changed")
+    if not worktree_is_clean(config, worktree):
+        raise RunnerError("operation worktree is not clean before execution")
+    try:
+        result = execute(definition.argv, timeout=job.timeout_seconds,
+                         cap=job.output_limit_bytes, cwd=worktree,
+                         env=operation_environment())
+    except (OSError, RunnerError) as exc:
+        return OperationAttempt(None, None, classify_provider_error(None, exc))
+    if result.timed_out:
+        return OperationAttempt(result, None, "TIMEOUT")
+    if result.overflow:
+        return OperationAttempt(result, None, "OUTPUT_LIMIT")
+    if result.returncode:
+        return OperationAttempt(result, None, "RUNTIME")
+    try:
+        output = normalize_operation_output(result.output)
+    except ValidationError:
+        return OperationAttempt(result, None, "OUTPUT_VALIDATION")
+    if definition.require_clean_worktree and not worktree_is_clean(config, worktree):
+        return OperationAttempt(result, None, "WORKTREE_DIRTY")
+    return OperationAttempt(result, output, None)
 
 def extract_visible_usage(text: str) -> str | None:
     match = re.search(r"(?i)\bcredits?\s*:\s*([0-9]+(?:\.[0-9]+)?)", text)
@@ -833,6 +1046,31 @@ def quality_gate_health(config: Config) -> dict[str, bool]:
                               for argv in commands)
     return health
 
+def operation_health(config: Config) -> dict[str, dict[str, Any]]:
+    health: dict[str, dict[str, Any]] = {}
+    for operation_id in sorted(OPERATION_IDS):
+        enabled = operation_id in config.enabled_operations
+        definition = config.operation_definitions.get(operation_id)
+        available = False
+        interface_ok: bool | None = None
+        if definition is not None:
+            python, helper, _, docker = definition.argv
+            available = all(Path(path).is_file() and os.access(path, os.X_OK)
+                            for path in (python, helper, docker))
+            if enabled and available:
+                result = execute(
+                    [python, helper, "--docker", docker, "--self-check"],
+                    timeout=10, cap=8192, env=operation_environment(),
+                )
+                interface_ok = (not result.returncode and not result.timed_out and not result.overflow
+                                and result.output.strip() == "OPS001_PROBE_INTERFACE_OK")
+        health[operation_id] = {
+            "enabled": enabled, "available": available, "interface_ok": interface_ok,
+            "mode": definition.mode if definition is not None else None,
+            "description": definition.description if definition is not None else None,
+        }
+    return health
+
 def worktree_is_clean(config: Config, worktree: Path) -> bool:
     try:
         output = git_checked(["status", "--porcelain", "--untracked-files=all"], worktree,
@@ -899,7 +1137,7 @@ def git_checked(argv: Sequence[str], cwd: Path, *, executable: str, timeout: int
         raise RunnerError("bounded git verification failed")
     return result.output.strip()
 
-def verify_target(config: Config, job: Job) -> None:
+def verify_target(config: Config, job: Job | OperationJob) -> None:
     if config.canonical_repo.is_symlink() or not config.canonical_repo.is_dir():
         raise ValidationError("canonical repository is missing or a symlink")
     if config.worktree_root.is_symlink() or not config.worktree_root.is_dir():
@@ -914,13 +1152,14 @@ def verify_target(config: Config, job: Job) -> None:
     git_checked(["cat-file", "-e", f"{job.target_sha}^{{commit}}"], config.canonical_repo,
                 executable=git)
 
-def prepare_worktree(config: Config, job: Job) -> Path:
+def prepare_worktree(config: Config, job: Job | OperationJob) -> Path:
     verify_target(config, job)
     path = checked_child(config.worktree_root, job.worktree_id, must_exist=True)
     if path.exists():
         raise RunnerError("worktree already exists; it will not be reused or deleted")
     worktree_args = [config.operational_executables["git"], "worktree", "add"]
-    worktree_args += ["-b", job.worktree_id] if job.profile == "repo_delivery" else ["--detach"]
+    delivery = isinstance(job, Job) and job.profile == "repo_delivery"
+    worktree_args += ["-b", job.worktree_id] if delivery else ["--detach"]
     worktree_args += [str(path), job.target_sha]
     result = execute(worktree_args, timeout=120, cap=8192,
                      cwd=config.canonical_repo, env=safe_environment())
@@ -1079,12 +1318,17 @@ class GitHubClient:
     def post(self, body: str) -> None:
         self._api("POST", f"repos/{self.config.repository}/issues/{self.config.queue_issue}/comments", {"body": ensure_safe_post(body)})
 
-def lifecycle(job: Job, state: str, detail: str = "") -> str:
+def lifecycle(job: Job | OperationJob, state: str, detail: str = "") -> str:
     detail = ensure_safe_post(detail) if detail else ""
+    if isinstance(job, OperationJob):
+        return (f"COMMANDER_OPERATION_RUNNER_V1 {state}\njob={job.job_id}\n"
+                f"operation={job.operation_id}\nmode=read_only\nsha={job.target_sha}\n"
+                f"runner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
     return (f"COMMANDER_RUNNER_V1 {state}\njob={job.job_id}\nworker={job.worker}\nmodel={job.model}\n"
             f"profile={job.profile}\nsha={job.target_sha}\nrunner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
 
-def post_terminal_lifecycle(client: GitHubClient, job: Job, state: str, detail: str) -> None:
+def post_terminal_lifecycle(client: GitHubClient, job: Job | OperationJob,
+                            state: str, detail: str) -> None:
     """Preserve terminal state even when evidence cannot safely leave the node."""
     try:
         client.post(lifecycle(job, state, detail))
@@ -1121,25 +1365,70 @@ def install_stable_runtime(config: Config, source: Path) -> tuple[Path, str]:
     if not stable_runtime_is_isolated(config):
         raise RunnerError("stable runtime must be outside repository and worktree roots")
     if runtime_dir.is_symlink(): raise RunnerError("stable runtime directory may not be a symlink")
-    runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(runtime_dir, 0o700)
-    target = runtime_dir / "commander_runner.py"
-    manifest = runtime_dir / "runtime-manifest.json"
-    if target.exists() or target.is_symlink() or manifest.exists() or manifest.is_symlink():
+    if runtime_dir.exists() or runtime_dir.is_symlink():
         raise RunnerError("stable runtime already exists; refusing to overwrite")
+    runtime_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{runtime_dir.name}.", dir=runtime_dir.parent))
+    os.chmod(staging, 0o700)
+    target = staging / "commander_runner.py"
+    helper_target = staging / "rehearsal_operations.py"
+    manifest = staging / "runtime-manifest.json"
     try:
         source_bytes = source.read_bytes()
+        helper_bytes = (source.parent / "rehearsal_operations.py").read_bytes()
     except OSError as exc:
+        shutil.rmtree(staging)
         raise RunnerError("unable to read validated runner source") from exc
-    digest = hashlib.sha256(source_bytes).hexdigest()
-    target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
-    with os.fdopen(target_fd, "wb") as handle: handle.write(source_bytes)
-    if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
-        raise RunnerError("stable runtime verification failed")
-    manifest_fd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(manifest_fd, "w", encoding="utf-8") as handle:
-        json.dump({"runner_file": target.name, "sha256": digest}, handle, sort_keys=True)
-    return target, digest
+    digests = {
+        "commander_runner.py": hashlib.sha256(source_bytes).hexdigest(),
+        "rehearsal_operations.py": hashlib.sha256(helper_bytes).hexdigest(),
+    }
+    try:
+        for destination, content in ((target, source_bytes), (helper_target, helper_bytes)):
+            fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+        if any(hashlib.sha256((staging / name).read_bytes()).hexdigest() != digest
+               for name, digest in digests.items()):
+            raise RunnerError("stable runtime verification failed")
+        manifest_fd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(manifest_fd, "w", encoding="utf-8") as handle:
+            json.dump({"version": 2, "entrypoint": target.name, "files": digests},
+                      handle, sort_keys=True)
+        os.replace(staging, runtime_dir)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+    return runtime_dir / target.name, digests[target.name]
+
+def runtime_manifest_health(config: Config) -> bool:
+    manifest = config.runtime_dir / "runtime-manifest.json"
+    try:
+        if (config.runtime_dir.is_symlink()
+                or stat.S_IMODE(config.runtime_dir.stat().st_mode) != 0o700
+                or manifest.is_symlink() or stat.S_IMODE(manifest.stat().st_mode) != 0o600):
+            return False
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    files = value.get("files") if isinstance(value, dict) else None
+    if (value.get("version") != 2 or value.get("entrypoint") != "commander_runner.py"
+            or not isinstance(files, dict)
+            or set(files) != {"commander_runner.py", "rehearsal_operations.py"}):
+        return False
+    for name, expected in files.items():
+        path = config.runtime_dir / name
+        if (path.is_symlink() or not path.is_file()
+                or stat.S_IMODE(path.stat().st_mode) != 0o700 or not os.access(path, os.X_OK)
+                or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+            return False
+        try:
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                return False
+        except OSError:
+            return False
+    return True
 
 def stable_runtime_is_isolated(config: Config) -> bool:
     runtime = config.runtime_dir.resolve(strict=False)
@@ -1153,6 +1442,7 @@ def doctor(config: Config) -> dict[str, Any]:
     providers = provider_health(config)
     operational = operational_health(config)
     gates = quality_gate_health(config)
+    operations = operation_health(config)
     checks = {
         "canonical_repo": config.canonical_repo.is_dir() and not config.canonical_repo.is_symlink(),
         "worktree_root": config.worktree_root.is_dir() and not config.worktree_root.is_symlink(),
@@ -1165,13 +1455,20 @@ def doctor(config: Config) -> dict[str, Any]:
         "providers": providers,
         "operational_executables": operational,
         "quality_gates": gates,
+        "operations": operations,
+        "runtime_manifest": (runtime_manifest_health(config)
+                             if config.enabled_operations else True),
     }
     booleans_ok = all(value for key, value in checks.items()
-                      if key not in {"providers", "operational_executables", "quality_gates", "outbound_policy"})
+                      if key not in {"providers", "operational_executables", "quality_gates",
+                                     "operations", "outbound_policy"})
     provider_ok = all(not item["enabled"] or (item["available"] and item["interface_ok"])
                       for item in providers.values())
     operational_ok = all(item["available"] and item["interface_ok"] for item in operational.values())
-    checks["ok"] = booleans_ok and provider_ok and operational_ok and all(gates.values())
+    operation_ok = all(not item["enabled"] or (item["available"] and item["interface_ok"])
+                       for item in operations.values())
+    checks["ok"] = (booleans_ok and provider_ok and operational_ok and operation_ok
+                    and all(gates.values()))
     return checks
 
 def run_once(config: Config, dry_run: bool = False) -> str:
@@ -1190,8 +1487,13 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                 if (not github_login_matches(author, config.commander_login)
                         or not isinstance(body, str) or not comment_id):
                     continue
-                try: job = Job.from_comment(body, config)
-                except ValidationError: continue
+                try:
+                    if OPERATION_COMMENT_RE.fullmatch(body):
+                        job: Job | OperationJob = OperationJob.from_comment(body, config)
+                    else:
+                        job = Job.from_comment(body, config)
+                except ValidationError:
+                    continue
                 digest = comment_hash(body)
                 if dry_run:
                     verify_target(config, job)
@@ -1210,36 +1512,61 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                 try:
                     worktree = prepare_worktree(config, job)
                     state.set_status(comment_id, "running")
-                    attempt, attempts = execute_with_failover(job, config, worktree)
-                    result = attempt.result
-                    delivered_sha = ""
-                    if attempt.error_category == "TIMEOUT":
-                        state_name, internal_state = "TIMED_OUT", "blocked"
-                    elif attempt.error_category == "RUNTIME":
-                        state_name, internal_state = "FAILED", "failed"
-                    elif attempt.error_category:
-                        state_name, internal_state = "FAILED", "blocked"
-                    elif attempt.output and attempt.output.status == "blocked":
-                        state_name, internal_state = "FAILED", "blocked"
+                    if isinstance(job, OperationJob):
+                        operation_attempt = execute_operation(job, config, worktree)
+                        result = operation_attempt.result
+                        if result:
+                            store_raw_output(config.state_dir, job.job_id, result.output)
+                        if operation_attempt.error_category == "TIMEOUT":
+                            state_name, internal_state = "TIMED_OUT", "blocked"
+                        elif operation_attempt.error_category:
+                            state_name, internal_state = "FAILED", "blocked"
+                        elif operation_attempt.output and operation_attempt.output.status == "blocked":
+                            state_name, internal_state = "FAILED", "blocked"
+                        else:
+                            state_name, internal_state = "COMPLETED", "succeeded"
+                        if operation_attempt.output:
+                            evidence = (operation_attempt.output.summary + "\n"
+                                        + "\n".join(operation_attempt.output.evidence))
+                        else:
+                            evidence = f"operation_error={operation_attempt.error_category}"
+                        duration = result.duration_seconds if result else 0.0
+                        exit_code = result.returncode if result else -1
+                        detail = (f"operation={job.operation_id}; mode=read_only; attempts=1; "
+                                  f"exit={exit_code}; duration={duration:.1f}s; "
+                                  f"{redact(evidence, 3000)}")
                     else:
-                        if job.profile == "repo_write_test":
-                            run_quality_gate(config, job, worktree)
-                        elif job.profile == "repo_delivery":
-                            delivered_sha = deliver_worktree(config, job, worktree)
-                        state_name, internal_state = "COMPLETED", "succeeded"
-                    if result:
-                        store_raw_output(config.state_dir, job.job_id, result.output)
-                    if attempt.output:
-                        evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
-                    else:
-                        evidence = f"provider_error={attempt.error_category}"
-                    evidence = redact(evidence, 3000)
-                    if delivered_sha: evidence += f"\ndelivered_sha={delivered_sha}"
-                    duration = result.duration_seconds if result else 0.0
-                    exit_code = result.returncode if result else -1
-                    detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
-                              f"quality_gate={job.quality_gate}; "
-                              f"exit={exit_code}; duration={duration:.1f}s; {evidence}")
+                        attempt, attempts = execute_with_failover(job, config, worktree)
+                        result = attempt.result
+                        delivered_sha = ""
+                        if attempt.error_category == "TIMEOUT":
+                            state_name, internal_state = "TIMED_OUT", "blocked"
+                        elif attempt.error_category == "RUNTIME":
+                            state_name, internal_state = "FAILED", "failed"
+                        elif attempt.error_category:
+                            state_name, internal_state = "FAILED", "blocked"
+                        elif attempt.output and attempt.output.status == "blocked":
+                            state_name, internal_state = "FAILED", "blocked"
+                        else:
+                            if job.profile == "repo_write_test":
+                                run_quality_gate(config, job, worktree)
+                            elif job.profile == "repo_delivery":
+                                delivered_sha = deliver_worktree(config, job, worktree)
+                            state_name, internal_state = "COMPLETED", "succeeded"
+                        if result:
+                            store_raw_output(config.state_dir, job.job_id, result.output)
+                        if attempt.output:
+                            evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
+                        else:
+                            evidence = f"provider_error={attempt.error_category}"
+                        evidence = redact(evidence, 3000)
+                        if delivered_sha:
+                            evidence += f"\ndelivered_sha={delivered_sha}"
+                        duration = result.duration_seconds if result else 0.0
+                        exit_code = result.returncode if result else -1
+                        detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
+                                  f"quality_gate={job.quality_gate}; "
+                                  f"exit={exit_code}; duration={duration:.1f}s; {evidence}")
                 except RunnerError as exc:
                     state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
                 state.set_status(comment_id, internal_state)
