@@ -575,6 +575,8 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         self.assertTrue(runner.drain_wake_outbox(recovery, state))
         self.assertEqual(recovery.wakes, 1)
         self.assertEqual(state.pending_wakes(), ())
+        self.assertTrue(runner.drain_wake_outbox(recovery, state))
+        self.assertEqual(recovery.wakes, 1)
         state.close()
 
     def test_pending_wake_blocks_new_claims(self):
