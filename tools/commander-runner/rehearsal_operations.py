@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -37,7 +39,7 @@ class ProbeError(RuntimeError):
     """A sanitized, expected guard failure."""
 
 
-def _run(argv: Sequence[str]) -> str:
+def _run(argv: Sequence[str], failure_category: str) -> str:
     """Execute a bounded direct argv and never expose raw child errors."""
     process = subprocess.Popen(
         list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -89,20 +91,52 @@ def _run(argv: Sequence[str]) -> str:
     if overflow:
         raise ProbeError("docker_output_overflow")
     if process.returncode:
-        raise ProbeError("docker_command_failed")
+        raise ProbeError(failure_category)
     return output.decode("utf-8", "replace").strip()
 
 
-def _docker(docker: str, *arguments: str) -> str:
-    allowed = {"ps", "inspect", "exec", "--version"}
+def trusted_local_docker_host() -> str:
+    """Return only the current POSIX user's verified local Docker Unix socket."""
+    try:
+        record = pwd.getpwuid(os.getuid())
+        raw_home = record.pw_dir
+        if not isinstance(raw_home, str) or not raw_home or "\x00" in raw_home:
+            raise ProbeError("docker_socket_invalid")
+        home = Path(raw_home)
+        if not home.is_absolute():
+            raise ProbeError("docker_socket_invalid")
+        trusted_home = home.resolve(strict=True)
+        socket_path = home / ".docker" / "run" / "docker.sock"
+        metadata = os.lstat(socket_path)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISSOCK(metadata.st_mode):
+            raise ProbeError("docker_socket_invalid")
+        if metadata.st_uid != os.geteuid():
+            raise ProbeError("docker_socket_invalid")
+        resolved_socket = socket_path.resolve(strict=True)
+        if not resolved_socket.is_relative_to(trusted_home):
+            raise ProbeError("docker_socket_invalid")
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ProbeError("docker_socket_invalid") from exc
+    return "unix://" + str(resolved_socket)
+
+
+def _docker(docker: str, host: str, *arguments: str) -> str:
+    allowed = {"version", "ps", "inspect", "exec"}
     command = arguments[0] if arguments else ""
     if command not in allowed:
         raise ProbeError("mutation_command_rejected")
-    return _run((docker, "--context", "default", *arguments))
+    categories = {
+        "version": "docker_version_failed",
+        "ps": "docker_ps_failed",
+        "inspect": "docker_inspect_failed",
+        "exec": "docker_exec_failed",
+    }
+    return _run((docker, "--host", host, *arguments), categories[command])
 
 
-def _inspect_json(docker: str, container_id: str, template: str) -> Any:
-    raw = _docker(docker, "inspect", "--type", "container", "--format", template, container_id)
+def _inspect_json(docker: str, host: str, container_id: str, template: str) -> Any:
+    raw = _docker(
+        docker, host, "inspect", "--type", "container", "--format", template, container_id)
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -110,8 +144,10 @@ def _inspect_json(docker: str, container_id: str, template: str) -> Any:
 
 
 def probe(docker: str) -> dict[str, Any]:
+    host = trusted_local_docker_host()
+    _docker(docker, host, "version", "--format", "{{.Server.Version}}")
     ids = [line.strip() for line in _docker(
-        docker, "ps", "--all",
+        docker, host, "ps", "--all",
         "--filter", f"label=com.docker.compose.project={PROJECT}",
         "--filter", f"label=com.docker.compose.service={SERVICE}",
         "--format", "{{.ID}}",
@@ -119,17 +155,19 @@ def probe(docker: str) -> dict[str, Any]:
     if len(ids) != 1:
         raise ProbeError("container_identity_mismatch")
     container_id = ids[0]
-    running = _inspect_json(docker, container_id, "{{json .State.Running}}")
-    health = _inspect_json(docker, container_id, "{{json .State.Health.Status}}")
+    running = _inspect_json(docker, host, container_id, "{{json .State.Running}}")
+    health = _inspect_json(docker, host, container_id, "{{json .State.Health.Status}}")
     project = _inspect_json(
-        docker, container_id, '{{json (index .Config.Labels "com.docker.compose.project")}}')
+        docker, host, container_id,
+        '{{json (index .Config.Labels "com.docker.compose.project")}}')
     service = _inspect_json(
-        docker, container_id, '{{json (index .Config.Labels "com.docker.compose.service")}}')
-    image = _inspect_json(docker, container_id, "{{json .Config.Image}}")
-    image_id = _inspect_json(docker, container_id, "{{json .Image}}")
-    ports = _inspect_json(docker, container_id, "{{json .NetworkSettings.Ports}}")
-    mounts = _inspect_json(docker, container_id, "{{json .Mounts}}")
-    tmpfs = _inspect_json(docker, container_id, "{{json .HostConfig.Tmpfs}}")
+        docker, host, container_id,
+        '{{json (index .Config.Labels "com.docker.compose.service")}}')
+    image = _inspect_json(docker, host, container_id, "{{json .Config.Image}}")
+    image_id = _inspect_json(docker, host, container_id, "{{json .Image}}")
+    ports = _inspect_json(docker, host, container_id, "{{json .NetworkSettings.Ports}}")
+    mounts = _inspect_json(docker, host, container_id, "{{json .Mounts}}")
+    tmpfs = _inspect_json(docker, host, container_id, "{{json .HostConfig.Tmpfs}}")
 
     if project != PROJECT or service != SERVICE:
         raise ProbeError("container_identity_mismatch")
@@ -142,17 +180,20 @@ def probe(docker: str) -> dict[str, Any]:
         raise ProbeError("container_binding_mismatch")
     if any(value not in (None, []) for key, value in ports.items() if key != "3306/tcp"):
         raise ProbeError("container_binding_mismatch")
-    if (not isinstance(mounts, list) or len(mounts) != 1
-            or not isinstance(mounts[0], dict)
-            or mounts[0].get("Type") != "tmpfs"
-            or mounts[0].get("Destination") != "/var/lib/mysql"
+    exact_tmpfs_mount = (
+        len(mounts) == 1 and isinstance(mounts[0], dict)
+        and mounts[0].get("Type") == "tmpfs"
+        and mounts[0].get("Destination") == "/var/lib/mysql"
+    ) if isinstance(mounts, list) else False
+    if (not isinstance(mounts, list) or (mounts and not exact_tmpfs_mount)
             or not isinstance(tmpfs, dict) or set(tmpfs) != {"/var/lib/mysql"}):
         raise ProbeError("container_storage_mismatch")
-    if any(mount.get("Type") == "volume" for mount in mounts if isinstance(mount, dict)):
+    if any(mount.get("Type") in {"bind", "volume"}
+           for mount in mounts if isinstance(mount, dict)):
         raise ProbeError("container_storage_mismatch")
 
     sql = _docker(
-        docker, "exec", "--env", "MYSQL_PWD=e2e", container_id,
+        docker, host, "exec", "--env", "MYSQL_PWD=e2e", container_id,
         "mysql", "--batch", "--skip-column-names", "--user=e2e", "--database=" + DATABASE,
         "--execute", MYSQL_QUERY,
     )

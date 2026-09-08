@@ -1,13 +1,17 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import signal
+import stat
 import sys
 import tempfile
 import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 HERE = Path(__file__).resolve().parents[1]
@@ -320,6 +324,7 @@ class OperationExecutionTests(OperationTestCase):
 class ProbeHelperTests(OperationTestCase):
     def fixture(self, **changes):
         values = {
+            "version": "28.3.3",
             "ids": "abc123",
             "running": True, "health": "healthy", "project": helper.PROJECT,
             "service": helper.SERVICE,
@@ -331,7 +336,8 @@ class ProbeHelperTests(OperationTestCase):
             "sql": "8.0.43\nlandlord_easy_e2e\n22",
         }
         values.update(changes)
-        return [values["ids"], json.dumps(values["running"]), json.dumps(values["health"]),
+        return [values["version"], values["ids"], json.dumps(values["running"]),
+                json.dumps(values["health"]),
                 json.dumps(values["project"]), json.dumps(values["service"]),
                 json.dumps(values["image"]), json.dumps(values["image_id"]),
                 json.dumps(values["ports"]), json.dumps(values["mounts"]),
@@ -340,18 +346,95 @@ class ProbeHelperTests(OperationTestCase):
     def test_exact_probe_success_and_constructed_commands_are_read_only(self):
         calls = []
         values = iter(self.fixture())
-        def fake_run(argv):
+        def fake_run(argv, failure_category):
             calls.append(tuple(argv))
             return next(values)
-        with mock.patch.object(helper, "_run", side_effect=fake_run):
+        with mock.patch.object(helper, "trusted_local_docker_host",
+                               return_value="unix:///trusted/docker.sock"), \
+             mock.patch.object(helper, "_run", side_effect=fake_run):
             result = helper.probe(str(self.docker))
         self.assertEqual(result["status"], "ok")
-        self.assertTrue(all(call[1:3] == ("--context", "default") for call in calls))
-        self.assertTrue(all(call[3] in {"ps", "inspect", "exec"} for call in calls))
+        self.assertTrue(all(call[1:3] == ("--host", "unix:///trusted/docker.sock")
+                            for call in calls))
+        self.assertTrue(all(call[3] in {"version", "ps", "inspect", "exec"}
+                            for call in calls))
         self.assertEqual(sum(call[3] == "exec" for call in calls), 1)
         self.assertIn("SELECT VERSION()", calls[-1][-1])
+        flattened = " ".join(value for call in calls for value in call)
+        for forbidden_route in ("--context", "DOCKER_HOST", "DOCKER_CONTEXT", "tcp://", "ssh://"):
+            self.assertNotIn(forbidden_route, flattened)
         for forbidden in ("run", "start", "stop", "restart", "rm", "pull", "build", "prune"):
             self.assertNotIn(forbidden, {call[3] for call in calls})
+
+    def test_trusted_posix_home_socket_and_inherited_home_is_ignored(self):
+        root = Path(self.tmp.name)
+        trusted_home = root / "trusted-home"
+        socket_path = trusted_home / ".docker" / "run" / "docker.sock"
+        socket_path.parent.mkdir(parents=True)
+        socket_path.write_text("metadata fixture")
+        record = type("Record", (), {"pw_dir": str(trusted_home)})()
+        metadata = SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=os.geteuid())
+        with mock.patch.dict(os.environ, {"HOME": str(root / "forged-home")}), \
+             mock.patch.object(helper.pwd, "getpwuid", return_value=record), \
+             mock.patch.object(helper.os, "lstat", return_value=metadata):
+            host = helper.trusted_local_docker_host()
+        self.assertEqual(host, "unix://" + str(socket_path.resolve()))
+
+    def test_untrusted_socket_shapes_fail_closed(self):
+        root = Path(self.tmp.name)
+        cases = []
+
+        missing_home = root / "missing-case"
+        missing_home.mkdir()
+        cases.append((missing_home, None, None))
+
+        file_home = root / "file-case"
+        file_socket = file_home / ".docker" / "run" / "docker.sock"
+        file_socket.parent.mkdir(parents=True)
+        file_socket.write_text("not a socket")
+        cases.append((file_home, None, None))
+
+        target_home = root / "symlink-target"
+        target_socket = target_home / ".docker" / "run" / "actual.sock"
+        target_socket.parent.mkdir(parents=True)
+        target_socket.write_text("metadata fixture")
+        symlink_home = root / "symlink-case"
+        symlink_socket = symlink_home / ".docker" / "run" / "docker.sock"
+        symlink_socket.parent.mkdir(parents=True)
+        symlink_socket.symlink_to(target_socket)
+        cases.append((symlink_home, None, None))
+
+        wrong_owner_home = root / "owner-case"
+        wrong_owner_socket = wrong_owner_home / ".docker" / "run" / "docker.sock"
+        wrong_owner_socket.parent.mkdir(parents=True)
+        wrong_owner_socket.write_text("metadata fixture")
+        wrong_owner_metadata = SimpleNamespace(
+            st_mode=stat.S_IFSOCK, st_uid=os.geteuid() + 1)
+        cases.append((wrong_owner_home, None, wrong_owner_metadata))
+
+        outside = root / "outside"
+        outside_socket = outside / "run" / "docker.sock"
+        outside_socket.parent.mkdir(parents=True)
+        outside_socket.write_text("metadata fixture")
+        escape_home = root / "escape-case"
+        escape_home.mkdir()
+        (escape_home / ".docker").symlink_to(outside)
+        escape_metadata = SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=os.geteuid())
+        cases.append((escape_home, None, escape_metadata))
+
+        for home, effective_uid, metadata in cases:
+            record = type("Record", (), {"pw_dir": str(home)})()
+            uid_patch = (mock.patch.object(helper.os, "geteuid", return_value=effective_uid)
+                         if effective_uid is not None else mock.patch.object(
+                             helper.os, "geteuid", wraps=helper.os.geteuid))
+            lstat_patch = (mock.patch.object(helper.os, "lstat", return_value=metadata)
+                           if metadata is not None else mock.patch.object(
+                               helper.os, "lstat", wraps=os.lstat))
+            with self.subTest(home=home.name), \
+                 mock.patch.object(helper.pwd, "getpwuid", return_value=record), \
+                 uid_patch, lstat_patch, self.assertRaisesRegex(
+                     helper.ProbeError, "docker_socket_invalid"):
+                helper.trusted_local_docker_host()
 
     def test_every_identity_binding_storage_and_database_mismatch_blocks(self):
         cases = (
@@ -365,6 +448,7 @@ class ProbeHelperTests(OperationTestCase):
             {"ports": {"3306/tcp": [{"HostIp": "127.0.0.1", "HostPort": "33317"}],
                        "33060/tcp": [{"HostIp": "127.0.0.1", "HostPort": "33360"}]}},
             {"mounts": "malformed"},
+            {"mounts": [{"Type": "tmpfs", "Destination": "/unexpected"}]},
             {"mounts": [{"Type": "volume", "Destination": "/var/lib/mysql"}]},
             {"mounts": [{"Type": "tmpfs", "Destination": "/var/lib/mysql"},
                         {"Type": "bind", "Destination": "/extra"}]},
@@ -373,25 +457,66 @@ class ProbeHelperTests(OperationTestCase):
         )
         for changes in cases:
             with self.subTest(changes=changes), \
+                 mock.patch.object(helper, "trusted_local_docker_host",
+                                   return_value="unix:///trusted/docker.sock"), \
                  mock.patch.object(helper, "_docker", side_effect=self.fixture(**changes)), \
                  self.assertRaises(helper.ProbeError):
                 helper.probe(str(self.docker))
+
+    def test_empty_mounts_with_exact_tmpfs_succeeds(self):
+        with mock.patch.object(helper, "trusted_local_docker_host",
+                               return_value="unix:///trusted/docker.sock"), \
+             mock.patch.object(helper, "_docker", side_effect=self.fixture(mounts=[])):
+            self.assertEqual(helper.probe(str(self.docker))["status"], "ok")
+
+    def test_stage_specific_errors_are_sanitized(self):
+        host = "unix:///trusted/docker.sock"
+        for command, category in {
+            "version": "docker_version_failed", "ps": "docker_ps_failed",
+            "inspect": "docker_inspect_failed", "exec": "docker_exec_failed",
+        }.items():
+            with self.subTest(command=command), mock.patch.object(
+                    helper, "_run", side_effect=helper.ProbeError(category)):
+                with self.assertRaisesRegex(helper.ProbeError, f"^{category}$"):
+                    helper._docker(str(self.docker), host, command)
+
+        for command, category in {
+            "version": "docker_version_failed", "ps": "docker_ps_failed",
+            "inspect": "docker_inspect_failed", "exec": "docker_exec_failed",
+        }.items():
+            with self.subTest(contract=command), mock.patch.object(
+                    helper, "_run", return_value="") as execute:
+                helper._docker(str(self.docker), host, command)
+            self.assertEqual(execute.call_args.args[1], category)
+
+    def test_raw_child_details_do_not_escape_helper_output(self):
+        output = io.StringIO()
+        with mock.patch.object(helper, "probe", side_effect=helper.ProbeError(
+                "docker_ps_failed")), contextlib.redirect_stdout(output):
+            self.assertEqual(helper.main(["--docker", str(self.docker)]), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["evidence"], ["category=docker_ps_failed"])
+        serialized = json.dumps(result)
+        for forbidden in ("unix://", "docker.sock", "permission denied", str(self.tmp.name)):
+            self.assertNotIn(forbidden, serialized)
 
     def test_mutation_subcommands_are_rejected_before_execution(self):
         for command in ("run", "start", "stop", "restart", "rm", "pull", "build", "prune"):
             with self.subTest(command=command), mock.patch.object(helper, "_run") as execute, \
                  self.assertRaises(helper.ProbeError):
-                helper._docker(str(self.docker), command)
+                helper._docker(str(self.docker), "unix:///trusted/docker.sock", command)
             execute.assert_not_called()
 
     def test_helper_run_enforces_timeout_and_output_overflow(self):
         with mock.patch.object(helper, "COMMAND_CAP", 32):
             with self.assertRaisesRegex(helper.ProbeError, "docker_output_overflow"):
-                helper._run((str(self.python), "-c", "print('x' * 4096)"))
+                helper._run((str(self.python), "-c", "print('x' * 4096)"),
+                            "docker_version_failed")
 
         with mock.patch.object(helper, "COMMAND_TIMEOUT", 0.2):
             with self.assertRaisesRegex(helper.ProbeError, "docker_command_timeout"):
-                helper._run((str(self.python), "-c", "import time; time.sleep(30)"))
+                helper._run((str(self.python), "-c", "import time; time.sleep(30)"),
+                            "docker_version_failed")
 
     def test_runner_timeout_kills_sigterm_resistant_operation_descendant(self):
         pid_file = Path(self.tmp.name) / "child.pid"
