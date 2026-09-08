@@ -112,7 +112,8 @@ def trusted_local_docker_host() -> str:
             directory_metadata = os.lstat(directory)
             if (stat.S_ISLNK(directory_metadata.st_mode)
                     or not stat.S_ISDIR(directory_metadata.st_mode)
-                    or directory_metadata.st_uid != os.geteuid()):
+                    or directory_metadata.st_uid != os.geteuid()
+                    or directory_metadata.st_mode & 0o022):
                 raise ProbeError("docker_socket_invalid")
         socket_path = run_dir / "docker.sock"
         metadata = os.lstat(socket_path)
