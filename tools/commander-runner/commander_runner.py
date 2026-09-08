@@ -729,9 +729,27 @@ class State:
             if config is not None and isinstance(recovery_body, str) and recovery_body:
                 self.queue_terminal(
                     str(comment_id), str(job_id), recovery_body, "blocked", "FAILED", config)
+            elif config is not None:
+                continue
             else:
                 self.set_status(str(comment_id), "blocked")
         return len(rows)
+    def incomplete_claims(self) -> tuple[tuple[str, str, str | None], ...]:
+        rows = self.db.execute(
+            "SELECT comment_id,job_id,recovery_body FROM claims "
+            "WHERE status IN ('claimed','running') ORDER BY claimed_at,comment_id"
+        ).fetchall()
+        return tuple((str(comment), str(job), body if isinstance(body, str) else None)
+                     for comment, job, body in rows)
+    def set_recovery_body(self, comment_id: str, job_id: str, recovery_body: str) -> None:
+        recovery_body = ensure_safe_post(recovery_body)
+        cursor = self.db.execute(
+            "UPDATE claims SET recovery_body=? WHERE comment_id=? AND job_id=? "
+            "AND status IN ('claimed','running') AND recovery_body IS NULL",
+            (recovery_body, comment_id, job_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValidationError("recovery claim identity changed")
     def acquire_lease(self, runner_id: str, seconds: int) -> bool:
         now = int(time.time())
         self.db.execute("BEGIN IMMEDIATE")
@@ -1517,6 +1535,15 @@ class GitHubClient:
             if str(value.get("id", "")) == comment_id:
                 return value
         raise RunnerError("claimed comment no longer exists on the queue issue")
+    def find_comment(self, comment_id: str, max_page: int) -> dict[str, Any]:
+        if (not re.fullmatch(r"[0-9]+", comment_id) or not isinstance(max_page, int)
+                or isinstance(max_page, bool) or max_page < 1 or max_page > 1_000_000):
+            raise ValidationError("invalid bounded comment lookup")
+        for page in range(1, max_page + 1):
+            for value in self.comments(page):
+                if str(value.get("id", "")) == comment_id:
+                    return value
+        raise RunnerError("claimed comment no longer exists on the queue issue")
     def _post_comment(self, issue_number: int, body: str) -> str:
         value = self._api(
             "POST", f"repos/{self.config.repository}/issues/{issue_number}/comments",
@@ -1557,10 +1584,11 @@ def wake_lifecycle(repository: str, terminal_issue: int, runner_id: str,
 def drain_wake_outbox(client: GitHubClient, state_db: State,
                       config: Config | None = None) -> bool:
     active_config = config if config is not None else client.config
-    if active_config.wake_pull_request is None:
+    pending = state_db.pending_wakes()
+    if not pending:
         return True
     for (job_id, terminal_comment_id, terminal_state, repository, terminal_issue,
-         runner_id, wake_pull_request) in state_db.pending_wakes():
+         runner_id, wake_pull_request) in pending:
         if (repository != active_config.repository or terminal_issue != active_config.queue_issue
                 or runner_id != active_config.runner_id
                 or wake_pull_request != active_config.wake_pull_request):
@@ -1586,6 +1614,33 @@ def drain_terminal_outbox(client: GitHubClient, state_db: State, config: Config)
             return False
         state_db.complete_terminal(job_id, terminal_comment_id)
     return drain_wake_outbox(client, state_db, config)
+
+def recover_incomplete_jobs(client: GitHubClient, state_db: State, config: Config) -> int:
+    rows = state_db.incomplete_claims()
+    for comment_id, job_id, recovery_body in rows:
+        pending = any(record[0] == job_id for record in state_db.pending_terminals(100))
+        if pending:
+            continue
+        if recovery_body is None:
+            original = client.find_comment(comment_id, state_db.queue_page())
+            author = (original.get("user") or {}).get("login")
+            body = original.get("body")
+            if not github_login_matches(author, config.commander_login) or not isinstance(body, str):
+                raise RunnerError("legacy in-flight claim source is invalid")
+            try:
+                if OPERATION_COMMENT_RE.fullmatch(body):
+                    job: Job | OperationJob = OperationJob.from_comment(body, config)
+                else:
+                    job = Job.from_comment(body, config)
+            except ValidationError as exc:
+                raise RunnerError("legacy in-flight claim cannot be reconstructed") from exc
+            if job.job_id != job_id:
+                raise RunnerError("legacy in-flight claim identity mismatch")
+            recovery_body = lifecycle(
+                job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+            state_db.set_recovery_body(comment_id, job_id, recovery_body)
+        state_db.queue_terminal(comment_id, job_id, recovery_body, "blocked", "FAILED", config)
+    return len(rows)
 
 def post_terminal_lifecycle(client: GitHubClient, job: Job | OperationJob,
                             state: str, detail: str, state_db: State | None = None,
@@ -1750,7 +1805,7 @@ def run_once(config: Config, dry_run: bool = False) -> str:
         try:
             if not state.acquire_lease(config.runner_id, config.lease_seconds): raise RunnerError("active lease belongs to another runner")
             client = GitHubClient(config); client.verify_login()
-            state.recover_incomplete(config)
+            recover_incomplete_jobs(client, state, config)
             if not drain_terminal_outbox(client, state, config):
                 return "WAKE_PENDING"
             queue_page = state.queue_page()
