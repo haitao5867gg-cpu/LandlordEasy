@@ -148,6 +148,7 @@ class Config:
     lease_seconds: int = 180
     executable_paths: Mapping[str, str] = dataclasses.field(default_factory=dict)
     provider_failover: bool = False
+    wake_pull_request: int | None = None
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -163,15 +164,26 @@ class Config:
             "operational_executables", "enabled_providers", "enabled_profiles",
             "enabled_quality_gates", "quality_gates", "poll_seconds", "lease_seconds",
             "executable_paths", "provider_failover", "delivery_path_allowlists",
-            "enabled_operations", "operation_definitions",
+            "enabled_operations", "operation_definitions", "wake_pull_request",
         }
-        required = expected - {"delivery_path_allowlists", "enabled_operations", "operation_definitions"}
+        required = expected - {
+            "delivery_path_allowlists", "enabled_operations", "operation_definitions",
+            "wake_pull_request",
+        }
         unknown = set(raw) - expected
         missing = required - set(raw)
         if unknown or missing:
             raise ValidationError("local config has unknown or missing fields")
         if not isinstance(raw["queue_issue"], int) or raw["queue_issue"] < 1:
             raise ValidationError("queue_issue must be a positive integer")
+        wake_pull_request = raw.get("wake_pull_request")
+        if (wake_pull_request is not None
+                and (isinstance(wake_pull_request, bool)
+                     or not isinstance(wake_pull_request, int)
+                     or wake_pull_request < 1
+                     or wake_pull_request > 1_000_000_000
+                     or wake_pull_request == raw["queue_issue"])):
+            raise ValidationError("wake_pull_request must be a distinct positive integer or null")
         for field in ("repository", "runner_id", "origin_url"):
             if not isinstance(raw[field], str) or not raw[field].strip():
                 raise ValidationError(f"{field} must be a non-empty string")
@@ -225,6 +237,7 @@ class Config:
             lease_seconds=bounded_int(raw["lease_seconds"], 30, 900, "lease_seconds"),
             executable_paths={str(k): str(absolute_path(v)) for k, v in raw["executable_paths"].items()},
             provider_failover=raw["provider_failover"],
+            wake_pull_request=wake_pull_request,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -628,6 +641,10 @@ class State:
           expires_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS metadata (
           key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS wake_outbox (
+          job_id TEXT PRIMARY KEY, terminal_comment_id TEXT NOT NULL,
+          terminal_state TEXT NOT NULL, created_at INTEGER NOT NULL,
+          delivered_at INTEGER);
         """)
     def close(self) -> None:
         self.db.close()
@@ -709,6 +726,46 @@ class State:
             raise ValidationError("queue page is outside the bounded cursor range")
         self.db.execute("INSERT INTO metadata(key,value) VALUES ('queue_page',?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(page),))
+    def enqueue_wake(self, job_id: str, terminal_comment_id: str, terminal_state: str) -> None:
+        if (not valid_uuid(job_id) or not re.fullmatch(r"[1-9][0-9]*", terminal_comment_id)
+                or terminal_state not in {"COMPLETED", "FAILED", "TIMED_OUT", "REJECTED"}):
+            raise ValidationError("invalid wake outbox record")
+        now = int(time.time())
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.db.execute(
+                "SELECT terminal_comment_id, terminal_state FROM wake_outbox WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            if existing is not None and existing != (terminal_comment_id, terminal_state):
+                raise ValidationError("wake outbox job identity mismatch")
+            if existing is None:
+                self.db.execute(
+                    "INSERT INTO wake_outbox VALUES (?, ?, ?, ?, NULL)",
+                    (job_id, terminal_comment_id, terminal_state, now),
+                )
+            self.db.execute("COMMIT")
+        except Exception:
+            with contextlib.suppress(sqlite3.Error): self.db.execute("ROLLBACK")
+            raise
+    def pending_wakes(self, limit: int = 20) -> tuple[tuple[str, str, str], ...]:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
+            raise ValidationError("wake outbox limit is invalid")
+        rows = self.db.execute(
+            "SELECT job_id, terminal_comment_id, terminal_state FROM wake_outbox "
+            "WHERE delivered_at IS NULL ORDER BY created_at, job_id LIMIT ?", (limit,),
+        ).fetchall()
+        return tuple((str(job), str(comment), str(state)) for job, comment, state in rows)
+    def mark_wake_delivered(self, job_id: str) -> None:
+        if not valid_uuid(job_id):
+            raise ValidationError("invalid wake job ID")
+        now = int(time.time())
+        cursor = self.db.execute(
+            "UPDATE wake_outbox SET delivered_at=? WHERE job_id=? AND delivered_at IS NULL",
+            (now, job_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValidationError("wake outbox record is missing or already delivered")
 
 class ProcessLock:
     def __init__(self, state_dir: Path): self.path = state_dir / "runner.lock"; self.handle = None
@@ -1281,10 +1338,21 @@ class GitHubClient:
              cap: int = MAX_OUTPUT_BYTES) -> Any:
         expected = f"repos/{self.config.repository}/issues/{self.config.queue_issue}"
         comments = f"{expected}/comments"
-        if endpoint not in {expected, comments} and not re.fullmatch(
+        wake_comments = (f"repos/{self.config.repository}/issues/"
+                         f"{self.config.wake_pull_request}/comments"
+                         if self.config.wake_pull_request is not None else None)
+        fixed_endpoints = {expected, comments}
+        if wake_comments is not None:
+            fixed_endpoints.add(wake_comments)
+        if endpoint not in fixed_endpoints and not re.fullmatch(
                 re.escape(comments) + rf"\?per_page={QUEUE_PAGE_SIZE}&page=[1-9][0-9]*", endpoint):
             raise ValidationError("GitHub endpoint outside queue issue")
-        if method not in {"GET", "POST"} or (method == "POST" and endpoint != comments):
+        allowed_posts = {comments}
+        if wake_comments is not None:
+            allowed_posts.add(wake_comments)
+        if (method not in {"GET", "POST"}
+                or (method == "POST" and endpoint not in allowed_posts)
+                or (method == "GET" and endpoint == wake_comments)):
             raise ValidationError("GitHub operation outside queue comment boundary")
         argv = [self.config.operational_executables["gh"], "api", "--method", method, endpoint]
         for key, value in (fields or {}).items(): argv += ["-f", f"{key}={value}"]
@@ -1315,8 +1383,22 @@ class GitHubClient:
             if str(value.get("id", "")) == comment_id:
                 return value
         raise RunnerError("claimed comment no longer exists on the queue issue")
-    def post(self, body: str) -> None:
-        self._api("POST", f"repos/{self.config.repository}/issues/{self.config.queue_issue}/comments", {"body": ensure_safe_post(body)})
+    def _post_comment(self, issue_number: int, body: str) -> str:
+        value = self._api(
+            "POST", f"repos/{self.config.repository}/issues/{issue_number}/comments",
+            {"body": ensure_safe_post(body)},
+        )
+        comment_id = value.get("id") if isinstance(value, dict) else None
+        if (isinstance(comment_id, bool) or not isinstance(comment_id, int)
+                or comment_id < 1):
+            raise RunnerError("GitHub comment response has no valid ID")
+        return str(comment_id)
+    def post(self, body: str) -> str:
+        return self._post_comment(self.config.queue_issue, body)
+    def post_wake(self, body: str) -> str:
+        if self.config.wake_pull_request is None:
+            raise ValidationError("wake bridge is disabled")
+        return self._post_comment(self.config.wake_pull_request, body)
 
 def lifecycle(job: Job | OperationJob, state: str, detail: str = "") -> str:
     detail = ensure_safe_post(detail) if detail else ""
@@ -1327,13 +1409,41 @@ def lifecycle(job: Job | OperationJob, state: str, detail: str = "") -> str:
     return (f"COMMANDER_RUNNER_V1 {state}\njob={job.job_id}\nworker={job.worker}\nmodel={job.model}\n"
             f"profile={job.profile}\nsha={job.target_sha}\nrunner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
 
+def wake_lifecycle(config: Config, job_id: str, terminal_comment_id: str,
+                   state: str) -> str:
+    if (config.wake_pull_request is None or not valid_uuid(job_id)
+            or not re.fullmatch(r"[1-9][0-9]*", terminal_comment_id)
+            or state not in {"COMPLETED", "FAILED", "TIMED_OUT", "REJECTED"}):
+        raise ValidationError("invalid wake lifecycle")
+    return (f"COMMANDER_WAKE_V1\njob={job_id}\nterminal_issue={config.queue_issue}\n"
+            f"terminal_comment={terminal_comment_id}\nstate={state}\nrunner={config.runner_id}")
+
+def drain_wake_outbox(client: GitHubClient, state_db: State,
+                      config: Config | None = None) -> bool:
+    active_config = config if config is not None else client.config
+    if active_config.wake_pull_request is None:
+        return True
+    for job_id, terminal_comment_id, terminal_state in state_db.pending_wakes():
+        try:
+            client.post_wake(wake_lifecycle(
+                active_config, job_id, terminal_comment_id, terminal_state))
+        except RunnerError:
+            return False
+        state_db.mark_wake_delivered(job_id)
+    return True
+
 def post_terminal_lifecycle(client: GitHubClient, job: Job | OperationJob,
-                            state: str, detail: str) -> None:
+                            state: str, detail: str, state_db: State | None = None) -> bool:
     """Preserve terminal state even when evidence cannot safely leave the node."""
     try:
-        client.post(lifecycle(job, state, detail))
+        terminal_comment_id = client.post(lifecycle(job, state, detail))
     except UnsafeOutputError:
-        client.post(lifecycle(job, state, "evidence withheld: high-risk pattern detected"))
+        terminal_comment_id = client.post(
+            lifecycle(job, state, "evidence withheld: high-risk pattern detected"))
+    if state_db is None or client.config.wake_pull_request is None:
+        return True
+    state_db.enqueue_wake(job.job_id, terminal_comment_id, state)
+    return drain_wake_outbox(client, state_db)
 
 def make_launchagent(template: Mapping[str, Any], python: str, script: str, config: str, log_dir: str) -> bytes:
     data = dict(template)
@@ -1479,6 +1589,8 @@ def run_once(config: Config, dry_run: bool = False) -> str:
             if not state.acquire_lease(config.runner_id, config.lease_seconds): raise RunnerError("active lease belongs to another runner")
             state.recover_incomplete()
             client = GitHubClient(config); client.verify_login()
+            if not drain_wake_outbox(client, state, config):
+                return "WAKE_PENDING"
             queue_page = state.queue_page()
             comments = client.comments(queue_page)
             for comment in comments:
@@ -1506,8 +1618,9 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                         or not isinstance(latest.get("body"), str)
                         or comment_hash(latest["body"]) != digest):
                     state.set_status(comment_id, "blocked")
-                    client.post(lifecycle(job, "REJECTED", "claimed comment was edited or author changed"))
-                    return f"REJECTED {job.job_id}"
+                    delivered = post_terminal_lifecycle(
+                        client, job, "REJECTED", "claimed comment was edited or author changed", state)
+                    return f"REJECTED {job.job_id}" if delivered else f"WAKE_PENDING {job.job_id}"
                 client.post(lifecycle(job, "CLAIMED"))
                 try:
                     worktree = prepare_worktree(config, job)
@@ -1570,8 +1683,9 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                 except RunnerError as exc:
                     state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
                 state.set_status(comment_id, internal_state)
-                post_terminal_lifecycle(client, job, state_name, detail)
-                return f"{state_name} {job.job_id}"
+                delivered = post_terminal_lifecycle(client, job, state_name, detail, state)
+                return (f"{state_name} {job.job_id}" if delivered
+                        else f"WAKE_PENDING {job.job_id}")
             if len(comments) == QUEUE_PAGE_SIZE:
                 state.set_queue_page(queue_page + 1)
                 return "QUEUE_CURSOR_ADVANCED"
