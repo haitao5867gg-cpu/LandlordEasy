@@ -452,6 +452,28 @@ class ProbeHelperTests(OperationTestCase):
                      helper.ProbeError, "docker_socket_invalid"):
                 helper.trusted_local_docker_host()
 
+    def test_group_or_world_writable_socket_directory_fails_closed(self):
+        root = Path(self.tmp.name)
+        trusted_home = root / "trusted-home-permissions"
+        socket_path = trusted_home / ".docker" / "run" / "docker.sock"
+        socket_path.parent.mkdir(parents=True)
+        socket_path.write_text("metadata fixture")
+        record = type("Record", (), {"pw_dir": str(trusted_home)})()
+        socket_metadata = SimpleNamespace(st_mode=stat.S_IFSOCK | 0o600,
+                                          st_uid=os.geteuid())
+        real_lstat = os.lstat
+        for unsafe_mode in (0o770, 0o707):
+            os.chmod(socket_path.parent, unsafe_mode)
+            def selective_lstat(path):
+                if Path(path) == socket_path:
+                    return socket_metadata
+                return real_lstat(path)
+            with self.subTest(mode=oct(unsafe_mode)), \
+                 mock.patch.object(helper.pwd, "getpwuid", return_value=record), \
+                 mock.patch.object(helper.os, "lstat", side_effect=selective_lstat), \
+                 self.assertRaisesRegex(helper.ProbeError, "docker_socket_invalid"):
+                helper.trusted_local_docker_host()
+
     def test_every_identity_binding_storage_and_database_mismatch_blocks(self):
         cases = (
             {"ids": ""}, {"ids": "a\nb"},
