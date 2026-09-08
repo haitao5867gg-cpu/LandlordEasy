@@ -76,6 +76,7 @@ class SchemaTests(RunnerTestCase):
         self.assertEqual(example["enabled_profiles"], ["repo_read"])
         self.assertEqual(example["enabled_quality_gates"], ["none"])
         self.assertEqual(example["enabled_operations"], [])
+        self.assertIsNone(example["wake_pull_request"])
         self.assertEqual(set(example["operation_definitions"]), {"ops001_mysql_probe"})
         self.assertEqual(example["delivery_path_allowlists"]["org002_python"], [
             "AGENTS.md", "project-brain/CURRENT_STATE.md", "project-brain/RELEASE_PLAN.md",
@@ -83,6 +84,17 @@ class SchemaTests(RunnerTestCase):
         self.assertNotEqual(example["commander_login"], example["executor_login"])
         runner.validate_github_login(example["commander_login"], "commander_login")
         runner.validate_github_login(example["executor_login"], "executor_login")
+
+    def test_wake_pull_request_is_optional_owner_only_and_distinct(self):
+        old = self.config_data()
+        self.assertIsNone(runner.Config.load(self.write_config(old)).wake_pull_request)
+        enabled = self.config_data(); enabled["wake_pull_request"] = 22
+        self.assertEqual(runner.Config.load(self.write_config(enabled)).wake_pull_request, 22)
+        for invalid in (True, 0, -1, 42, 1_000_000_001, "22"):
+            with self.subTest(invalid=invalid):
+                data = self.config_data(); data["wake_pull_request"] = invalid
+                with self.assertRaises(runner.ValidationError):
+                    runner.Config.load(self.write_config(data))
     def test_valid_job_and_derived_worktree(self):
         job = runner.Job.from_comment(self.comment(), self.config)
         self.assertEqual(job.job_id, JOB_ID)
@@ -417,10 +429,58 @@ class StateTests(RunnerTestCase):
             with self.assertRaises(runner.RunnerError):
                 with runner.ProcessLock(self.state): pass
 
+    def test_wake_outbox_is_persistent_idempotent_and_identity_bound(self):
+        state = runner.State(self.state)
+        state.enqueue_wake(JOB_ID, "1234", "COMPLETED")
+        state.enqueue_wake(JOB_ID, "1234", "COMPLETED")
+        self.assertEqual(state.pending_wakes(), ((JOB_ID, "1234", "COMPLETED"),))
+        with self.assertRaises(runner.ValidationError):
+            state.enqueue_wake(JOB_ID, "1235", "COMPLETED")
+        state.close()
+        restarted = runner.State(self.state)
+        self.assertEqual(restarted.pending_wakes(), ((JOB_ID, "1234", "COMPLETED"),))
+        restarted.mark_wake_delivered(JOB_ID)
+        self.assertEqual(restarted.pending_wakes(), ())
+        with self.assertRaises(runner.ValidationError):
+            restarted.mark_wake_delivered(JOB_ID)
+        restarted.close()
+
+    def test_wake_outbox_rejects_malformed_records_and_limits(self):
+        state = runner.State(self.state)
+        for values in (("bad", "123", "COMPLETED"), (JOB_ID, "0", "COMPLETED"),
+                       (JOB_ID, "123", "RUNNING")):
+            with self.subTest(values=values), self.assertRaises(runner.ValidationError):
+                state.enqueue_wake(*values)
+        for limit in (0, True, 101):
+            with self.subTest(limit=limit), self.assertRaises(runner.ValidationError):
+                state.pending_wakes(limit)
+        state.close()
+
 class GitHubAndLaunchAgentTests(RunnerTestCase):
     def test_github_client_cannot_escape_queue_issue(self):
         client = runner.GitHubClient(self.config)
         with self.assertRaises(runner.ValidationError): client._api("POST", "repos/owner/repo/issues/99/comments", {"body": "x"})
+
+    def test_wake_client_is_post_only_and_confined_to_exact_pr(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        client = runner.GitHubClient(config)
+        response = runner.Result(0, '{"id":9876}', False, False, 0.1)
+        with mock.patch.object(runner, "execute", return_value=response) as execute:
+            self.assertEqual(client.post_wake("COMMANDER_WAKE_V1"), "9876")
+        argv = execute.call_args.args[0]
+        self.assertIn("repos/owner/repo/issues/22/comments", argv)
+        with self.assertRaises(runner.ValidationError):
+            client._api("GET", "repos/owner/repo/issues/22/comments")
+        with self.assertRaises(runner.ValidationError):
+            client._api("POST", "repos/owner/repo/issues/23/comments", {"body": "x"})
+
+    def test_comment_posts_require_a_positive_response_id(self):
+        client = runner.GitHubClient(self.config)
+        for output in ('{}', '{"id":0}', '{"id":true}', '{"id":"9"}'):
+            with self.subTest(output=output), mock.patch.object(
+                    runner, "execute", return_value=runner.Result(
+                        0, output, False, False, 0.1)), self.assertRaises(runner.RunnerError):
+                client.post("safe")
     def test_wrong_author_fixture_is_ignored_without_execution(self):
         class FixtureClient:
             def __init__(self, config): pass
@@ -471,6 +531,64 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         body = runner.lifecycle(job, "CLAIMED")
         self.assertNotIn(self.config.commander_login, body)
         self.assertNotIn(self.config.executor_login, body)
+
+    def test_terminal_record_precedes_minimal_wake_and_marks_outbox_delivered(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        state = runner.State(self.state)
+        events = []
+        class FixtureClient:
+            def __init__(self): self.config = config
+            def post(self, body): events.append(("terminal", body)); return "7001"
+            def post_wake(self, body): events.append(("wake", body)); return "7002"
+        self.assertTrue(runner.post_terminal_lifecycle(
+            FixtureClient(), job, "COMPLETED", "bounded evidence", state))
+        self.assertEqual([kind for kind, _ in events], ["terminal", "wake"])
+        wake = events[1][1]
+        self.assertEqual(wake, (
+            f"COMMANDER_WAKE_V1\njob={JOB_ID}\nterminal_issue=42\n"
+            "terminal_comment=7001\nstate=COMPLETED\nrunner=runner-001"))
+        for forbidden in ("\nevidence=", "\nprompt=", "\ncommand=", "\nargv=",
+                          "\nprovider=", "\nsha=", "\npath="):
+            self.assertNotIn(forbidden, wake.lower())
+        self.assertEqual(state.pending_wakes(), ())
+        state.close()
+
+    def test_failed_wake_is_retried_without_reposting_terminal(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        state = runner.State(self.state)
+        class FailingClient:
+            def __init__(self): self.config = config; self.terminals = 0; self.wakes = 0
+            def post(self, body): self.terminals += 1; return "8001"
+            def post_wake(self, body): self.wakes += 1; raise runner.RunnerError("fixture")
+        first = FailingClient()
+        self.assertFalse(runner.post_terminal_lifecycle(
+            first, job, "FAILED", "bounded", state))
+        self.assertEqual(first.terminals, 1)
+        self.assertEqual(first.wakes, 1)
+        self.assertEqual(state.pending_wakes(), ((JOB_ID, "8001", "FAILED"),))
+        class RecoveryClient:
+            def __init__(self): self.config = config; self.wakes = 0
+            def post_wake(self, body): self.wakes += 1; return "8002"
+        recovery = RecoveryClient()
+        self.assertTrue(runner.drain_wake_outbox(recovery, state))
+        self.assertEqual(recovery.wakes, 1)
+        self.assertEqual(state.pending_wakes(), ())
+        state.close()
+
+    def test_pending_wake_blocks_new_claims(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        state = runner.State(self.state)
+        state.enqueue_wake(JOB_ID, "9001", "FAILED")
+        state.close()
+        class FixtureClient:
+            def __init__(self, supplied): self.config = supplied
+            def verify_login(self): pass
+            def post_wake(self, body): raise runner.RunnerError("fixture")
+            def comments(self, page): raise AssertionError("must not scan or claim while wake is pending")
+        with mock.patch.object(runner, "GitHubClient", FixtureClient):
+            self.assertEqual(runner.run_once(config), "WAKE_PENDING")
     def test_incremental_cursor_finds_latest_job_after_large_history(self):
         class FixtureClient:
             outer = None
