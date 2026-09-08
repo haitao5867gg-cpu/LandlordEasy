@@ -1,7 +1,7 @@
 # V1.0 release plan
 Planning anchor: Day 1 = 2026-09-05, day boundaries for planning only. Dates are targets, not promised launch dates. Freeze remains active.
 
-Immediate next work (as of 2026-09-07 UTC): ORG-002 integration is complete and the OPS-001 isolated rehearsal is now active, followed by M19–M21 end-to-end verification. This is scoped-development-execution progress only; it does not change the NO-GO release decision or the feature freeze.
+Immediate next work (as of 2026-09-08 UTC): ORG-002 integration is complete; PR #23 merged the accepted ORG-003/ORG-004 control-plane code into `dev` at `b81833de52896a2206aab1a3a6dbcb526df8f00c`; the ORG-004 runtime is accepted for scoped Commander wake (event-driven PR #22 Commander is primary, the temporary hourly Commander is disabled). The OPS-001 read-only MySQL probe is accepted (Issue #17 job `d91f4b6c-3e72-4a85-b9d1-6f204c8e57a3`). The immediate active task is the OPS-001 → REL-001 real MySQL integration harness; SEC-001 proxy/private-file rehearsal and REL-002 production-like startup remain pending afterward, followed by M19–M21 end-to-end verification. REL-001, SEC-001, REL-002, QA-001, UX-001, deployment and Production gates have not passed. This is scoped-development-execution progress only; it does not change the NO-GO release decision or the feature freeze.
 
 | Window | Target dates | Deliverable / exit |
 |---|---|---|
