@@ -106,7 +106,15 @@ def trusted_local_docker_host() -> str:
         if not home.is_absolute():
             raise ProbeError("docker_socket_invalid")
         trusted_home = home.resolve(strict=True)
-        socket_path = home / ".docker" / "run" / "docker.sock"
+        docker_dir = trusted_home / ".docker"
+        run_dir = docker_dir / "run"
+        for directory in (docker_dir, run_dir):
+            directory_metadata = os.lstat(directory)
+            if (stat.S_ISLNK(directory_metadata.st_mode)
+                    or not stat.S_ISDIR(directory_metadata.st_mode)
+                    or directory_metadata.st_uid != os.geteuid()):
+                raise ProbeError("docker_socket_invalid")
+        socket_path = run_dir / "docker.sock"
         metadata = os.lstat(socket_path)
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISSOCK(metadata.st_mode):
             raise ProbeError("docker_socket_invalid")
