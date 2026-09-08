@@ -3,6 +3,7 @@ import json
 import os
 import plistlib
 import shutil
+import sqlite3
 import sys
 import tempfile
 import types
@@ -75,12 +76,26 @@ class SchemaTests(RunnerTestCase):
         example = json.loads((HERE / "config.example.json").read_text())
         self.assertEqual(example["enabled_profiles"], ["repo_read"])
         self.assertEqual(example["enabled_quality_gates"], ["none"])
+        self.assertEqual(example["enabled_operations"], [])
+        self.assertIsNone(example["wake_pull_request"])
+        self.assertEqual(set(example["operation_definitions"]), {"ops001_mysql_probe"})
         self.assertEqual(example["delivery_path_allowlists"]["org002_python"], [
             "AGENTS.md", "project-brain/CURRENT_STATE.md", "project-brain/RELEASE_PLAN.md",
             "project-brain/RISKS.md", "specs/ORG-002-LOCAL-COMMANDER-RUNNER.md"])
         self.assertNotEqual(example["commander_login"], example["executor_login"])
         runner.validate_github_login(example["commander_login"], "commander_login")
         runner.validate_github_login(example["executor_login"], "executor_login")
+
+    def test_wake_pull_request_is_optional_owner_only_and_distinct(self):
+        old = self.config_data()
+        self.assertIsNone(runner.Config.load(self.write_config(old)).wake_pull_request)
+        enabled = self.config_data(); enabled["wake_pull_request"] = 22
+        self.assertEqual(runner.Config.load(self.write_config(enabled)).wake_pull_request, 22)
+        for invalid in (True, 0, -1, 42, 1_000_000_001, "22"):
+            with self.subTest(invalid=invalid):
+                data = self.config_data(); data["wake_pull_request"] = invalid
+                with self.assertRaises(runner.ValidationError):
+                    runner.Config.load(self.write_config(data))
     def test_valid_job_and_derived_worktree(self):
         job = runner.Job.from_comment(self.comment(), self.config)
         self.assertEqual(job.job_id, JOB_ID)
@@ -389,6 +404,26 @@ class SecurityTests(RunnerTestCase):
         self.assertTrue(result.overflow); self.assertLessEqual(len(result.output.encode()), 100)
 
 class StateTests(RunnerTestCase):
+    def legacy_state(self, body, job_id=JOB_ID, content_hash=None):
+        state_dir = Path(self.tmp.name) / f"legacy-{uuid.uuid4()}"
+        state_dir.mkdir()
+        database = sqlite3.connect(state_dir / "state.sqlite3")
+        database.executescript("""
+        CREATE TABLE claims (
+          comment_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL, content_hash TEXT NOT NULL,
+          status TEXT NOT NULL, claimed_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id TEXT NOT NULL,
+          status TEXT NOT NULL, created_at INTEGER NOT NULL);
+        """)
+        database.execute(
+            "INSERT INTO claims VALUES (?, ?, ?, 'running', 1, 1)",
+            ("1", job_id, content_hash if content_hash is not None else runner.comment_hash(body)),
+        )
+        database.commit()
+        database.close()
+        return runner.State(state_dir)
+
     def test_atomic_claim_edit_binding_and_crash_recovery(self):
         state = runner.State(self.state)
         self.assertTrue(state.claim("1", JOB_ID, "hash-a"))
@@ -399,13 +434,12 @@ class StateTests(RunnerTestCase):
         self.assertFalse(restarted.claim("1", JOB_ID, "hash-a"))
         with self.assertRaises(runner.ValidationError): restarted.claim("2", JOB_ID, "hash-a")
         restarted.close()
-    def test_explicit_states_and_restart_recovery(self):
+    def test_incomplete_claim_cannot_be_locally_terminalized_without_public_intent(self):
         state = runner.State(self.state)
         self.assertTrue(state.claim("1", JOB_ID, "hash-a"))
         self.assertEqual(state.summary()["jobs"], {"claimed": 1})
-        self.assertEqual(state.recover_incomplete(), 1)
-        self.assertEqual(state.summary()["jobs"], {"blocked": 1})
-        with self.assertRaises(runner.ValidationError): state.set_status("1", "running")
+        self.assertFalse(hasattr(state, "recover_incomplete"))
+        self.assertEqual(state.summary()["jobs"], {"claimed": 1})
         state.close()
     def test_single_node_lease_and_process_lock(self):
         state = runner.State(self.state)
@@ -415,10 +449,221 @@ class StateTests(RunnerTestCase):
             with self.assertRaises(runner.RunnerError):
                 with runner.ProcessLock(self.state): pass
 
+    def test_wake_outbox_is_persistent_idempotent_and_identity_bound(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        state = runner.State(self.state)
+        state.enqueue_wake(JOB_ID, "1234", "COMPLETED", config)
+        state.enqueue_wake(JOB_ID, "1234", "COMPLETED", config)
+        expected = ((JOB_ID, "1234", "COMPLETED", "owner/repo", 42,
+                     "runner-001", 22),)
+        self.assertEqual(state.pending_wakes(), expected)
+        with self.assertRaises(runner.ValidationError):
+            state.enqueue_wake(JOB_ID, "1235", "COMPLETED", config)
+        state.close()
+        restarted = runner.State(self.state)
+        self.assertEqual(restarted.pending_wakes(), expected)
+        restarted.mark_wake_delivered(JOB_ID)
+        self.assertEqual(restarted.pending_wakes(), ())
+        with self.assertRaises(runner.ValidationError):
+            restarted.mark_wake_delivered(JOB_ID)
+        restarted.close()
+
+    def test_wake_outbox_rejects_malformed_records_and_limits(self):
+        state = runner.State(self.state)
+        for values in (("bad", "123", "COMPLETED"), (JOB_ID, "0", "COMPLETED"),
+                       (JOB_ID, "123", "RUNNING")):
+            with self.subTest(values=values), self.assertRaises(runner.ValidationError):
+                state.enqueue_wake(*values, self.config)
+        for limit in (0, True, 101):
+            with self.subTest(limit=limit), self.assertRaises(runner.ValidationError):
+                state.pending_wakes(limit)
+        state.close()
+
+    def test_terminal_intent_survives_post_failure_and_restart(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, "hash", recovery)
+        state.set_status("1", "running")
+        class FailingClient:
+            def __init__(self): self.config = config
+            def post(self, body): raise runner.RunnerError("fixture")
+        self.assertFalse(runner.post_terminal_lifecycle(
+            FailingClient(), job, "COMPLETED", "bounded", state, "1", "succeeded"))
+        self.assertEqual(state.summary()["jobs"], {"running": 1})
+        self.assertEqual(len(state.pending_terminals()), 1)
+        state.close()
+
+        restarted = runner.State(self.state)
+        self.assertEqual(runner.recover_incomplete_jobs(object(), restarted, config), 1)
+        events = []
+        class RecoveryClient:
+            def __init__(self): self.config = config
+            def post(self, body): events.append(("terminal", body)); return "7001"
+            def post_wake(self, body): events.append(("wake", body)); return "7002"
+        self.assertTrue(runner.drain_terminal_outbox(RecoveryClient(), restarted, config))
+        self.assertEqual([kind for kind, _ in events], ["terminal", "wake"])
+        self.assertEqual(restarted.summary()["jobs"], {"succeeded": 1})
+        restarted.close()
+
+    def test_crashed_running_claim_gets_public_terminal_without_worker_replay(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, "hash", recovery)
+        state.set_status("1", "running")
+        state.close()
+
+        restarted = runner.State(self.state)
+        self.assertEqual(runner.recover_incomplete_jobs(object(), restarted, config), 1)
+        events = []
+        class RecoveryClient:
+            def __init__(self): self.config = config
+            def post(self, body): events.append(body); return "8001"
+            def post_wake(self, body): events.append(body); return "8002"
+        self.assertTrue(runner.drain_terminal_outbox(RecoveryClient(), restarted, config))
+        self.assertIn("COMMANDER_RUNNER_V1 FAILED", events[0])
+        self.assertIn("ambiguous execution recovered after restart", events[0])
+        self.assertEqual(restarted.summary()["jobs"], {"blocked": 1})
+        restarted.close()
+
+    def test_legacy_migration_accepts_worker_and_operation_envelopes(self):
+        definition = runner.OperationDefinition(
+            argv=(sys.executable, str(self.runtime / "rehearsal_operations.py"),
+                  "--docker", str(self.runtime / "docker")),
+            mode="read_only", allowed_target_shas=frozenset({runner.OPS001_TARGET_SHA}),
+            max_timeout_seconds=120, max_output_bytes=8192,
+            require_clean_worktree=True, description="fixture operation",
+        )
+        operation_config = runner.dataclasses.replace(
+            self.config, enabled_operations=frozenset({"ops001_mysql_probe"}),
+            operation_definitions={"ops001_mysql_probe": definition})
+        operation_data = {
+            "schema": runner.OPERATION_SCHEMA, "job_id": JOB_ID,
+            "repository": "owner/repo", "queue_issue": 42,
+            "target_sha": runner.OPS001_TARGET_SHA,
+            "worktree_id": runner.derive_worktree_id(JOB_ID), "runner_id": "runner-001",
+            "operation_id": "ops001_mysql_probe", "timeout_seconds": 60,
+            "output_limit_bytes": 4096, "expected_evidence": "bounded evidence",
+            "human_approval_ref": "commander-approval",
+        }
+        operation = "COMMANDER_OPERATION_V1\n```json\n" + json.dumps(operation_data) + "\n```"
+        for body, config in ((self.comment(), self.config), (operation, operation_config)):
+            state = self.legacy_state(body)
+            class Client:
+                @staticmethod
+                def find_comment(comment_id, max_page):
+                    return {"id": 1, "user": {"login": "commander"}, "body": body}
+            with self.subTest(schema=body.splitlines()[0]):
+                self.assertEqual(runner.recover_incomplete_jobs(Client(), state, config), 1)
+                self.assertEqual(len(state.pending_terminals()), 1)
+                self.assertEqual(state.summary()["jobs"], {"running": 1})
+            state.close()
+
+    def test_legacy_migration_rejects_wrong_author_malformed_edit_and_job_mismatch(self):
+        original = self.comment()
+        other_job = "123e4567-e89b-12d3-a456-426614174099"
+        cases = (
+            (original, runner.comment_hash(original), JOB_ID, "attacker"),
+            ("COMMANDER_JOB_V1\n```json\n{}\n```", None, JOB_ID, "commander"),
+            (self.comment(prompt="edited"), runner.comment_hash(original), JOB_ID, "commander"),
+            (original, runner.comment_hash(original), other_job, "commander"),
+        )
+        for fetched_body, stored_hash, stored_job, author in cases:
+            state = self.legacy_state(
+                fetched_body, job_id=stored_job,
+                content_hash=(runner.comment_hash(fetched_body)
+                              if stored_hash is None else stored_hash))
+            class Client:
+                @staticmethod
+                def find_comment(comment_id, max_page):
+                    return {"id": 1, "user": {"login": author}, "body": fetched_body}
+            with self.subTest(author=author, job=stored_job,
+                              malformed=fetched_body != original), \
+                 self.assertRaises(runner.RunnerError):
+                runner.recover_incomplete_jobs(Client(), state, self.config)
+            self.assertEqual(state.summary()["jobs"], {"running": 1})
+            self.assertEqual(state.pending_terminals(), ())
+            state.close()
+
+    def test_complete_terminal_failure_rolls_back_all_three_state_changes(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, runner.comment_hash(self.comment()), recovery)
+        state.set_status("1", "running")
+        state.queue_terminal("1", JOB_ID, recovery, "blocked", "FAILED", config)
+        history_before = state.db.execute("SELECT count(*) FROM history").fetchone()[0]
+        original_enqueue = state._enqueue_wake_tx
+        def fail_after_wake_insert(*args):
+            original_enqueue(*args)
+            raise RuntimeError("injected transaction failure")
+        with mock.patch.object(state, "_enqueue_wake_tx", side_effect=fail_after_wake_insert), \
+             self.assertRaises(RuntimeError):
+            state.complete_terminal(JOB_ID, "9001")
+        self.assertEqual(state.summary()["jobs"], {"running": 1})
+        self.assertEqual(state.db.execute("SELECT count(*) FROM history").fetchone()[0],
+                         history_before)
+        self.assertEqual(state.pending_wakes(), ())
+        self.assertEqual(len(state.pending_terminals()), 1)
+        state.close()
+
+    def test_pending_terminal_identity_mismatch_blocks_before_post(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, runner.comment_hash(self.comment()), recovery)
+        state.set_status("1", "running")
+        state.queue_terminal("1", JOB_ID, recovery, "blocked", "FAILED", config)
+        changes = (
+            {"repository": "other/repo"}, {"queue_issue": 43},
+            {"runner_id": "other-runner"}, {"wake_pull_request": 23},
+            {"wake_pull_request": None},
+        )
+        for fields in changes:
+            changed = runner.dataclasses.replace(config, **fields)
+            class Client:
+                @staticmethod
+                def post(body): raise AssertionError("identity mismatch must block before POST")
+            with self.subTest(fields=fields), self.assertRaises(runner.RunnerError):
+                runner.drain_terminal_outbox(Client(), state, changed)
+        self.assertEqual(state.summary()["jobs"], {"running": 1})
+        self.assertEqual(len(state.pending_terminals()), 1)
+        state.close()
+
 class GitHubAndLaunchAgentTests(RunnerTestCase):
     def test_github_client_cannot_escape_queue_issue(self):
         client = runner.GitHubClient(self.config)
         with self.assertRaises(runner.ValidationError): client._api("POST", "repos/owner/repo/issues/99/comments", {"body": "x"})
+
+    def test_wake_client_is_post_only_and_confined_to_exact_pr(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        client = runner.GitHubClient(config)
+        response = runner.Result(0, '{"id":9876}', False, False, 0.1)
+        with mock.patch.object(runner, "execute", return_value=response) as execute:
+            self.assertEqual(client.post_wake("COMMANDER_WAKE_V1"), "9876")
+        argv = execute.call_args.args[0]
+        self.assertIn("repos/owner/repo/issues/22/comments", argv)
+        with self.assertRaises(runner.ValidationError):
+            client._api("GET", "repos/owner/repo/issues/22/comments")
+        with self.assertRaises(runner.ValidationError):
+            client._api("POST", "repos/owner/repo/issues/23/comments", {"body": "x"})
+
+    def test_comment_posts_require_a_positive_response_id(self):
+        client = runner.GitHubClient(self.config)
+        for output in ('{}', '{"id":0}', '{"id":true}', '{"id":"9"}'):
+            with self.subTest(output=output), mock.patch.object(
+                    runner, "execute", return_value=runner.Result(
+                        0, output, False, False, 0.1)), self.assertRaises(runner.RunnerError):
+                client.post("safe")
     def test_wrong_author_fixture_is_ignored_without_execution(self):
         class FixtureClient:
             def __init__(self, config): pass
@@ -469,6 +714,141 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         body = runner.lifecycle(job, "CLAIMED")
         self.assertNotIn(self.config.commander_login, body)
         self.assertNotIn(self.config.executor_login, body)
+
+    def test_terminal_record_precedes_minimal_wake_and_marks_outbox_delivered(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, "hash", runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart"))
+        state.set_status("1", "running")
+        events = []
+        class FixtureClient:
+            def __init__(self): self.config = config
+            def post(self, body): events.append(("terminal", body)); return "7001"
+            def post_wake(self, body): events.append(("wake", body)); return "7002"
+        self.assertTrue(runner.post_terminal_lifecycle(
+            FixtureClient(), job, "COMPLETED", "bounded evidence", state, "1", "succeeded"))
+        self.assertEqual([kind for kind, _ in events], ["terminal", "wake"])
+        wake = events[1][1]
+        self.assertEqual(wake, (
+            f"COMMANDER_WAKE_V1\njob={JOB_ID}\nterminal_issue=42\n"
+            "terminal_comment=7001\nstate=COMPLETED\nrunner=runner-001"))
+        for forbidden in ("\nevidence=", "\nprompt=", "\ncommand=", "\nargv=",
+                          "\nprovider=", "\nsha=", "\npath="):
+            self.assertNotIn(forbidden, wake.lower())
+        self.assertEqual(state.pending_wakes(), ())
+        state.close()
+
+    def test_failed_wake_is_retried_without_reposting_terminal(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, "hash", runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart"))
+        state.set_status("1", "running")
+        class FailingClient:
+            def __init__(self): self.config = config; self.terminals = 0; self.wakes = 0
+            def post(self, body): self.terminals += 1; return "8001"
+            def post_wake(self, body): self.wakes += 1; raise runner.RunnerError("fixture")
+        first = FailingClient()
+        self.assertFalse(runner.post_terminal_lifecycle(
+            first, job, "FAILED", "bounded", state, "1", "blocked"))
+        self.assertEqual(first.terminals, 1)
+        self.assertEqual(first.wakes, 1)
+        self.assertEqual(state.pending_wakes(), (
+            (JOB_ID, "8001", "FAILED", "owner/repo", 42, "runner-001", 22),))
+        class RecoveryClient:
+            def __init__(self): self.config = config; self.wakes = 0
+            def post_wake(self, body): self.wakes += 1; return "8002"
+        recovery = RecoveryClient()
+        self.assertTrue(runner.drain_wake_outbox(recovery, state))
+        self.assertEqual(recovery.wakes, 1)
+        self.assertEqual(state.pending_wakes(), ())
+        self.assertTrue(runner.drain_wake_outbox(recovery, state))
+        self.assertEqual(recovery.wakes, 1)
+        state.close()
+
+    def test_pending_wake_blocks_new_claims(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        state = runner.State(self.state)
+        state.enqueue_wake(JOB_ID, "9001", "FAILED", config)
+        state.close()
+        class FixtureClient:
+            def __init__(self, supplied): self.config = supplied
+            def verify_login(self): pass
+            def post_wake(self, body): raise runner.RunnerError("fixture")
+            def comments(self, page): raise AssertionError("must not scan or claim while wake is pending")
+        with mock.patch.object(runner, "GitHubClient", FixtureClient):
+            self.assertEqual(runner.run_once(config), "WAKE_PENDING")
+
+    def test_pending_wake_identity_cannot_follow_changed_config(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        state = runner.State(self.state)
+        state.enqueue_wake(JOB_ID, "9001", "FAILED", config)
+        for wake_pull_request in (23, None):
+            changed = runner.dataclasses.replace(config, wake_pull_request=wake_pull_request)
+            class FixtureClient:
+                def __init__(self): self.config = changed
+                def post_wake(self, body): raise AssertionError("mismatch must block before POST")
+            with self.subTest(wake_pull_request=wake_pull_request), self.assertRaises(runner.RunnerError):
+                runner.drain_wake_outbox(FixtureClient(), state, changed)
+        state.close()
+
+    def test_disabled_wake_config_with_pending_record_blocks_queue_scan(self):
+        enabled = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        state = runner.State(self.state)
+        state.enqueue_wake(JOB_ID, "9001", "FAILED", enabled)
+        state.close()
+        disabled = runner.dataclasses.replace(enabled, wake_pull_request=None)
+        class FixtureClient:
+            def __init__(self, supplied): self.config = supplied
+            def verify_login(self): pass
+            def post_wake(self, body): raise AssertionError("mismatch must block before POST")
+            def comments(self, page): raise AssertionError("must not scan while wake identity differs")
+        with mock.patch.object(runner, "GitHubClient", FixtureClient), self.assertRaises(runner.RunnerError):
+            runner.run_once(disabled)
+
+    def test_legacy_inflight_claim_is_reconstructed_and_gets_public_terminal(self):
+        self.state.mkdir()
+        database = sqlite3.connect(self.state / "state.sqlite3")
+        database.executescript("""
+        CREATE TABLE claims (
+          comment_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL, content_hash TEXT NOT NULL,
+          status TEXT NOT NULL, claimed_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id TEXT NOT NULL,
+          status TEXT NOT NULL, created_at INTEGER NOT NULL);
+        """)
+        body = self.comment()
+        database.execute(
+            "INSERT INTO claims VALUES (?, ?, ?, 'running', 1, 1)",
+            ("1", JOB_ID, runner.comment_hash(body)),
+        )
+        database.commit()
+        database.close()
+        events = []
+        class FixtureClient:
+            outer = None
+            def __init__(self, supplied): self.config = supplied
+            def verify_login(self): pass
+            def comments(self, page):
+                return [{"id": 1, "user": {"login": "commander"}, "body": self.outer.comment()}]
+            def find_comment(self, comment_id, max_page):
+                return self.comments(1)[0]
+            def post(self, terminal): events.append(terminal); return "9101"
+        FixtureClient.outer = self
+        with mock.patch.object(runner, "GitHubClient", FixtureClient), \
+             mock.patch.object(runner, "verify_target") as verify_target:
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        verify_target.assert_not_called()
+        self.assertEqual(len(events), 1)
+        self.assertIn("COMMANDER_RUNNER_V1 FAILED", events[0])
+        self.assertIn("ambiguous execution recovered after restart", events[0])
+        recovered = runner.State(self.state)
+        self.assertEqual(recovered.summary()["jobs"], {"blocked": 1})
+        self.assertEqual(recovered.pending_terminals(), ())
+        recovered.close()
     def test_incremental_cursor_finds_latest_job_after_large_history(self):
         class FixtureClient:
             outer = None
@@ -510,7 +890,16 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
             plist = plistlib.loads(launchagent.read_bytes())
             self.assertTrue(runtime_script.exists())
             self.assertEqual(plist["ProgramArguments"][1], str(runtime_script))
-            self.assertEqual(manifest["sha256"], runner.hashlib.sha256(runtime_script.read_bytes()).hexdigest())
+            self.assertEqual(manifest["version"], 2)
+            self.assertEqual(manifest["entrypoint"], "commander_runner.py")
+            self.assertEqual(
+                manifest["files"]["commander_runner.py"],
+                runner.hashlib.sha256(runtime_script.read_bytes()).hexdigest())
+            helper = self.runtime / "rehearsal_operations.py"
+            self.assertTrue(helper.exists())
+            self.assertEqual(
+                manifest["files"]["rehearsal_operations.py"],
+                runner.hashlib.sha256(helper.read_bytes()).hexdigest())
             with self.assertRaises(runner.RunnerError):
                 runner.install_stable_runtime(self.config, HERE / "commander_runner.py")
             with mock.patch.object(runner, "run_launchctl") as launchctl:

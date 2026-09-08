@@ -1,6 +1,7 @@
 {
   "repository": "haitao5867gg-cpu/LandlordEasy",
   "queue_issue": 17,
+  "wake_pull_request": null,
   "commander_login": "set-commander-login",
   "executor_login": "set-executor-login",
   "runner_id": "SET_IMMUTABLE_RUNNER_ID",
@@ -12,6 +13,23 @@
   "poll_seconds": 60,
   "lease_seconds": 180,
   "provider_failover": true,
+  "enabled_operations": [],
+  "operation_definitions": {
+    "ops001_mysql_probe": {
+      "argv": [
+        "/ABSOLUTE/PATH/TO/python3",
+        "${HOME}/.local/lib/landlordeasy-commander/rehearsal_operations.py",
+        "--docker",
+        "/ABSOLUTE/PATH/TO/docker"
+      ],
+      "mode": "read_only",
+      "allowed_target_shas": ["104de1521cf194c9dc76ccca52741f05a75f1180"],
+      "max_timeout_seconds": 120,
+      "max_output_bytes": 16384,
+      "require_clean_worktree": true,
+      "description": "Read-only exact-identity probe for the isolated OPS-001 MySQL rehearsal"
+    }
+  },
   "operational_executables": {
     "gh": "/ABSOLUTE/PATH/TO/gh",
     "git": "/ABSOLUTE/PATH/TO/git",
