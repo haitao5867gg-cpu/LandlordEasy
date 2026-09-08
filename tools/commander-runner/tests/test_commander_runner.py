@@ -430,15 +430,18 @@ class StateTests(RunnerTestCase):
                 with runner.ProcessLock(self.state): pass
 
     def test_wake_outbox_is_persistent_idempotent_and_identity_bound(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
         state = runner.State(self.state)
-        state.enqueue_wake(JOB_ID, "1234", "COMPLETED")
-        state.enqueue_wake(JOB_ID, "1234", "COMPLETED")
-        self.assertEqual(state.pending_wakes(), ((JOB_ID, "1234", "COMPLETED"),))
+        state.enqueue_wake(JOB_ID, "1234", "COMPLETED", config)
+        state.enqueue_wake(JOB_ID, "1234", "COMPLETED", config)
+        expected = ((JOB_ID, "1234", "COMPLETED", "owner/repo", 42,
+                     "runner-001", 22),)
+        self.assertEqual(state.pending_wakes(), expected)
         with self.assertRaises(runner.ValidationError):
-            state.enqueue_wake(JOB_ID, "1235", "COMPLETED")
+            state.enqueue_wake(JOB_ID, "1235", "COMPLETED", config)
         state.close()
         restarted = runner.State(self.state)
-        self.assertEqual(restarted.pending_wakes(), ((JOB_ID, "1234", "COMPLETED"),))
+        self.assertEqual(restarted.pending_wakes(), expected)
         restarted.mark_wake_delivered(JOB_ID)
         self.assertEqual(restarted.pending_wakes(), ())
         with self.assertRaises(runner.ValidationError):
@@ -450,11 +453,63 @@ class StateTests(RunnerTestCase):
         for values in (("bad", "123", "COMPLETED"), (JOB_ID, "0", "COMPLETED"),
                        (JOB_ID, "123", "RUNNING")):
             with self.subTest(values=values), self.assertRaises(runner.ValidationError):
-                state.enqueue_wake(*values)
+                state.enqueue_wake(*values, self.config)
         for limit in (0, True, 101):
             with self.subTest(limit=limit), self.assertRaises(runner.ValidationError):
                 state.pending_wakes(limit)
         state.close()
+
+    def test_terminal_intent_survives_post_failure_and_restart(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, "hash", recovery)
+        state.set_status("1", "running")
+        class FailingClient:
+            def __init__(self): self.config = config
+            def post(self, body): raise runner.RunnerError("fixture")
+        self.assertFalse(runner.post_terminal_lifecycle(
+            FailingClient(), job, "COMPLETED", "bounded", state, "1", "succeeded"))
+        self.assertEqual(state.summary()["jobs"], {"running": 1})
+        self.assertEqual(len(state.pending_terminals()), 1)
+        state.close()
+
+        restarted = runner.State(self.state)
+        self.assertEqual(restarted.recover_incomplete(config), 1)
+        events = []
+        class RecoveryClient:
+            def __init__(self): self.config = config
+            def post(self, body): events.append(("terminal", body)); return "7001"
+            def post_wake(self, body): events.append(("wake", body)); return "7002"
+        self.assertTrue(runner.drain_terminal_outbox(RecoveryClient(), restarted, config))
+        self.assertEqual([kind for kind, _ in events], ["terminal", "wake"])
+        self.assertEqual(restarted.summary()["jobs"], {"succeeded": 1})
+        restarted.close()
+
+    def test_crashed_running_claim_gets_public_terminal_without_worker_replay(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        job = runner.Job.from_comment(self.comment(), config)
+        recovery = runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+        state = runner.State(self.state)
+        state.claim("1", JOB_ID, "hash", recovery)
+        state.set_status("1", "running")
+        state.close()
+
+        restarted = runner.State(self.state)
+        self.assertEqual(restarted.recover_incomplete(config), 1)
+        events = []
+        class RecoveryClient:
+            def __init__(self): self.config = config
+            def post(self, body): events.append(body); return "8001"
+            def post_wake(self, body): events.append(body); return "8002"
+        self.assertTrue(runner.drain_terminal_outbox(RecoveryClient(), restarted, config))
+        self.assertIn("COMMANDER_RUNNER_V1 FAILED", events[0])
+        self.assertIn("ambiguous execution recovered after restart", events[0])
+        self.assertEqual(restarted.summary()["jobs"], {"blocked": 1})
+        restarted.close()
 
 class GitHubAndLaunchAgentTests(RunnerTestCase):
     def test_github_client_cannot_escape_queue_issue(self):
@@ -536,13 +591,16 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         config = runner.dataclasses.replace(self.config, wake_pull_request=22)
         job = runner.Job.from_comment(self.comment(), config)
         state = runner.State(self.state)
+        state.claim("1", JOB_ID, "hash", runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart"))
+        state.set_status("1", "running")
         events = []
         class FixtureClient:
             def __init__(self): self.config = config
             def post(self, body): events.append(("terminal", body)); return "7001"
             def post_wake(self, body): events.append(("wake", body)); return "7002"
         self.assertTrue(runner.post_terminal_lifecycle(
-            FixtureClient(), job, "COMPLETED", "bounded evidence", state))
+            FixtureClient(), job, "COMPLETED", "bounded evidence", state, "1", "succeeded"))
         self.assertEqual([kind for kind, _ in events], ["terminal", "wake"])
         wake = events[1][1]
         self.assertEqual(wake, (
@@ -558,16 +616,20 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         config = runner.dataclasses.replace(self.config, wake_pull_request=22)
         job = runner.Job.from_comment(self.comment(), config)
         state = runner.State(self.state)
+        state.claim("1", JOB_ID, "hash", runner.lifecycle(
+            job, "FAILED", "runner stop condition: ambiguous execution recovered after restart"))
+        state.set_status("1", "running")
         class FailingClient:
             def __init__(self): self.config = config; self.terminals = 0; self.wakes = 0
             def post(self, body): self.terminals += 1; return "8001"
             def post_wake(self, body): self.wakes += 1; raise runner.RunnerError("fixture")
         first = FailingClient()
         self.assertFalse(runner.post_terminal_lifecycle(
-            first, job, "FAILED", "bounded", state))
+            first, job, "FAILED", "bounded", state, "1", "blocked"))
         self.assertEqual(first.terminals, 1)
         self.assertEqual(first.wakes, 1)
-        self.assertEqual(state.pending_wakes(), ((JOB_ID, "8001", "FAILED"),))
+        self.assertEqual(state.pending_wakes(), (
+            (JOB_ID, "8001", "FAILED", "owner/repo", 42, "runner-001", 22),))
         class RecoveryClient:
             def __init__(self): self.config = config; self.wakes = 0
             def post_wake(self, body): self.wakes += 1; return "8002"
@@ -582,7 +644,7 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
     def test_pending_wake_blocks_new_claims(self):
         config = runner.dataclasses.replace(self.config, wake_pull_request=22)
         state = runner.State(self.state)
-        state.enqueue_wake(JOB_ID, "9001", "FAILED")
+        state.enqueue_wake(JOB_ID, "9001", "FAILED", config)
         state.close()
         class FixtureClient:
             def __init__(self, supplied): self.config = supplied
@@ -591,6 +653,18 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
             def comments(self, page): raise AssertionError("must not scan or claim while wake is pending")
         with mock.patch.object(runner, "GitHubClient", FixtureClient):
             self.assertEqual(runner.run_once(config), "WAKE_PENDING")
+
+    def test_pending_wake_identity_cannot_follow_changed_config(self):
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        state = runner.State(self.state)
+        state.enqueue_wake(JOB_ID, "9001", "FAILED", config)
+        changed = runner.dataclasses.replace(config, wake_pull_request=23)
+        class FixtureClient:
+            def __init__(self): self.config = changed
+            def post_wake(self, body): raise AssertionError("mismatch must block before POST")
+        with self.assertRaises(runner.RunnerError):
+            runner.drain_wake_outbox(FixtureClient(), state, changed)
+        state.close()
     def test_incremental_cursor_finds_latest_job_after_large_history(self):
         class FixtureClient:
             outer = None
