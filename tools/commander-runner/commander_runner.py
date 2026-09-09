@@ -70,8 +70,52 @@ ERROR_CATEGORIES = frozenset({
     "OUTPUT_LIMIT", "OUTPUT_VALIDATION", "PERMISSION", "UNAVAILABLE", "WORKTREE_DIRTY", "UNKNOWN",
 })
 SAFE_FAILOVER_CATEGORIES = frozenset({"AUTH", "RATE_LIMIT", "QUOTA", "MODEL", "UNAVAILABLE"})
+
+# Stop-condition taxonomy.  Only SAFETY_STOP and HUMAN_APPROVAL_REQUIRED are
+# fail-closed conditions; the rest are ordinary engineering outcomes that may be
+# recovered locally or retried under a bounded budget.
+STOP_CLASSES = frozenset({
+    "SAFETY_STOP", "CODE_FAILURE", "TRANSIENT_FAILURE", "PROTOCOL_FAILURE",
+    "HUMAN_APPROVAL_REQUIRED",
+})
+ERROR_CATEGORY_STOP_CLASS = {
+    # Permission and boundary problems are never retried automatically.
+    "PERMISSION": "SAFETY_STOP",
+    "WORKTREE_DIRTY": "SAFETY_STOP",
+    # Provider-side availability problems: retry or fail over.
+    "AUTH": "TRANSIENT_FAILURE",
+    "RATE_LIMIT": "TRANSIENT_FAILURE",
+    "QUOTA": "TRANSIENT_FAILURE",
+    "MODEL": "TRANSIENT_FAILURE",
+    "UNAVAILABLE": "TRANSIENT_FAILURE",
+    "TIMEOUT": "TRANSIENT_FAILURE",
+    # The provider ran but we could not parse what it produced.  Recover from
+    # persisted raw output first; never re-spend quota before trying that.
+    "OUTPUT_VALIDATION": "PROTOCOL_FAILURE",
+    "OUTPUT_LIMIT": "PROTOCOL_FAILURE",
+    # The provider ran and reported a genuine failure of the work itself.
+    "RUNTIME": "CODE_FAILURE",
+    "UNKNOWN": "CODE_FAILURE",
+}
+RETRYABLE_STOP_CLASSES = frozenset({"TRANSIENT_FAILURE", "PROTOCOL_FAILURE"})
+MAX_ATTEMPTS_CEILING = 5
+DEFAULT_MAX_ATTEMPTS = 3
+RETRY_BACKOFF_BASE_SECONDS = 2
+RETRY_BACKOFF_CAP_SECONDS = 60
+
 MAX_TIMEOUT_SECONDS = 3_600
-MAX_OUTPUT_BYTES = 65_536
+# Raised from 65_536: that cap silently truncated long review runs.  The
+# authoritative Issue record stays bounded through `redact()` plus an artifact
+# digest, so a larger local capture costs nothing externally.
+MAX_OUTPUT_BYTES = 1_048_576
+# Structured-output bounds govern what a provider may return, not what is
+# posted to GitHub.  Long reports become a local artifact; the Issue receives a
+# bounded excerpt and the artifact's sha256.
+MAX_SUMMARY_CHARS = 20_000
+MAX_EVIDENCE_ITEMS = 200
+MAX_EVIDENCE_ITEM_CHARS = 4_000
+MAX_ISSUE_EVIDENCE_CHARS = 3_000
+MAX_ARTIFACT_BYTES = 4_000_000
 MAX_STAGED_SNAPSHOT_BYTES = 2_000_000
 MAX_QUEUE_PAGE_BYTES = 2_000_000
 QUEUE_PAGE_SIZE = 20
@@ -88,7 +132,19 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$")
 GITHUB_LOGIN_RE = re.compile(
     r"(?=.{1,39}\Z)(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\Z"
 )
+# Retained for OWNER-SUPPLIED CONFIG ONLY (operation argv and descriptions),
+# where a shell-looking fragment signals a misconfigured registry entry.
+#
+# It is deliberately NOT applied to Commander-supplied job text any more.  Job
+# text never reaches a shell: every provider is launched through
+# `subprocess.Popen(argv, shell=False)` with the prompt as one inert argv
+# element.  Scanning it for `;`, `|`, `&&` therefore protected nothing while
+# silently rejecting ordinary English and JSON punctuation — the single largest
+# source of false BLOCKED outcomes in this control plane.  Job text is now
+# validated for control characters and length, which are the properties that
+# actually matter for argv safety and for GitHub round-tripping.
 SHELL_FRAGMENT_RE = re.compile(r"(?:\$\(|`|&&|\|\||;|(?:^|\s)[|<>](?:\s|$))")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 HIGH_RISK_RE = re.compile(
     r"(?i)(?:BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|"
     r"(?:ghp|github_pat|xox[baprs]|sk-[A-Za-z0-9]|AKIA)[A-Za-z0-9_./=-]{12,}|"
@@ -123,6 +179,15 @@ class OperationDefinition:
     max_output_bytes: int
     require_clean_worktree: bool
     description: str
+    # Owner-approved branches whose CURRENT head this operation may run against.
+    #
+    # Pinning an operation to a literal SHA creates a self-reference deadlock:
+    # any commit that fixes the code changes the head, which invalidates the
+    # pin, which requires an owner config edit before the fix can be tested.
+    # Naming a branch keeps the authorization owner-controlled while letting the
+    # branch advance; the head is resolved from the local origin ref at run time
+    # and the resolved SHA is recorded immutably in the terminal record.
+    allowed_target_branches: frozenset[str] = dataclasses.field(default_factory=frozenset)
 
 @dataclasses.dataclass(frozen=True)
 class Config:
@@ -149,6 +214,11 @@ class Config:
     executable_paths: Mapping[str, str] = dataclasses.field(default_factory=dict)
     provider_failover: bool = False
     wake_pull_request: int | None = None
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    # Providers that may be re-used on PAID capacity after every free window is
+    # exhausted.  Inert unless `paid_overflow_authorized` is also true.
+    paid_overflow_providers: frozenset[str] = dataclasses.field(default_factory=frozenset)
+    paid_overflow_authorized: bool = False
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -165,10 +235,12 @@ class Config:
             "enabled_quality_gates", "quality_gates", "poll_seconds", "lease_seconds",
             "executable_paths", "provider_failover", "delivery_path_allowlists",
             "enabled_operations", "operation_definitions", "wake_pull_request",
+            "max_attempts", "paid_overflow_providers", "paid_overflow_authorized",
         }
         required = expected - {
             "delivery_path_allowlists", "enabled_operations", "operation_definitions",
-            "wake_pull_request",
+            "wake_pull_request", "max_attempts", "paid_overflow_providers",
+            "paid_overflow_authorized",
         }
         unknown = set(raw) - expected
         missing = required - set(raw)
@@ -204,6 +276,13 @@ class Config:
                 raise ValidationError("provider executable path must be absolute")
         if not isinstance(raw["provider_failover"], bool):
             raise ValidationError("provider_failover must be a boolean")
+        paid_overflow_authorized = raw.get("paid_overflow_authorized", False)
+        if not isinstance(paid_overflow_authorized, bool):
+            raise ValidationError("paid_overflow_authorized must be a boolean")
+        paid_overflow_providers = validate_enabled(
+            raw.get("paid_overflow_providers", []), WORKERS, "paid_overflow_providers")
+        if paid_overflow_authorized and not paid_overflow_providers:
+            raise ValidationError("paid overflow authorization requires at least one provider")
         if (not isinstance(raw["operational_executables"], dict)
                 or set(raw["operational_executables"]) != {"gh", "git", "python"}):
             raise ValidationError("operational_executables must contain gh, git, and python")
@@ -238,6 +317,10 @@ class Config:
             executable_paths={str(k): str(absolute_path(v)) for k, v in raw["executable_paths"].items()},
             provider_failover=raw["provider_failover"],
             wake_pull_request=wake_pull_request,
+            max_attempts=bounded_int(raw.get("max_attempts", DEFAULT_MAX_ATTEMPTS),
+                                     1, MAX_ATTEMPTS_CEILING, "max_attempts"),
+            paid_overflow_providers=paid_overflow_providers,
+            paid_overflow_authorized=paid_overflow_authorized,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -322,15 +405,11 @@ class Job:
             if not config.delivery_path_allowlists.get(data["quality_gate"]):
                 raise ValidationError("repo_delivery requires a non-empty owner path allowlist")
         for key in ("assigned", "expected_evidence"):
-            if not isinstance(data[key], str) or not data[key].strip() or len(data[key]) > 512:
-                raise ValidationError(f"{key} must be a bounded non-empty string")
-        if not isinstance(data["prompt"], str) or not data["prompt"].strip() or len(data["prompt"]) > MAX_PROMPT_CHARS:
-            raise ValidationError("prompt must be a bounded non-empty string")
-        text_fields = [data[key] for key in ("assigned", "expected_evidence", "prompt")]
+            validate_job_text(data[key], key, max_chars=512, allow_newlines=False)
+        validate_job_text(data["prompt"], "prompt", max_chars=MAX_PROMPT_CHARS)
         if approval is not None:
-            text_fields.append(approval)
-        if any(SHELL_FRAGMENT_RE.search(value) for value in text_fields):
-            raise ValidationError("job text contains a shell fragment")
+            approval = validate_job_text(approval, "human_approval_ref", max_chars=512,
+                                         allow_newlines=False)
         timeout = bounded_int(data["timeout_seconds"], 1, MAX_TIMEOUT_SECONDS, "timeout_seconds")
         cap = bounded_int(data["output_limit_bytes"], 1, MAX_OUTPUT_BYTES, "output_limit_bytes")
         values = {k: data.get(k) for k in cls.__dataclass_fields__}
@@ -384,23 +463,46 @@ class OperationJob:
         if not isinstance(operation_id, str) or operation_id not in config.enabled_operations:
             raise ValidationError("operation is unknown or disabled")
         definition = config.operation_definitions.get(operation_id)
-        if definition is None or data["target_sha"] not in definition.allowed_target_shas:
+        if definition is None:
+            raise ValidationError("operation target SHA is not owner-approved")
+        if (data["target_sha"] not in definition.allowed_target_shas
+                and not definition.allowed_target_branches):
+            # With no branch binding configured the SHA allowlist is the only
+            # authorization, so an unlisted SHA is rejected at parse time.
+            # Branch-bound operations are resolved against git in
+            # `resolve_operation_binding` once the repository is available.
             raise ValidationError("operation target SHA is not owner-approved")
         timeout = bounded_int(data["timeout_seconds"], 1, definition.max_timeout_seconds,
                               "timeout_seconds")
         cap = bounded_int(data["output_limit_bytes"], 1, definition.max_output_bytes,
                           "output_limit_bytes")
         for key in ("expected_evidence", "human_approval_ref"):
-            value = data[key]
-            if (not isinstance(value, str) or not value.strip() or len(value) > 512
-                    or SHELL_FRAGMENT_RE.search(value)):
-                raise ValidationError(f"{key} must be bounded inert audit text")
+            validate_job_text(data[key], key, max_chars=512, allow_newlines=False)
         values = {key: data[key] for key in cls.__dataclass_fields__}
         values["timeout_seconds"] = timeout
         values["output_limit_bytes"] = cap
         values["expected_evidence"] = data["expected_evidence"].strip()
         values["human_approval_ref"] = data["human_approval_ref"].strip()
         return cls(**values)
+
+def validate_job_text(value: Any, name: str, *, max_chars: int,
+                      allow_newlines: bool = True) -> str:
+    """Validate Commander-supplied text destined for one inert argv element.
+
+    Control characters are rejected because they corrupt argv, GitHub comment
+    round-tripping and the audit record.  Ordinary punctuation — semicolons,
+    pipes, ampersands, backticks — is explicitly permitted: no shell is ever
+    involved, so treating it as dangerous only produced false rejections.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{name} must be a bounded non-empty string")
+    if len(value) > max_chars:
+        raise ValidationError(f"{name} exceeds {max_chars} characters")
+    if CONTROL_CHAR_RE.search(value):
+        raise ValidationError(f"{name} contains control characters")
+    if not allow_newlines and ("\n" in value or "\r" in value):
+        raise ValidationError(f"{name} must be a single line")
+    return value.strip()
 
 def bounded_int(value: Any, low: int, high: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
@@ -475,8 +577,9 @@ def validate_operation_definitions(value: Any, operational: Mapping[str, str],
         "argv", "mode", "allowed_target_shas", "max_timeout_seconds", "max_output_bytes",
         "require_clean_worktree", "description",
     }
+    optional = {"allowed_target_branches"}
     for operation_id, raw in value.items():
-        if not isinstance(raw, dict) or set(raw) != fields:
+        if not isinstance(raw, dict) or not fields <= set(raw) or set(raw) - (fields | optional):
             raise ValidationError("operation definition has unknown or missing fields")
         argv = raw["argv"]
         if (not isinstance(argv, list) or len(argv) != 4
@@ -495,8 +598,12 @@ def validate_operation_definitions(value: Any, operational: Mapping[str, str],
         if (not isinstance(shas, list) or len(shas) != len(set(shas))
                 or any(not isinstance(sha, str) or not SHA_RE.fullmatch(sha) for sha in shas)):
             raise ValidationError("operation target SHA allowlist is invalid")
-        if operation_id == "ops001_mysql_probe" and frozenset(shas) != {OPS001_TARGET_SHA}:
+        branches = validate_operation_branches(raw.get("allowed_target_branches", []))
+        if (operation_id == "ops001_mysql_probe" and not branches
+                and frozenset(shas) != {OPS001_TARGET_SHA}):
             raise ValidationError("OPS-001 probe target SHA must be exact")
+        if not shas and not branches:
+            raise ValidationError("operation must allow at least one SHA or branch")
         if raw["require_clean_worktree"] is not True:
             raise ValidationError("read-only operation must require a clean worktree")
         description = raw["description"]
@@ -511,8 +618,31 @@ def validate_operation_definitions(value: Any, operational: Mapping[str, str],
             max_output_bytes=bounded_int(raw["max_output_bytes"], 1, MAX_OUTPUT_BYTES,
                                          "operation max_output_bytes"),
             require_clean_worktree=True, description=description.strip(),
+            allowed_target_branches=branches,
         )
     return result
+
+OPERATION_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
+
+def validate_operation_branches(value: Any) -> frozenset[str]:
+    """Owner-approved branch names an operation may bind to.
+
+    Names are validated tightly because they become a `refs/remotes/origin/...`
+    lookup: no `..`, no leading dash, no wildcards, no ref-escaping punctuation.
+    Protected branches are excluded so a branch binding can never be pointed at
+    production history.
+    """
+    if not isinstance(value, list) or len(value) != len(set(value)) or len(value) > 20:
+        raise ValidationError("allowed_target_branches must be a bounded unique list")
+    checked: set[str] = set()
+    for branch in value:
+        if (not isinstance(branch, str) or not OPERATION_BRANCH_RE.fullmatch(branch)
+                or len(branch) > 200 or ".." in branch or branch.endswith(".lock")):
+            raise ValidationError("allowed_target_branches contains an invalid branch name")
+        if branch in {"main", "dev", "master", "HEAD"}:
+            raise ValidationError("operations may not bind to a protected branch")
+        checked.add(branch)
+    return frozenset(checked)
 
 def validate_delivery_path_allowlists(value: Any,
                                       quality_gate_ids: frozenset[str]) -> dict[str, frozenset[str]]:
@@ -601,10 +731,43 @@ def ensure_safe_post(text: str) -> str:
         raise UnsafeOutputError("high-risk output remains after redaction")
     return cleaned
 
-def store_raw_output(state_dir: Path, job_id: str, text: str, retention_seconds: int = 7 * 24 * 3600) -> Path:
-    """Keep capped worker output locally with owner-only permissions and short retention."""
+def ensure_safe_post_unbounded(text: str) -> str:
+    """Same redaction contract as `ensure_safe_post`, without the 4 KB clamp.
+
+    Used for local artifacts, which must keep the whole report.  The secret
+    scan and the fail-closed behaviour on residual high-risk material are
+    identical; only the length limit differs.
+    """
+    cleaned = redact(text, limit=MAX_ARTIFACT_BYTES)
+    if HIGH_RISK_RE.search(cleaned):
+        raise UnsafeOutputError("high-risk output remains after redaction")
+    return cleaned
+
+def attempt_id_for(job_id: str, ordinal: int) -> str:
+    """Stable per-attempt identity.
+
+    Retries never reuse the job UUID for their execution record: each attempt
+    gets its own derived UUID so the audit chain keeps every try, while the job
+    UUID itself stays exactly-once for terminal purposes.
+    """
+    if not valid_uuid(job_id):
+        raise ValidationError("invalid job ID for attempt identity")
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= MAX_ATTEMPTS_CEILING:
+        raise ValidationError("attempt ordinal is out of range")
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"commander-attempt/{job_id}/{ordinal}"))
+
+def store_raw_output(state_dir: Path, job_id: str, text: str,
+                     retention_seconds: int = 7 * 24 * 3600, ordinal: int = 1) -> Path:
+    """Persist raw provider output BEFORE any structured parsing.
+
+    This is the recovery substrate: if normalization later fails, the bytes the
+    provider actually produced are already on disk, so the result can be
+    re-normalized locally without spending quota again.
+    """
     if not valid_uuid(job_id):
         raise ValidationError("invalid job ID for raw output")
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= MAX_ATTEMPTS_CEILING:
+        raise ValidationError("attempt ordinal is out of range")
     directory = state_dir / "raw-output"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
@@ -612,12 +775,97 @@ def store_raw_output(state_dir: Path, job_id: str, text: str, retention_seconds:
     for entry in directory.glob("*.log"):
         if not entry.is_symlink() and entry.is_file() and entry.stat().st_mtime < cutoff:
             entry.unlink()
-    target = directory / f"{job_id}.log"
+    target = directory / f"{job_id}.attempt-{ordinal}.log"
     if target.is_symlink():
         raise ValidationError("raw output target may not be a symlink")
     target.write_text(text, encoding="utf-8", errors="replace")
     os.chmod(target, 0o600)
     return target
+
+def raw_output_paths(state_dir: Path, job_id: str) -> tuple[Path, ...]:
+    """Every persisted attempt for a job, newest ordinal last.
+
+    The legacy single-file layout (`<job>.log`, written before attempts were
+    tracked) is still discovered so historical runs remain recoverable.
+    """
+    if not valid_uuid(job_id):
+        raise ValidationError("invalid job ID for raw output")
+    directory = state_dir / "raw-output"
+    found: list[tuple[int, Path]] = []
+    legacy = directory / f"{job_id}.log"
+    if legacy.is_file() and not legacy.is_symlink():
+        found.append((0, legacy))
+    for ordinal in range(1, MAX_ATTEMPTS_CEILING + 1):
+        candidate = directory / f"{job_id}.attempt-{ordinal}.log"
+        if candidate.is_file() and not candidate.is_symlink():
+            found.append((ordinal, candidate))
+    return tuple(path for _, path in sorted(found))
+
+def store_artifact(state_dir: Path, job_id: str, ordinal: int,
+                   output: "NormalizedOutput") -> tuple[Path, str]:
+    """Write the full normalized report locally and return its path and digest.
+
+    GitHub comments are size-limited and are the audit index, not the report
+    store.  The Issue gets a bounded excerpt plus this digest; the full text
+    stays on the Runner host.
+    """
+    if not valid_uuid(job_id):
+        raise ValidationError("invalid job ID for artifact")
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= MAX_ATTEMPTS_CEILING:
+        raise ValidationError("attempt ordinal is out of range")
+    directory = state_dir / "artifacts" / job_id
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for parent in (state_dir / "artifacts", directory):
+        os.chmod(parent, 0o700)
+    body = "\n".join([
+        f"# Commander job {job_id} attempt {ordinal}",
+        f"attempt_id: {attempt_id_for(job_id, ordinal)}",
+        f"status: {output.status}",
+        f"usage: {output.usage or 'unknown'}",
+        "", "## Summary", "", output.summary, "", "## Evidence", "",
+        *(f"{index}. {item}" for index, item in enumerate(output.evidence, start=1)),
+        "",
+    ])
+    body = ensure_safe_post_unbounded(body)
+    if len(body.encode("utf-8")) > MAX_ARTIFACT_BYTES:
+        raise ValidationError("artifact exceeds the bounded local size")
+    target = directory / f"attempt-{ordinal}.md"
+    if target.is_symlink():
+        raise ValidationError("artifact target may not be a symlink")
+    target.write_text(body, encoding="utf-8")
+    os.chmod(target, 0o600)
+    return target, hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+def renormalize_job(state_dir: Path, job_id: str) -> dict[str, Any]:
+    """Recover a job's structured result from persisted raw output.
+
+    No provider is invoked.  This is the answer to an OUTPUT_VALIDATION failure
+    on an expensive run: the model already did the work and the bytes are on
+    disk, so parsing is retried locally and for free.
+    """
+    paths = raw_output_paths(state_dir, job_id)
+    if not paths:
+        raise RunnerError("no persisted raw output for this job")
+    errors: list[str] = []
+    for ordinal, path in enumerate(reversed(paths), start=1):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            errors.append(f"{path.name}: unreadable ({exc.__class__.__name__})")
+            continue
+        try:
+            output = normalize_provider_output(text)
+        except ValidationError as exc:
+            errors.append(f"{path.name}: {exc}")
+            continue
+        artifact, digest = store_artifact(state_dir, job_id, 1, output)
+        return {
+            "job_id": job_id, "recovered_from": path.name, "status": output.status,
+            "summary_chars": len(output.summary), "evidence_items": len(output.evidence),
+            "usage": output.usage, "artifact": str(artifact), "artifact_sha256": digest,
+            "provider_calls": 0,
+        }
+    raise RunnerError("raw output could not be re-normalized: " + "; ".join(errors[:5]))
 
 class State:
     """SQLite state; INSERT's unique constraints make job claims atomic."""
@@ -641,6 +889,10 @@ class State:
           expires_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS metadata (
           key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS attempts (
+          attempt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+          worker TEXT, model TEXT, error_category TEXT, stop_class TEXT,
+          created_at INTEGER NOT NULL, UNIQUE(job_id, ordinal));
         CREATE TABLE IF NOT EXISTS wake_outbox (
           job_id TEXT PRIMARY KEY, terminal_comment_id TEXT NOT NULL,
           terminal_state TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -665,6 +917,32 @@ class State:
                 self.db.execute(f"ALTER TABLE wake_outbox ADD COLUMN {name} {declaration}")
     def close(self) -> None:
         self.db.close()
+    def record_attempt(self, job_id: str, ordinal: int, worker: str | None, model: str | None,
+                       error_category: str | None, stop_class: str | None) -> str:
+        """Append one execution attempt to the audit chain.
+
+        A retry never reuses the job UUID as its execution identity: each try
+        gets its own derived attempt_id, so the terminal record stays
+        exactly-once while the full history of tries remains inspectable.
+        """
+        identity = attempt_id_for(job_id, ordinal)
+        if error_category is not None and error_category not in ERROR_CATEGORIES:
+            raise ValidationError("invalid attempt error category")
+        if stop_class is not None and stop_class not in STOP_CLASSES:
+            raise ValidationError("invalid attempt stop class")
+        self.db.execute(
+            "INSERT INTO attempts(attempt_id,job_id,ordinal,worker,model,error_category,"
+            "stop_class,created_at) VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(attempt_id) DO NOTHING",
+            (identity, job_id, ordinal, worker, model, error_category, stop_class,
+             int(time.time())))
+        return identity
+    def attempts_for(self, job_id: str) -> tuple[tuple[Any, ...], ...]:
+        if not valid_uuid(job_id):
+            raise ValidationError("invalid job ID for attempt lookup")
+        return tuple(tuple(row) for row in self.db.execute(
+            "SELECT attempt_id,ordinal,worker,model,error_category,stop_class FROM attempts "
+            "WHERE job_id=? ORDER BY ordinal", (job_id,)))
     def claim(self, comment_id: str, job_id: str, content_hash_value: str,
               recovery_body: str | None = None) -> bool:
         now = int(time.time())
@@ -1053,9 +1331,11 @@ def normalize_provider_output(text: str) -> NormalizedOutput:
         usage = value.get("usage")
         if status not in {"ok", "blocked"} or not isinstance(summary, str) or not summary.strip():
             continue
-        if len(summary) > 2000 or not isinstance(evidence, list) or len(evidence) > 50:
+        if (len(summary) > MAX_SUMMARY_CHARS or not isinstance(evidence, list)
+                or len(evidence) > MAX_EVIDENCE_ITEMS):
             continue
-        if any(not isinstance(item, str) or not item.strip() or len(item) > 1000 for item in evidence):
+        if any(not isinstance(item, str) or not item.strip()
+               or len(item) > MAX_EVIDENCE_ITEM_CHARS for item in evidence):
             continue
         if usage is not None and (not isinstance(usage, str) or len(usage) > 200):
             continue
@@ -1092,7 +1372,10 @@ def execute_operation(job: OperationJob, config: Config, worktree: Path) -> Oper
     definition = config.operation_definitions.get(job.operation_id)
     if job.operation_id not in config.enabled_operations or definition is None:
         raise RunnerError("operation is no longer enabled")
-    if job.target_sha not in definition.allowed_target_shas or definition.mode != "read_only":
+    if definition.mode != "read_only":
+        raise RunnerError("operation authorization changed")
+    if (job.target_sha not in definition.allowed_target_shas
+            and not definition.allowed_target_branches):
         raise RunnerError("operation authorization changed")
     if not worktree_is_clean(config, worktree):
         raise RunnerError("operation worktree is not clean before execution")
@@ -1160,15 +1443,42 @@ class QuotaLedger:
     def balance(self, worker: str) -> float | None:
         item = self.data.get(worker, {})
         return item.get("balance") if item.get("reset_key") == self.reset_key(worker) else None
+    def is_exhausted(self, worker: str) -> bool:
+        """True only while the CURRENT quota window is known-exhausted.
+
+        Exhaustion is recorded against the provider's reset key, so the flag
+        clears itself when the window rolls over.  An unknown balance is never
+        treated as exhausted.
+        """
+        item = self.data.get(worker, {})
+        return bool(item.get("exhausted")) and item.get("reset_key") == self.reset_key(worker)
+    def mark_exhausted(self, worker: str) -> None:
+        item = dict(self.data.get(worker, {}))
+        item.update({"reset_key": self.reset_key(worker), "exhausted": True})
+        self.data[worker] = item
+        self._write()
     def record(self, worker: str, usage: str | None, balance: float | None = None) -> None:
-        self.data[worker] = {"reset_key": self.reset_key(worker), "usage": usage, "balance": balance}
+        self.data[worker] = {"reset_key": self.reset_key(worker), "usage": usage,
+                             "balance": balance, "exhausted": False}
+        self._write()
+    def _write(self) -> None:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         payload = json.dumps(self.data, sort_keys=True)
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle: handle.write(payload)
 
 def route_candidates(job: Job, allow_failover: bool = True,
-                     enabled: frozenset[str] = WORKERS) -> list[tuple[str, str]]:
+                     enabled: frozenset[str] = WORKERS,
+                     ledger: "QuotaLedger | None" = None,
+                     paid_overflow: frozenset[str] = frozenset(),
+                     paid_overflow_authorized: bool = False) -> list[tuple[str, str]]:
+    """Order providers to try, cheapest authorized capacity first.
+
+    Free quota is spent before paid quota.  A provider whose free window is
+    known-exhausted drops out of the ordinary rotation; a provider listed in
+    `paid_overflow` is appended as a last resort ONLY when every free-quota
+    candidate is exhausted AND the owner has authorized paid overflow.
+    """
     order = {
         "kiro": ("kiro", "copilot", "claude"),
         "copilot": ("copilot", "kiro", "claude"),
@@ -1178,6 +1488,16 @@ def route_candidates(job: Job, allow_failover: bool = True,
         order = order[:1]
     order = tuple(worker for worker in order
                   if worker in enabled and job.profile in PROVIDER_PROFILE_CAPABILITIES[worker])
+    if ledger is not None:
+        free = tuple(worker for worker in order if not ledger.is_exhausted(worker))
+        if free:
+            order = free
+        elif paid_overflow_authorized:
+            # Every free window is spent; fall back to explicitly authorized
+            # paid capacity, preserving the configured preference order.
+            order = tuple(worker for worker in order if worker in paid_overflow)
+        else:
+            order = ()
     return [(worker, job.model if worker == job.worker else PROVIDER_DEFAULT_MODEL[worker]) for worker in order]
 
 def with_provider(job: Job, worker: str, model: str) -> Job:
@@ -1275,48 +1595,99 @@ def failover_allowed_after(attempt: ProviderAttempt, job: Job, config: Config, w
         return True
     return worktree_is_clean(config, worktree)
 
-def execute_with_failover(job: Job, config: Config, worktree: Path) -> tuple[ProviderAttempt, list[ProviderAttempt]]:
+def stop_class_for(error_category: str | None) -> str | None:
+    """Map a provider error category onto the coarse stop taxonomy."""
+    if error_category is None:
+        return None
+    return ERROR_CATEGORY_STOP_CLASS.get(error_category, "CODE_FAILURE")
+
+def retry_backoff_seconds(ordinal: int) -> int:
+    """Exponential backoff, bounded, for TRANSIENT_FAILURE retries."""
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 1:
+        raise ValidationError("attempt ordinal is out of range")
+    return min(RETRY_BACKOFF_CAP_SECONDS, RETRY_BACKOFF_BASE_SECONDS ** ordinal)
+
+def execute_with_failover(job: Job, config: Config, worktree: Path,
+                          sleeper: Any = time.sleep) -> tuple[ProviderAttempt, list[ProviderAttempt]]:
+    """Run the job, persisting raw output first and recovering where it is free.
+
+    Ordering matters: every provider invocation's bytes are written to disk
+    BEFORE any structured parsing, so a parse failure can never destroy work
+    that was already paid for.  An OUTPUT_VALIDATION result is therefore a
+    local recovery problem, not a reason to spend the quota again.
+    """
     attempts: list[ProviderAttempt] = []
     ledger = QuotaLedger(config.state_dir)
-    candidates = route_candidates(job, config.provider_failover, config.enabled_providers)
-    if not candidates: raise RunnerError("no enabled provider is available for the job")
+    candidates = route_candidates(
+        job, config.provider_failover, config.enabled_providers, ledger,
+        config.paid_overflow_providers, config.paid_overflow_authorized)
+    if not candidates:
+        raise RunnerError("no enabled provider has authorized remaining capacity for the job")
+
+    ordinal = 0
+    budget = max(1, min(config.max_attempts, MAX_ATTEMPTS_CEILING))
+
+    def record(worker: str, model: str, result: Result | None,
+               output: NormalizedOutput | None, category: str | None) -> ProviderAttempt:
+        attempt = ProviderAttempt(worker, model, result, output, category)
+        attempts.append(attempt)
+        return attempt
+
     for worker, model in candidates:
+        if ordinal >= budget:
+            break
+        ordinal += 1
         candidate = with_provider(job, worker, model)
         try:
             result = execute(adapter_argv(candidate, config.executable_paths), timeout=job.timeout_seconds,
                              cap=job.output_limit_bytes, cwd=worktree, env=safe_environment())
         except (OSError, RunnerError) as exc:
             category = classify_provider_error(None, exc)
-            attempt = ProviderAttempt(worker, model, None, None, category)
-            attempts.append(attempt)
-            if failover_allowed_after(attempt, job, config, worktree): continue
+            attempt = record(worker, model, None, None, category)
+            if failover_allowed_after(attempt, job, config, worktree):
+                sleeper(retry_backoff_seconds(ordinal))
+                continue
             if category in SAFE_FAILOVER_CATEGORIES and job.profile != "repo_read":
                 blocked = dataclasses.replace(attempt, error_category="WORKTREE_DIRTY")
                 attempts[-1] = blocked
                 return blocked, attempts
             return attempt, attempts
+
+        # Persist before parsing.  This is the whole recovery guarantee.
+        with contextlib.suppress(OSError, ValidationError):
+            store_raw_output(config.state_dir, job.job_id, result.output, ordinal=ordinal)
+
         if result.returncode or result.timed_out or result.overflow:
             category = classify_provider_error(result)
-            attempt = ProviderAttempt(worker, model, result, None, category)
-            attempts.append(attempt)
-            if failover_allowed_after(attempt, job, config, worktree): continue
+            if category == "QUOTA":
+                ledger.mark_exhausted(worker)
+            attempt = record(worker, model, result, None, category)
+            if failover_allowed_after(attempt, job, config, worktree):
+                sleeper(retry_backoff_seconds(ordinal))
+                continue
             if category in SAFE_FAILOVER_CATEGORIES and job.profile != "repo_read":
                 blocked = dataclasses.replace(attempt, error_category="WORKTREE_DIRTY")
                 attempts[-1] = blocked
                 return blocked, attempts
             return attempt, attempts
+
         try:
             normalized = normalize_provider_output(result.output)
         except ValidationError:
-            attempt = ProviderAttempt(worker, model, result, None, "OUTPUT_VALIDATION")
-            attempts.append(attempt)
+            # PROTOCOL_FAILURE.  The provider succeeded; only our parse failed.
+            # The bytes are already persisted, so the terminal record points at
+            # them and the operator can recover with `renormalize` for free.
+            # Never burn another provider call on a parse bug.
+            attempt = record(worker, model, result, None, "OUTPUT_VALIDATION")
             return attempt, attempts
+
         if normalized.usage is None:
             normalized = dataclasses.replace(normalized, usage=extract_visible_usage(result.output))
         ledger.record(worker, normalized.usage)
-        attempt = ProviderAttempt(worker, model, result, normalized, None)
-        attempts.append(attempt)
-        return attempt, attempts
+        return record(worker, model, result, normalized, None), attempts
+
+    if not attempts:
+        raise RunnerError("no enabled provider has authorized remaining capacity for the job")
     return attempts[-1], attempts
 
 def git_checked(argv: Sequence[str], cwd: Path, *, executable: str, timeout: int = 60,
@@ -1341,7 +1712,43 @@ def verify_target(config: Config, job: Job | OperationJob) -> None:
     git_checked(["cat-file", "-e", f"{job.target_sha}^{{commit}}"], config.canonical_repo,
                 executable=git)
 
+def resolve_operation_binding(config: Config, job: OperationJob) -> str:
+    """Authorize an operation's target SHA and return how it was authorized.
+
+    Exact SHA allowlisting still wins outright.  Otherwise the SHA must equal
+    the CURRENT head of an owner-approved branch, fetched fresh from origin.
+    The branch is what the owner authorizes; the SHA is what actually ran, and
+    it is returned so the terminal record pins the exact commit.  This removes
+    the pin/edit/pin loop without widening what the owner approved.
+    """
+    definition = config.operation_definitions.get(job.operation_id)
+    if definition is None:
+        raise ValidationError("operation is unknown or disabled")
+    if job.target_sha in definition.allowed_target_shas:
+        return "exact_sha_allowlist"
+    if not definition.allowed_target_branches:
+        raise ValidationError("operation target SHA is not owner-approved")
+    git = config.operational_executables["git"]
+    for branch in sorted(definition.allowed_target_branches):
+        # `--` and the fixed refspec keep a branch name from being read as an
+        # option; the name itself was validated against OPERATION_BRANCH_RE.
+        try:
+            git_checked(["fetch", "--no-tags", "origin",
+                         f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                        config.canonical_repo, executable=git, timeout=120)
+            head = git_checked(["rev-parse", "--verify", "--end-of-options",
+                                f"refs/remotes/origin/{branch}^{{commit}}"],
+                               config.canonical_repo, executable=git)
+        except RunnerError:
+            continue
+        if SHA_RE.fullmatch(head) and head == job.target_sha:
+            return f"branch_head:{branch}"
+    raise ValidationError(
+        "operation target SHA is not the current head of an owner-approved branch")
+
 def prepare_worktree(config: Config, job: Job | OperationJob) -> Path:
+    if isinstance(job, OperationJob):
+        resolve_operation_binding(config, job)
     verify_target(config, job)
     path = checked_child(config.worktree_root, job.worktree_id, must_exist=True)
     if path.exists():
@@ -1549,6 +1956,49 @@ def lifecycle(job: Job | OperationJob, state: str, detail: str = "") -> str:
                 f"runner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
     return (f"COMMANDER_RUNNER_V1 {state}\njob={job.job_id}\nworker={job.worker}\nmodel={job.model}\n"
             f"profile={job.profile}\nsha={job.target_sha}\nrunner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
+
+@dataclasses.dataclass(frozen=True)
+class RejectedEnvelope:
+    job_id: str
+    runner_id: str
+    schema: str
+
+def envelope_for_rejection(body: str, config: Config) -> RejectedEnvelope | None:
+    """Identify a job we must explicitly REJECT rather than silently skip.
+
+    A comment only earns a terminal record when it is unambiguously addressed
+    to THIS runner, repository and queue and carries a usable job UUID.  Work
+    aimed at another runner, or too malformed to identify, is left untouched so
+    one runner can never consume another's queue or invent a job identity.
+
+    Everything else — unknown fields, bad enum values, oversized text, a
+    disabled profile — is a REJECTED terminal, not silence.  Silence was the
+    defect: the Commander could not tell "not seen yet" from "refused".
+    """
+    for pattern, schema in ((COMMENT_RE, SCHEMA), (OPERATION_COMMENT_RE, OPERATION_SCHEMA)):
+        match = pattern.fullmatch(body)
+        if not match:
+            continue
+        try:
+            data = strict_json_loads(match.group(1))
+        except (json.JSONDecodeError, ValidationError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        job_id = data.get("job_id")
+        if (not isinstance(job_id, str) or not valid_uuid(job_id)
+                or data.get("runner_id") != config.runner_id
+                or data.get("repository") != config.repository
+                or data.get("queue_issue") != config.queue_issue):
+            return None
+        return RejectedEnvelope(job_id=job_id, runner_id=config.runner_id, schema=schema)
+    return None
+
+def rejection_lifecycle(envelope: RejectedEnvelope, reason: str) -> str:
+    detail = ensure_safe_post(reason) if reason else "unspecified validation failure"
+    return (f"COMMANDER_RUNNER_V1 REJECTED\njob={envelope.job_id}\n"
+            f"schema={envelope.schema}\nrunner={envelope.runner_id}\n"
+            f"stop_class=PROTOCOL_FAILURE\nreason={detail}")
 
 def wake_lifecycle(repository: str, terminal_issue: int, runner_id: str,
                    job_id: str, terminal_comment_id: str, state: str) -> str:
@@ -1807,8 +2257,28 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                         job: Job | OperationJob = OperationJob.from_comment(body, config)
                     else:
                         job = Job.from_comment(body, config)
-                except ValidationError:
-                    continue
+                except ValidationError as exc:
+                    envelope = envelope_for_rejection(body, config)
+                    if envelope is None:
+                        continue
+                    if dry_run:
+                        return f"REJECTED {envelope.job_id}"
+                    rejection_digest = comment_hash(body)
+                    recovery = rejection_lifecycle(
+                        envelope, "runner restarted before the rejection was recorded")
+                    try:
+                        claimed = state.claim(comment_id, envelope.job_id,
+                                              rejection_digest, recovery)
+                    except ValidationError:
+                        continue
+                    if not claimed:
+                        continue
+                    state.queue_terminal(comment_id, envelope.job_id,
+                                         rejection_lifecycle(envelope, str(exc)),
+                                         "blocked", "REJECTED", config)
+                    delivered = drain_terminal_outbox(client, state, config)
+                    return (f"REJECTED {envelope.job_id}" if delivered
+                            else f"WAKE_PENDING {envelope.job_id}")
                 digest = comment_hash(body)
                 if dry_run:
                     verify_target(config, job)
@@ -1834,7 +2304,11 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                         operation_attempt = execute_operation(job, config, worktree)
                         result = operation_attempt.result
                         if result:
-                            store_raw_output(config.state_dir, job.job_id, result.output)
+                            with contextlib.suppress(OSError, ValidationError):
+                                store_raw_output(config.state_dir, job.job_id, result.output)
+                        state.record_attempt(
+                            job.job_id, 1, None, None, operation_attempt.error_category,
+                            stop_class_for(operation_attempt.error_category))
                         if operation_attempt.error_category == "TIMEOUT":
                             state_name, internal_state = "TIMED_OUT", "blocked"
                         elif operation_attempt.error_category:
@@ -1851,8 +2325,10 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                         duration = result.duration_seconds if result else 0.0
                         exit_code = result.returncode if result else -1
                         detail = (f"operation={job.operation_id}; mode=read_only; attempts=1; "
+                                  f"attempt_id={attempt_id_for(job.job_id, 1)}; "
+                                  f"stop_class={stop_class_for(operation_attempt.error_category) or 'NONE'}; "
                                   f"exit={exit_code}; duration={duration:.1f}s; "
-                                  f"{redact(evidence, 3000)}")
+                                  f"{redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)}")
                     else:
                         attempt, attempts = execute_with_failover(job, config, worktree)
                         result = attempt.result
@@ -1871,20 +2347,40 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                             elif job.profile == "repo_delivery":
                                 delivered_sha = deliver_worktree(config, job, worktree)
                             state_name, internal_state = "COMPLETED", "succeeded"
-                        if result:
-                            store_raw_output(config.state_dir, job.job_id, result.output)
+                        ordinal = max(1, len(attempts))
+                        for index, record in enumerate(attempts, start=1):
+                            state.record_attempt(
+                                job.job_id, index, record.worker, record.model,
+                                record.error_category, stop_class_for(record.error_category))
+                        artifact_note = ""
                         if attempt.output:
+                            # The full report is kept locally; the Issue carries
+                            # a bounded excerpt plus the artifact digest so the
+                            # record stays complete without being unbounded.
+                            with contextlib.suppress(OSError, ValidationError, UnsafeOutputError):
+                                artifact, digest = store_artifact(
+                                    config.state_dir, job.job_id, ordinal, attempt.output)
+                                artifact_note = (f"\nartifact={artifact.name}"
+                                                 f"\nartifact_sha256={digest}"
+                                                 f"\nsummary_chars={len(attempt.output.summary)}")
                             evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
                         else:
                             evidence = f"provider_error={attempt.error_category}"
-                        evidence = redact(evidence, 3000)
+                            if attempt.error_category in {"OUTPUT_VALIDATION", "OUTPUT_LIMIT"}:
+                                # Recoverable without spending provider quota.
+                                evidence += ("\nraw output persisted; recover locally with: "
+                                             f"commander_runner.py renormalize --job {job.job_id}")
+                        evidence = redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)
                         if delivered_sha:
                             evidence += f"\ndelivered_sha={delivered_sha}"
                         duration = result.duration_seconds if result else 0.0
                         exit_code = result.returncode if result else -1
+                        stop_class = stop_class_for(attempt.error_category)
                         detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
+                                  f"attempt_id={attempt_id_for(job.job_id, ordinal)}; "
+                                  f"stop_class={stop_class or 'NONE'}; "
                                   f"quality_gate={job.quality_gate}; "
-                                  f"exit={exit_code}; duration={duration:.1f}s; {evidence}")
+                                  f"exit={exit_code}; duration={duration:.1f}s; {evidence}{artifact_note}")
                 except RunnerError as exc:
                     state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
                 delivered = post_terminal_lifecycle(
@@ -1936,6 +2432,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     install = subs.add_parser("install"); install.add_argument("--confirm", action="store_true")
     subs.add_parser("doctor"); subs.add_parser("health"); subs.add_parser("status"); subs.add_parser("heartbeat")
     once = subs.add_parser("run-once"); once.add_argument("--dry-run", action="store_true")
+    recover = subs.add_parser(
+        "renormalize",
+        help="re-parse a job's persisted raw provider output locally; calls no provider")
+    recover.add_argument("--job", required=True, help="job UUID to recover")
     subs.add_parser("serve")
     subs.add_parser("start"); subs.add_parser("stop")
     uninstall = subs.add_parser("uninstall"); uninstall.add_argument("--confirm", action="store_true")
@@ -1950,6 +2450,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "heartbeat":
             state = State(config.state_dir); ok = state.acquire_lease(config.runner_id, config.lease_seconds); state.close(); print("LEASE_OK" if ok else "LEASE_HELD"); return 0 if ok else 2
         if args.command == "run-once": print(run_once(config, args.dry_run)); return 0
+        if args.command == "renormalize":
+            print(json.dumps(renormalize_job(config.state_dir, args.job), sort_keys=True))
+            return 0
         if args.command == "serve":
             delay = config.poll_seconds
             while True:

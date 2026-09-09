@@ -145,10 +145,16 @@ class OperationSchemaTests(OperationTestCase):
             {"repository": "other/repo"}, {"queue_issue": 41}, {"runner_id": "other"},
             {"target_sha": "main"}, {"worktree_id": "job-wrong"},
             {"timeout_seconds": 121}, {"output_limit_bytes": 8193},
-            {"expected_evidence": "$(unsafe)"}, {"human_approval_ref": "  "},
+            {"expected_evidence": "bad\x00null"}, {"human_approval_ref": "  "},
+            {"expected_evidence": "two\nlines"},
         ):
             with self.subTest(changes=changes), self.assertRaises(runner.ValidationError):
                 runner.OperationJob.from_comment(self.comment(**changes), self.config)
+        # Operation audit text is inert data, never a command: ordinary
+        # punctuation must survive so approval references stay readable.
+        accepted = runner.OperationJob.from_comment(
+            self.comment(expected_evidence="rows=0; tables=22 (loopback only)"), self.config)
+        self.assertEqual(accepted.expected_evidence, "rows=0; tables=22 (loopback only)")
         value = self.data()
         del value["human_approval_ref"]
         malformed = "COMMANDER_OPERATION_V1\n```json\n" + json.dumps(value) + "\n```"

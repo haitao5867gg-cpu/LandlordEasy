@@ -1,0 +1,82 @@
+# FRAMEWORK_PROGRESS.md
+
+Working branch: `infra/commander-kit-hardening`, based on `origin/infra/pr-event-wake-bridge` @ `b81833de52896a2206aab1a3a6dbcb526df8f00c`.
+Worktree: `/Users/haitao/LandLordEasy-kit`. Baseline offline suite: **101/101 pass**.
+
+Identity in use: `gh` active account `haitao5867` = **Executor**. Commander is `haitao5867gg-cpu`. Identity NOT switched.
+
+---
+
+## Phase A — Architecture audit (COMPLETE)
+
+### Confirmed data flow
+
+```
+Commander (haitao5867gg-cpu, web) --COMMANDER_JOB_V1 / COMMANDER_OPERATION_V1 comment--> Issue #17 (queue)
+    -> Mac mini Runner (launchd, serve loop, polls 60s, as Executor haitao5867)
+    -> claim (SQLite, atomic) -> isolated git worktree at exact target_sha
+    -> provider argv (kiro | copilot | claude) OR fixed operation argv
+    -> normalize output -> terminal comment on Issue #17
+    -> optional wake comment on PR #22 (wake_pull_request)
+    -> Commander reads Issue #17 for authoritative state
+```
+
+### Live runtime state (verified 2026-09-09)
+
+- Runner process **live** under launchd, config `LandLordEasy-org002-impl/tools/commander-runner/config.json`.
+- `provider_failover: false`; all three providers enabled; `wake_pull_request: 22` (a **merged** PR).
+- `enabled_operations: ["ops001_mysql_probe"]` pinned to `allowed_target_shas: ["104de15…"]`.
+- State DB: 37 claims — **17 blocked, 2 failed, 18 succeeded, 0 REJECTED ever**.
+
+### Root causes (evidence-backed)
+
+| # | Root cause | Evidence | Class |
+|---|---|---|---|
+| 1 | `SHELL_FRAGMENT_RE` includes `;` and is applied to `prompt`/`assigned`/`expected_evidence`. Providers are invoked via `subprocess.Popen(argv, shell=False)` — **no shell exists**, so this filter protects nothing and only rejects ordinary punctuation. | `commander_runner.py` SHELL_FRAGMENT_RE + `Job.from_comment` | Framework defect |
+| 2 | Validation failures in the queue loop hit `except ValidationError: continue` — the job is **silently skipped**, never claimed, no terminal record. Commander sees silence and re-posts manually. | `run_once` queue loop; 0 REJECTED in 37 claims | Framework defect |
+| 3 | `normalize_provider_output` caps `summary` at 2000 chars. Job `3abae900` (PR #25 review): Claude ran **403.5s, exit 0, `subtype=success`, $0.908**, emitted schema-valid JSON with a **12131-char summary** → discarded whole as `OUTPUT_VALIDATION`. | raw-output log inspected + failure reproduced against live code | Framework defect |
+| 4 | Raw output is persisted only *after* normalization, only for the final attempt, and there is **no re-normalization path** — recovery requires re-spending provider quota. | `run_once`: `store_raw_output` after `execute_with_failover` | Framework defect |
+| 5 | `route_candidates` uses a hardcoded static order and **never consults `QuotaLedger`**; `provider_failover` is off in production config. No quota-aware routing or paid-overflow gate exists. | `route_candidates` / `QuotaLedger` unused in routing | Scheduling defect |
+| 6 | Every `RunnerError` collapses to `FAILED/blocked` "runner stop condition"; there is **no retry at all** and no separation of safety stops from ordinary engineering failure. | `run_once` `except RunnerError` | Framework defect |
+| 7 | `ops001_mysql_probe` is pinned to exact SHA `104de15…`; PR #25's head is `2ba3f3d…`, so the controlled MySQL operation **can never run against the branch under test** — forcing manual operation. Editing code changes the SHA, which invalidates the pin: the self-reference loop. | config `allowed_target_shas` vs PR #25 head | Framework + scheduling defect |
+| 8 | CI `pull_request.branches` is only `main`/`dev`; `push.branches` omits `test/**`. PR #25 (`test/rel001-mysql-integration` → `release/v1-rehearsal-candidate`) therefore gets **no exact-head CI at all**. | `.github/workflows/ci-quality-gate.yml` | Framework defect |
+| 9 | `MAX_OUTPUT_BYTES = 65_536` truncates long provider runs (job `1e0372e7` is exactly 65536 bytes = hard overflow). No artifact channel for long reports. | raw-output file sizes | Framework defect |
+
+### Recovered artifact
+
+The PR #25 closure review destroyed by root cause #3 was **fully recovered offline from the raw log with no model call**. It contains a P0 code finding (`endLeaseInTransaction` REPEATABLE-READ snapshot reuse allowing concurrent termination+transfer approval), the CI one-line fix, and an explicit finding that the 5 extra MySQL repetitions are **not** materially required. This is deliverable E's core content and is proof that re-normalization is viable.
+
+---
+
+## Phase B — Framework implementation (CORE COMPLETE)
+
+Implemented in `tools/commander-runner/commander_runner.py` unless noted.
+
+| Root cause | Fix |
+|---|---|
+| 1 semicolon rejection | `SHELL_FRAGMENT_RE` no longer applied to Commander job text. New `validate_job_text()` rejects control characters and enforces length/single-line, and permits ordinary punctuation. `SHELL_FRAGMENT_RE` is retained for owner config (operation argv/description) only. |
+| 2 silent skip | `envelope_for_rejection()` + `rejection_lifecycle()`; the queue loop now claims and posts an explicit `REJECTED` terminal (with `stop_class` and reason) for any job addressed to this runner that fails validation. Jobs for other runners are still skipped untouched. |
+| 3 long output discarded | `MAX_SUMMARY_CHARS` 2 000 → 20 000, evidence item 1 000 → 4 000, items 50 → 200. |
+| 4 no recovery path | Raw output is persisted **before** parsing, per attempt (`<job>.attempt-N.log`). New `renormalize` CLI + `renormalize_job()` re-parse locally with **zero provider calls**. `store_artifact()` writes the full report locally; the Issue carries a bounded excerpt + sha256. |
+| 5 no quota routing | `QuotaLedger.is_exhausted()/mark_exhausted()`; `route_candidates()` prefers providers with free quota and falls back to `paid_overflow_providers` **only** when all free windows are exhausted **and** `paid_overflow_authorized` is true. |
+| 6 undifferentiated stops | `STOP_CLASSES` + `ERROR_CATEGORY_STOP_CLASS` + `stop_class_for()`. Bounded retry with exponential backoff (`retry_backoff_seconds`, cap 60s) for transient classes; `max_attempts` config (default 3, ceiling 5). Attempts recorded in a new `attempts` SQLite table with derived `attempt_id` — the job UUID is never reused as an execution identity. |
+| 7 SHA self-reference | `allowed_target_branches` on operation definitions + `resolve_operation_binding()`. The owner authorizes a *branch*; the runner resolves its current head from origin and pins the resolved SHA in the terminal record. Protected branches (`main`/`dev`/`master`/`HEAD`) are refused. |
+| 8 CI gap | `.github/workflows/ci-quality-gate.yml`: added `release/**` to `pull_request.branches` and `test/**`/`infra/**` to `push.branches`. Workflow is `contents: read` with no deploy step, so no deployment path is created. |
+| 9 output truncation | `MAX_OUTPUT_BYTES` 65 536 → 1 048 576. |
+
+### Verified recovery of the destroyed PR #25 review
+
+`renormalize_job()` run against a copy of the live raw log:
+
+```
+job_id 3abae900-…  recovered_from 3abae900-….log  status ok
+summary_chars 12131   evidence_items 10   usage cost_usd=0.9081394
+provider_calls 0
+```
+
+Offline suite after core changes: **102/102 pass** (was 101; three tests that encoded the semicolon defect were rewritten to assert the corrected contract).
+
+## Phase B2 — remaining framework work (IN PROGRESS)
+## Phase C — project-commander-kit/ (PENDING)
+## Phase D — Verification (PENDING)
+## Phase E — PR #25 closure (recovered; write-up PENDING)

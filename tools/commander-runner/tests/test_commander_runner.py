@@ -210,7 +210,15 @@ class SchemaTests(RunnerTestCase):
             self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref="  approval-17  "),
             delivery_config)
         self.assertEqual(valid.human_approval_ref, "approval-17")
-        for value in (None, "", "   ", {"unexpected": True}, "x" * 513, "approval; run something"):
+        # Ordinary punctuation is legitimate audit text and must round-trip.
+        punctuated = runner.Job.from_comment(
+            self.comment(profile="repo_delivery", quality_gate="unit",
+                         human_approval_ref="approval-17; owner-confirmed (issue #21)"),
+            delivery_config)
+        self.assertEqual(punctuated.human_approval_ref,
+                         "approval-17; owner-confirmed (issue #21)")
+        for value in (None, "", "   ", {"unexpected": True}, "x" * 513, "approval\x00ref",
+                      "approval\nsecond line"):
             with self.subTest(value=value), self.assertRaises(runner.ValidationError):
                 runner.Job.from_comment(
                     self.comment(profile="repo_delivery", quality_gate="unit", human_approval_ref=value),
@@ -272,10 +280,25 @@ class SchemaTests(RunnerTestCase):
         self.assertEqual(config.delivery_path_allowlists[job.quality_gate], paths)
 
 class SecurityTests(RunnerTestCase):
-    def test_shell_fragments_are_rejected(self):
-        payload = "$(touch bad); ; rm -rf / | `whoami`"
-        with self.assertRaises(runner.ValidationError):
-            runner.Job.from_comment(self.comment(prompt=payload), self.config)
+    def test_shell_punctuation_in_prompt_is_accepted_verbatim(self):
+        """Prompts are one inert argv element; no shell ever sees them.
+
+        Rejecting `;`, `|` or backticks here blocked legitimate review prompts
+        (JSON contracts, SQL, prose) while protecting nothing, because
+        `execute()` uses `subprocess.Popen(argv, shell=False)`.
+        """
+        payload = ('Review this: SELECT a; SELECT b | filter && done. '
+                   'Return `{"status": "ok"}` exactly.')
+        job = runner.Job.from_comment(self.comment(prompt=payload), self.config)
+        self.assertEqual(job.prompt, payload)
+        # The prompt reaches the provider as exactly one argv element.
+        argv = runner.adapter_argv(job, self.config.executable_paths)
+        self.assertEqual(sum(1 for part in argv if payload in part), 1)
+
+    def test_control_characters_in_prompt_are_rejected(self):
+        for payload in ("bad\x00null", "bad\x07bell", "bad\x1bescape"):
+            with self.subTest(payload=payload), self.assertRaises(runner.ValidationError):
+                runner.Job.from_comment(self.comment(prompt=payload), self.config)
     def test_adapter_snapshots_have_no_dangerous_tools(self):
         for worker, model in (("kiro", "gpt-5.6-luna"), ("copilot", "claude-sonnet-5"), ("claude", "claude-sonnet-5")):
             job = runner.Job.from_comment(self.comment(worker=worker, model=model), self.config)
