@@ -16,7 +16,6 @@ export const DOCKER_EXECUTABLE_ENV = 'REL001_DOCKER_EXECUTABLE';
 export const REQUIRED_HOST = '127.0.0.1';
 export const REQUIRED_PORT = '33317';
 export const REQUIRED_DATABASE = 'landlord_easy_e2e';
-export const REQUIRED_CANDIDATE_SHA = '104de1521cf194c9dc76ccca52741f05a75f1180';
 export const REQUIRED_DOCKER_PROJECT = 'landlordeasy_ops001';
 export const REQUIRED_DOCKER_SERVICE = 'mysql';
 export const REQUIRED_IMAGE_DIGEST =
@@ -55,6 +54,23 @@ function currentHeadSha(): string | null {
   }
 }
 
+function trackedWorktreeIsClean(): boolean {
+  const checks = [
+    ['diff', '--quiet', '--'],
+    ['diff', '--cached', '--quiet', '--'],
+  ];
+  try {
+    for (const args of checks) {
+      execFileSync('/usr/bin/git', args, {
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Never throws; always returns a reason so tests can skip with an explanation. */
 export function evaluateMysqlIntegrationGuard(): MysqlIntegrationGuardResult {
   if (process.env[OPT_IN_ENV] !== '1') {
@@ -84,20 +100,32 @@ export function evaluateMysqlIntegrationGuard(): MysqlIntegrationGuardResult {
   }
 
   const expectedSha = process.env[CANDIDATE_SHA_ENV];
-  if (expectedSha !== REQUIRED_CANDIDATE_SHA) {
+  if (!expectedSha) {
     return {
       allowed: false,
-      reason: `${CANDIDATE_SHA_ENV} must name the fixed reviewed candidate`,
+      reason: `${CANDIDATE_SHA_ENV} is not set`,
+    };
+  }
+  if (!/^[0-9a-f]{40}$/.test(expectedSha)) {
+    return {
+      allowed: false,
+      reason: `${CANDIDATE_SHA_ENV} must be exactly one lowercase 40-hex commit SHA`,
     };
   }
   const actualSha = currentHeadSha();
   if (!actualSha) {
     return { allowed: false, reason: 'unable to resolve worktree HEAD via git rev-parse' };
   }
-  if (actualSha !== REQUIRED_CANDIDATE_SHA) {
+  if (actualSha !== expectedSha) {
     return {
       allowed: false,
-      reason: 'worktree HEAD does not match the fixed reviewed candidate',
+      reason: 'worktree HEAD does not match the supplied reviewed candidate',
+    };
+  }
+  if (!trackedWorktreeIsClean()) {
+    return {
+      allowed: false,
+      reason: 'worktree has staged or unstaged tracked changes',
     };
   }
 

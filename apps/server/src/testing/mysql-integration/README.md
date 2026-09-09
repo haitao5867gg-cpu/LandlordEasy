@@ -26,9 +26,11 @@ The files self-skip during the ordinary full Jest run, but the focused
 - `DATABASE_URL` points at `127.0.0.1:33317`, database `landlord_easy_e2e`
   (host/port/database are checked; the URL value itself and any credential
   are never logged anywhere in this harness)
-- `REL001_MYSQL_INTEGRATION_CANDIDATE_SHA` equals the fixed reviewed candidate
-  `104de1521cf194c9dc76ccca52741f05a75f1180`, and `git rev-parse HEAD` equals
-  that same SHA
+- `REL001_MYSQL_INTEGRATION_CANDIDATE_SHA` is supplied by the authoritative
+  dispatch as exactly one lowercase 40-hex commit SHA, and `git rev-parse HEAD`
+  equals that same SHA
+- the tracked worktree is clean: both staged and unstaged tracked changes are
+  rejected without enumerating untracked files
 - `REL001_DOCKER_EXECUTABLE` is an explicit absolute executable path; the
   guard independently verifies the exact Compose project/service/container,
   healthy state, loopback-only binding, accepted image digest, tmpfs storage,
@@ -41,7 +43,7 @@ Example (never commit real values; illustrative only):
 ```
 REL001_MYSQL_INTEGRATION=1 \
 DATABASE_URL="mysql://<user>:<password>@127.0.0.1:33317/landlord_easy_e2e" \
-REL001_MYSQL_INTEGRATION_CANDIDATE_SHA=104de1521cf194c9dc76ccca52741f05a75f1180 \
+REL001_MYSQL_INTEGRATION_CANDIDATE_SHA=<exact-reviewed-head-sha> \
 REL001_DOCKER_EXECUTABLE="<absolute-path-to-docker>" \
 pnpm --filter server run test:mysql-integration
 ```
