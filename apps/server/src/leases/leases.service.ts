@@ -612,13 +612,22 @@ ${signUrl}
     db: Prisma.TransactionClient,
     dto: CreateLeaseDto,
     operatorId: number,
+    roomErrorMessages: { notFound: string; notVacant: string } = {
+      notFound: '房间不存在',
+      notVacant: '房间不是空置状态,无法签约',
+    },
   ) {
     await this.lockRow(db, 'rooms', dto.roomId);
-    // 检查房间是否空置
-    const room = await db.room.findUnique({ where: { id: dto.roomId } });
-    if (!room) throw new NotFoundException('房间不存在');
-    if (room.status !== 'VACANT') {
-      throw new BadRequestException('房间不是空置状态,无法签约');
+    // 原子claim:仅当房间此刻确实空置才转为已租且要求恰好一行受影响,
+    // 避免可重复读快照下"先查后写"让两笔并发操作都误判房间仍空置。
+    const claimedRoom = await db.room.updateMany({
+      where: { id: dto.roomId, status: 'VACANT' },
+      data: { status: 'RENTED' },
+    });
+    if (claimedRoom.count !== 1) {
+      const room = await db.room.findUnique({ where: { id: dto.roomId } });
+      if (!room) throw new NotFoundException(roomErrorMessages.notFound);
+      throw new BadRequestException(roomErrorMessages.notVacant);
     }
 
     // 创建或查找租客
@@ -656,12 +665,6 @@ ${signUrl}
         commission: dto.commission,
         inviteCode,
       },
-    });
-
-    // 房间转已租
-    await db.room.update({
-      where: { id: dto.roomId },
-      data: { status: 'RENTED' },
     });
 
     // 押金入台账
@@ -999,10 +1002,10 @@ ${signUrl}
       }
       if (req.status !== 'PENDING') throw new BadRequestException('该申请已处理,不能重复操作');
 
-      await this.lockRow(tx, 'rooms', dto.targetRoomId);
+      // 目标房间是否空置由下方 createInTransaction 的原子claim统一裁定,
+      // 这里只取房间号用于旧租约的退租备注,不作为并发裁定依据。
       const targetRoom = await tx.room.findUnique({ where: { id: dto.targetRoomId } });
       if (!targetRoom) throw new NotFoundException('目标房间不存在');
-      if (targetRoom.status !== 'VACANT') throw new BadRequestException('目标房间不是空置状态');
 
       const tenant = req.lease.tenant;
       const tenantIdCard = dto.tenantIdCard || tenant.idCard;
@@ -1037,6 +1040,7 @@ ${signUrl}
           payCycle: req.lease.payCycle,
         },
         operatorId,
+        { notFound: '目标房间不存在', notVacant: '目标房间不是空置状态' },
       );
       const signingTask = await this.createContractSigningTaskRecord(
         newLease.id,
