@@ -567,8 +567,11 @@ class SecretHygieneTests(HardeningTestCase):
                 self.assertNotIn(secret, path.read_text())
 
     def test_host_identity_is_scrubbed_from_published_evidence(self):
-        cleaned = runner.redact("failed at /Users/haitao/secret/path and 192.168.1.44")
-        self.assertNotIn("haitao", cleaned)
+        # A username that is NOT this machine's, so the generic /Users/<name>
+        # rule is exercised rather than the home-directory substitution.
+        cleaned = runner.redact("failed at /Users/someone-else/secret/path and 192.168.1.44")
+        self.assertNotIn("someone-else", cleaned)
+        self.assertIn("[REDACTED_USER]", cleaned)
         self.assertIn("[REDACTED_IP]", cleaned)
 
     def test_artifacts_and_raw_output_are_owner_only(self):
