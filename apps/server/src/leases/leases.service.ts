@@ -692,11 +692,30 @@ ${signUrl}
     operatorId: number,
   ) {
     await this.lockRow(db, 'leases', id);
-    const lease = await db.lease.findUnique({ where: { id } });
-    if (!lease) throw new NotFoundException('租约不存在');
-    if (lease.status !== 'ACTIVE') {
+    // 原子结束租约。在 REPEATABLE READ 下,普通读复用的是本事务首次普通读所建立
+    // 的快照 —— 而那次读(外层申请单的 findUnique)发生在 leases 行加锁之前,所以
+    // 「先读 status 再判断」可能读到过期的 ACTIVE:同一租约上并发的退租审批与
+    // 换租审批会双双通过,重复结算押金并把房间状态改乱。改为带条件的 updateMany,
+    // 由 MySQL 保证同一行只有一个事务能把它从 ACTIVE 结束掉 —— 与本 PR 中房间
+    // 认领(createInTransaction)使用的是同一手法。
+    const claimedLease = await db.lease.updateMany({
+      where: { id, status: 'ACTIVE' },
+      data: {
+        status: 'ENDED',
+        endedAt: new Date(dto.endDate),
+        endReason: dto.endReason,
+      },
+    });
+    if (claimedLease.count !== 1) {
+      const existing = await db.lease.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException('租约不存在');
       throw new BadRequestException('租约已结束');
     }
+
+    // 认领成功后才读取结算所需的不可变字段(押金、房间);事务总能读到自己的写入,
+    // 因此这里拿到的是加锁之后的当前版本,不再受快照过期影响。
+    const lease = await db.lease.findUnique({ where: { id } });
+    if (!lease) throw new NotFoundException('租约不存在');
 
     // 押金结算
     const depositAmount = Number(lease.deposit);
@@ -726,15 +745,7 @@ ${signUrl}
       });
     }
 
-    // 租约归档
-    const updatedLease = await db.lease.update({
-      where: { id },
-      data: {
-        status: 'ENDED',
-        endedAt: new Date(dto.endDate),
-        endReason: dto.endReason,
-      },
-    });
+    // 租约归档已在上面的原子认领中完成,这里不再重复写入。
 
     // 房间转空置
     await db.room.update({
@@ -742,7 +753,7 @@ ${signUrl}
       data: { status: 'VACANT' },
     });
 
-    return updatedLease;
+    return lease;
   }
 
   /** 续签 */
@@ -803,6 +814,15 @@ ${signUrl}
       where: { leaseId, status: 'PENDING' },
     });
     if (existing) throw new BadRequestException('已有一条待处理的退租申请,请勿重复提交');
+    // 同一租约上不允许同时存在两种待处理申请:它们是不同的行、走不同的行锁,
+    // 两个审批会各自走到结束租约这一步。这是纵深防御,真正的并发保证在
+    // endLeaseInTransaction 的原子认领里。
+    const existingTransfer = await this.prisma.roomTransferRequest.findFirst({
+      where: { leaseId, status: 'PENDING' },
+    });
+    if (existingTransfer) {
+      throw new BadRequestException('该租约已有待处理的换租申请,请先处理后再提交退租申请');
+    }
 
     const suggestedPenalty = await this.calculateSuggestedPenalty(leaseId);
     return this.prisma.leaseTerminationRequest.create({
@@ -951,6 +971,13 @@ ${signUrl}
       where: { leaseId, status: 'PENDING' },
     });
     if (existing) throw new BadRequestException('已有一条待处理的换租申请,请勿重复提交');
+    // 与 createTerminationRequest 对称:见那里的说明。
+    const existingTermination = await this.prisma.leaseTerminationRequest.findFirst({
+      where: { leaseId, status: 'PENDING' },
+    });
+    if (existingTermination) {
+      throw new BadRequestException('该租约已有待处理的退租申请,请先处理后再提交换租申请');
+    }
 
     return this.prisma.roomTransferRequest.create({
       data: {
