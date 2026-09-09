@@ -1,0 +1,59 @@
+{
+  "repository": "haitao5867gg-cpu/LandlordEasy",
+  "queue_issue": 17,
+  "wake_pull_request": null,
+  "commander_login": "set-commander-login",
+  "executor_login": "set-executor-login",
+  "runner_id": "SET_IMMUTABLE_RUNNER_ID",
+  "canonical_repo": "~/LandLordEasy",
+  "worktree_root": "~/LandLordEasy-runner-worktrees",
+  "state_dir": "~/.local/state/landlordeasy-commander",
+  "runtime_dir": "~/.local/lib/landlordeasy-commander",
+  "origin_url": "https://github.com/haitao5867gg-cpu/LandlordEasy.git",
+  "poll_seconds": 60,
+  "lease_seconds": 180,
+  "provider_failover": true,
+  "enabled_operations": [],
+  "operation_definitions": {
+    "ops001_mysql_probe": {
+      "argv": [
+        "/ABSOLUTE/PATH/TO/python3",
+        "${HOME}/.local/lib/landlordeasy-commander/rehearsal_operations.py",
+        "--docker",
+        "/ABSOLUTE/PATH/TO/docker"
+      ],
+      "mode": "read_only",
+      "allowed_target_shas": ["104de1521cf194c9dc76ccca52741f05a75f1180"],
+      "max_timeout_seconds": 120,
+      "max_output_bytes": 16384,
+      "require_clean_worktree": true,
+      "description": "Read-only exact-identity probe for the isolated OPS-001 MySQL rehearsal"
+    }
+  },
+  "operational_executables": {
+    "gh": "/ABSOLUTE/PATH/TO/gh",
+    "git": "/ABSOLUTE/PATH/TO/git",
+    "python": "/ABSOLUTE/PATH/TO/python3"
+  },
+  "enabled_providers": ["kiro"],
+  "enabled_profiles": ["repo_read"],
+  "enabled_quality_gates": ["none"],
+  "quality_gates": {
+    "none": [],
+    "org002_python": [["/ABSOLUTE/PATH/TO/python3", "-m", "unittest", "discover", "-s", "tools/commander-runner/tests", "-v"]]
+  },
+  "delivery_path_allowlists": {
+    "org002_python": [
+      "AGENTS.md",
+      "project-brain/CURRENT_STATE.md",
+      "project-brain/RELEASE_PLAN.md",
+      "project-brain/RISKS.md",
+      "specs/ORG-002-LOCAL-COMMANDER-RUNNER.md"
+    ]
+  },
+  "executable_paths": {
+    "kiro": "/ABSOLUTE/PATH/TO/kiro-cli",
+    "copilot": "/ABSOLUTE/PATH/TO/copilot",
+    "claude": "/ABSOLUTE/PATH/TO/claude"
+  }
+}
