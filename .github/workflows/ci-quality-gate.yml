@@ -1,10 +1,20 @@
 name: CI Quality Gate
 
+# `pull_request.branches` filters on the BASE branch. Limiting it to main/dev
+# meant a candidate PR based on `release/**` -- such as PR #25, which targets
+# `release/v1-rehearsal-candidate` -- produced no pull_request run at all, and
+# `test/**` was absent from the push list, so its exact head had no CI from
+# either trigger. Both gaps are closed below.
+#
+# This workflow only reads the repository and runs checks (`permissions:
+# contents: read`, no deploy step, no environment, no secrets), so widening the
+# triggers adds coverage without creating any deployment path.
 on:
   pull_request:
     branches:
       - main
       - dev
+      - 'release/**'
   push:
     branches:
       - main
@@ -12,6 +22,8 @@ on:
       - 'release/**'
       - 'fix/**'
       - 'ci/**'
+      - 'test/**'
+      - 'infra/**'
 
 permissions:
   contents: read
