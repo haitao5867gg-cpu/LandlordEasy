@@ -1633,10 +1633,13 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
         attempts.append(attempt)
         return attempt
 
-    for worker, model in candidates:
+    for index, (worker, model) in enumerate(candidates):
         if ordinal >= budget:
             break
         ordinal += 1
+        # Backing off after the last permitted attempt only delays the terminal
+        # record, so the sleep is skipped once no further attempt can happen.
+        more_attempts_remain = index + 1 < len(candidates) and ordinal < budget
         candidate = with_provider(job, worker, model)
         try:
             result = execute(adapter_argv(candidate, config.executable_paths), timeout=job.timeout_seconds,
@@ -1645,7 +1648,8 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
             category = classify_provider_error(None, exc)
             attempt = record(worker, model, None, None, category)
             if failover_allowed_after(attempt, job, config, worktree):
-                sleeper(retry_backoff_seconds(ordinal))
+                if more_attempts_remain:
+                    sleeper(retry_backoff_seconds(ordinal))
                 continue
             if category in SAFE_FAILOVER_CATEGORIES and job.profile != "repo_read":
                 blocked = dataclasses.replace(attempt, error_category="WORKTREE_DIRTY")
@@ -1663,7 +1667,8 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
                 ledger.mark_exhausted(worker)
             attempt = record(worker, model, result, None, category)
             if failover_allowed_after(attempt, job, config, worktree):
-                sleeper(retry_backoff_seconds(ordinal))
+                if more_attempts_remain:
+                    sleeper(retry_backoff_seconds(ordinal))
                 continue
             if category in SAFE_FAILOVER_CATEGORIES and job.profile != "repo_read":
                 blocked = dataclasses.replace(attempt, error_category="WORKTREE_DIRTY")
