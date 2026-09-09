@@ -102,3 +102,28 @@ collision guard + regression test.
 concurrent cross-type termination+transfer approval) sits in a file this PR
 already edits. The five extra repeat runs are **not** required. Recovered review
 committed at `review/recovered/PR25-closure-review-2ba3f3d.md`.
+
+
+---
+
+## Phase F — 用户批准后的自主执行（2026-09-10 凌晨，COMPLETE）
+
+Haitao 睡前明确批准四项，全部完成：
+
+1. **升级线上 runner 并重启** — `pck.py upgrade`（旧版备份 `*.20260910T001607.bak`），
+   停止 → 启动，PID 6177，`doctor ok:true`，稳定运行 5 分钟以上无新错误，lease 活跃。
+   顺序教训：我先改了配置再升级运行时，导致旧二进制无法解析自己的配置；
+   正确顺序是先升级运行时（新代码向后兼容旧配置），再改配置。
+2. **实现 PR #25 的 P0 修复** — 分支 `fix/rel001-cross-type-approval`，Draft PR #27。
+   原子认领 + 跨类型互斥 + 缺失的并发测试。
+   `tsc` 通过；server Jest **230 passed / 12 skipped / 0 failed**（原 228，新增 2 个单元测试）。
+   新的 MySQL 规格被 Jest 发现并按 guard 正确跳过，**未对真实数据库执行**。
+3. **CI 触发器推到 release 分支** — commit `fd23cdc`，仅改触发器（该分支尚无 runner 测试步骤，
+   硬 cherry-pick 会引入不存在的步骤）。副作用：release 分支 head 由 `104de15` 前进到 `fd23cdc`。
+4. **授权 Kiro 付费额度兜底** — 线上配置加入 `paid_overflow_providers: ["kiro"]`、
+   `paid_overflow_authorized: true`、`max_attempts: 3`（配置已备份）。
+
+**触发器修复已被实证**：PR #27 的精确 head 拿到两条运行，其中一条是 `release/**` base 的
+`pull_request` 运行 —— 正是 PR #25 从来拿不到的那一条。PR #26 与 #27 CI 均全绿。
+
+交接报告：`FRAMEWORK_HANDOFF_TO_CHATGPT.md`。
