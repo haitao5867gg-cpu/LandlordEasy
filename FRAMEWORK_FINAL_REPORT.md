@@ -100,6 +100,20 @@ rather than reasoning about it. Fixed with a collision guard and covered by
 | install → upgrade → rollback | round trip restores the prior runtime; **all 6 backups retained** |
 | Recovery of the destroyed PR #25 review | `status: ok`, `summary_chars: 12131`, `evidence_items: 10`, `usage: cost_usd=0.9081394`, **`provider_calls: 0`** |
 | CI on PR #25 exact head | **0 runs** — gap confirmed, then closed |
+| CI on this branch's exact head `3d6d275f` | **both runs green, all 14 steps** |
+
+The trigger fix is proven, not just argued: this branch produced **two** green
+runs on its exact head — a `pull_request` run against `dev`, and a `push` run on
+`infra/commander-kit-hardening` that exists *only* because `infra/**` was added
+to `push.branches`. Both passed every step, including the three new ones (offline
+suite, end-to-end canary, portable kit suite), the full server Jest suite, and
+both H5 typecheck/builds.
+
+Backward compatibility was verified directly: the **live production config loads
+unchanged** under the new runner, taking safe defaults (`max_attempts: 3`,
+`paid_overflow_authorized: false`, no paid providers). The `renormalize` CLI was
+also exercised end to end against the real lost log, reporting
+`provider_calls: 0`.
 
 Three pre-existing tests asserted the *defective* behaviour (that `;` must be
 rejected). They were rewritten to assert the corrected contract, with comments
