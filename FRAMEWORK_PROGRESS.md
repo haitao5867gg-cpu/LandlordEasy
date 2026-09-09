@@ -76,7 +76,29 @@ provider_calls 0
 
 Offline suite after core changes: **102/102 pass** (was 101; three tests that encoded the semicolon defect were rewritten to assert the corrected contract).
 
-## Phase B2 — remaining framework work (IN PROGRESS)
-## Phase C — project-commander-kit/ (PENDING)
-## Phase D — Verification (PENDING)
-## Phase E — PR #25 closure (recovered; write-up PENDING)
+## Phase B2 — remaining framework work (COMPLETE)
+## Phase C — project-commander-kit/ (COMPLETE)
+
+Portable kit at `project-commander-kit/`: runner + full suite, `scripts/pck.py`
+(doctor/install/upgrade/rollback), config JSON schema + neutral example,
+GitHub Issue/PR/CI templates, ONBOARDING_PROMPT.md (single-file handoff) and
+FRAMEWORK_SUMMARY.md (no chat context required).
+
+Bug found by running the real lifecycle: `pck.py` backup timestamps have
+one-second resolution, so upgrade-then-rollback in the same second let the
+rollback's own safety copy overwrite the backup it was restoring. Fixed with a
+collision guard + regression test.
+## Phase D — Verification (COMPLETE)
+
+- repo suite 151/151, kit suite 151/151 (baseline was 101)
+- end-to-end canary 21/21 (real git repo, real worktree, stub provider and gh)
+- `pck.py doctor` ok; install -> upgrade -> rollback round trip verified, all backups retained
+- destroyed PR #25 review recovered with `provider_calls: 0`
+- PR #25 exact head confirmed to have **0** CI runs; triggers widened
+## Phase E — PR #25 closure (COMPLETE)
+
+`PR25_CLOSURE_RECOMMENDATION.md`. Do not merge yet: an independently verified P0
+(REPEATABLE READ snapshot reuse in `endLeaseInTransaction`, reachable via
+concurrent cross-type termination+transfer approval) sits in a file this PR
+already edits. The five extra repeat runs are **not** required. Recovered review
+committed at `review/recovered/PR25-closure-review-2ba3f3d.md`.
