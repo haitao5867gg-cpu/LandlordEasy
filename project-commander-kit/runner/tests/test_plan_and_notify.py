@@ -701,5 +701,76 @@ class BlockedOperationClassificationTests(PRBTestCase):
         finally:
             state.close()
 
+
+class BranchPrefixBindingTests(PRBTestCase):
+    """Dispatching rel001 from the front door needs bindings that survive new branches."""
+
+    def _definition(self, branches):
+        return runner.OperationDefinition(
+            argv=(sys.executable, "-c", "print('x')", "--docker", "/usr/bin/docker"),
+            mode="isolated_test", allowed_target_shas=frozenset(),
+            max_timeout_seconds=60, max_output_bytes=4096, require_clean_worktree=True,
+            description="suite", allowed_target_branches=frozenset(branches))
+
+    def test_prefix_patterns_are_accepted_and_protected_ones_refused(self):
+        self.assertEqual(runner.validate_operation_branches(["fix/*", "job-*", "feat/x"]),
+                         frozenset({"fix/*", "job-*", "feat/x"}))
+        for bad in (["*"], ["dev*"], ["release/*"], ["main"], ["fix/*/x"], ["d*"]):
+            with self.subTest(bad=bad), self.assertRaises(runner.ValidationError):
+                runner.validate_operation_branches(bad)
+
+    def test_branch_is_bound_never_covers_protected_branches(self):
+        allowed = frozenset({"fix/*", "feat/x"})
+        self.assertTrue(runner.branch_is_bound("fix/rel001-cross-type-approval", allowed))
+        self.assertTrue(runner.branch_is_bound("feat/x", allowed))
+        self.assertFalse(runner.branch_is_bound("feat/y", allowed))
+        self.assertFalse(runner.branch_is_bound("dev", frozenset({"d*"})))
+        self.assertFalse(runner.branch_is_bound("release/v1", frozenset({"rel*"})))
+
+    def test_prefix_binding_resolves_through_ls_remote_and_pins_the_exact_head(self):
+        config = runner.dataclasses.replace(
+            self.config, enabled_operations=frozenset({"rel001_mysql_suite"}),
+            operation_definitions={"rel001_mysql_suite": self._definition({"fix/*"})})
+        head = "b" * 40
+        job = runner.OperationJob(
+            job_id=JOB_ID, repository="owner/repo", queue_issue=42, target_sha=head,
+            worktree_id=runner.derive_worktree_id(JOB_ID), runner_id="runner-001",
+            operation_id="rel001_mysql_suite", timeout_seconds=60, output_limit_bytes=1024,
+            expected_evidence="suite", human_approval_ref="owner")
+        listing = f"{'a' * 40}\trefs/heads/fix/other\n{head}\trefs/heads/fix/rel001\n"
+        calls = []
+
+        def fake_git(argv, cwd, **kwargs):
+            calls.append(argv[0])
+            return listing
+        with mock.patch.object(runner, "git_checked", side_effect=fake_git):
+            self.assertEqual(runner.resolve_operation_binding(config, job), "branch_head:fix/rel001")
+        self.assertEqual(calls, ["ls-remote"])
+        drifted = runner.dataclasses.replace(job, target_sha="c" * 40)
+        with mock.patch.object(runner, "git_checked", side_effect=fake_git), \
+             self.assertRaises(runner.ValidationError):
+            runner.resolve_operation_binding(config, drifted)
+
+    def test_isolated_test_receives_the_authorized_sha_as_candidate(self):
+        config = runner.dataclasses.replace(
+            self.config, enabled_operations=frozenset({"rel001_mysql_suite"}),
+            operation_definitions={"rel001_mysql_suite": self._definition({"fix/*"})})
+        job = runner.OperationJob(
+            job_id=JOB_ID, repository="owner/repo", queue_issue=42, target_sha=SHA,
+            worktree_id=runner.derive_worktree_id(JOB_ID), runner_id="runner-001",
+            operation_id="rel001_mysql_suite", timeout_seconds=60, output_limit_bytes=1024,
+            expected_evidence="suite", human_approval_ref="owner")
+        seen = []
+
+        def fake_execute(argv, **kwargs):
+            seen.append(list(argv))
+            return runner.Result(0, json.dumps({"status": "ok", "summary": "fine", "evidence": []}),
+                                 False, False, 0.1)
+        with mock.patch.object(runner, "worktree_is_clean", return_value=True), \
+             mock.patch.object(runner, "execute", side_effect=fake_execute):
+            attempt = runner.execute_operation(job, config, self.worktrees)
+        self.assertIsNone(attempt.error_category)
+        self.assertEqual(seen[0][-2:], ["--candidate-sha", SHA])
+
 if __name__ == "__main__":
     unittest.main()

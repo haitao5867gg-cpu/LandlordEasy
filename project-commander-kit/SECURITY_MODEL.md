@@ -118,9 +118,18 @@ the code changed the head, which invalidated the pin, which required an owner
 config edit before the fix could be tested. Branch binding resolves the head at
 run time from `refs/remotes/origin/<branch>` and records the **resolved SHA** in
 the terminal record. The owner still authorizes exactly one branch; the audit
-trail still names one exact commit. `main`, `dev`, `master` and `HEAD` are
-refused outright, and branch names are validated tightly enough that they cannot
-escape into a different ref.
+trail still names one exact commit. `main`, `dev`, `master`, `HEAD` and
+`release/…` are refused outright, and branch names are validated tightly enough
+that they cannot escape into a different ref.
+
+An owner may also bind a **prefix** (`"fix/*"`, `"job-*"`): the trailing `*` is
+the only wildcard allowed, and only as the last character. At run time the
+runner asks `git ls-remote --heads origin refs/heads/<prefix>*` which branches
+currently point at exactly the job's SHA; the first bound match is recorded as
+`branch_head:<name>`. A prefix that could cover a protected branch (`d*`,
+`release/*`) is refused at config load. For `isolated_test` operations the
+runner appends `--candidate-sha <authorized SHA>` to the fixed argv, so the
+suite always judges the commit the runner checked out and nothing else.
 
 ## The token is the boundary, not `_api`
 

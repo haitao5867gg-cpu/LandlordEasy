@@ -859,13 +859,38 @@ def validate_operation_branches(value: Any) -> frozenset[str]:
         raise ValidationError("allowed_target_branches must be a bounded unique list")
     checked: set[str] = set()
     for branch in value:
-        if (not isinstance(branch, str) or not OPERATION_BRANCH_RE.fullmatch(branch)
-                or len(branch) > 200 or ".." in branch or branch.endswith(".lock")):
+        if not isinstance(branch, str) or len(branch) > 200:
             raise ValidationError("allowed_target_branches contains an invalid branch name")
-        if branch in {"main", "dev", "master", "HEAD"}:
+        # An owner may approve a whole prefix ("fix/*", "job-*"): every branch
+        # the Commander can name under it is then bindable without a config
+        # edit per branch.  The wildcard is only ever the final character.
+        literal = branch[:-1] if branch.endswith("*") else branch
+        if branch.endswith("*") and not literal:
+            raise ValidationError("allowed_target_branches contains an invalid branch name")
+        probe = literal + ("x" if branch.endswith("*") else "")
+        if (not OPERATION_BRANCH_RE.fullmatch(probe) or ".." in branch
+                or branch.endswith(".lock")):
+            raise ValidationError("allowed_target_branches contains an invalid branch name")
+        guarded = PROTECTED_BRANCHES | {"release/"}
+        if literal in PROTECTED_BRANCHES or literal.startswith("release/") or (
+                branch.endswith("*") and any(p.startswith(literal) for p in guarded)):
             raise ValidationError("operations may not bind to a protected branch")
         checked.add(branch)
     return frozenset(checked)
+
+PROTECTED_BRANCHES = frozenset({"main", "dev", "master", "HEAD", "release"})
+
+def branch_is_bound(branch: str, allowed: frozenset[str]) -> bool:
+    """Does an owner binding cover this exact branch name?"""
+    if branch in PROTECTED_BRANCHES or branch.startswith("release/"):
+        return False
+    for pattern in allowed:
+        if pattern.endswith("*"):
+            if branch.startswith(pattern[:-1]):
+                return True
+        elif pattern == branch:
+            return True
+    return False
 
 def validate_delivery_path_allowlists(value: Any,
                                       quality_gate_ids: frozenset[str]) -> dict[str, frozenset[str]]:
@@ -2126,8 +2151,14 @@ def execute_operation(job: OperationJob, config: Config, worktree: Path) -> Oper
         raise RunnerError("operation authorization changed")
     if not worktree_is_clean(config, worktree):
         raise RunnerError("operation worktree is not clean before execution")
+    argv = list(definition.argv)
+    if definition.mode == "isolated_test" and "--candidate-sha" not in argv:
+        # The suite must know which commit it is judging.  The SHA it gets is
+        # the one the runner already authorized (exact allowlist or a bound
+        # branch head) and checked out; the owner's argv stays fixed otherwise.
+        argv += ["--candidate-sha", job.target_sha]
     try:
-        result = execute(definition.argv, timeout=job.timeout_seconds,
+        result = execute(argv, timeout=job.timeout_seconds,
                          cap=job.output_limit_bytes, cwd=worktree,
                          env=operation_environment())
     except (OSError, RunnerError) as exc:
@@ -2790,7 +2821,7 @@ def resolve_operation_binding(config: Config, job: OperationJob) -> str:
     if not definition.allowed_target_branches:
         raise ValidationError("operation target SHA is not owner-approved")
     git = config.operational_executables["git"]
-    for branch in sorted(definition.allowed_target_branches):
+    for branch in sorted(b for b in definition.allowed_target_branches if not b.endswith("*")):
         # `--` and the fixed refspec keep a branch name from being read as an
         # option; the name itself was validated against OPERATION_BRANCH_RE.
         try:
@@ -2804,6 +2835,22 @@ def resolve_operation_binding(config: Config, job: OperationJob) -> str:
             continue
         if SHA_RE.fullmatch(head) and head == job.target_sha:
             return f"branch_head:{branch}"
+    # Prefix bindings: the job names only a SHA, so ask origin which branches
+    # under the approved prefix currently point at exactly that SHA.
+    for pattern in sorted(b for b in definition.allowed_target_branches if b.endswith("*")):
+        try:
+            listing = git_checked(["ls-remote", "--heads", "origin", f"refs/heads/{pattern}"],
+                                  config.canonical_repo, executable=git, timeout=120)
+        except RunnerError:
+            continue
+        for line in listing.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 2 or not parts[1].startswith("refs/heads/"):
+                continue
+            head, name = parts[0].strip(), parts[1][len("refs/heads/"):]
+            if (SHA_RE.fullmatch(head) and head == job.target_sha
+                    and branch_is_bound(name, definition.allowed_target_branches)):
+                return f"branch_head:{name}"
     raise ValidationError(
         "operation target SHA is not the current head of an owner-approved branch")
 

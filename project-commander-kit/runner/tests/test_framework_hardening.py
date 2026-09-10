@@ -1033,7 +1033,8 @@ class TargetBindingTests(HardeningTestCase):
                 runner.validate_operation_branches([branch])
 
     def test_branch_names_that_could_escape_a_ref_are_refused(self):
-        for branch in ("../evil", "a..b", "-x", "feat/*", "a b", "x.lock", ""):
+        # A trailing "*" is now an owner prefix binding; a wildcard anywhere else still escapes.
+        for branch in ("../evil", "a..b", "-x", "feat/*/x", "*", "a b", "x.lock", ""):
             with self.subTest(branch=branch), self.assertRaises(runner.ValidationError):
                 runner.validate_operation_branches([branch])
 
