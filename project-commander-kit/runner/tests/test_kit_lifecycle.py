@@ -1,8 +1,10 @@
-"""Lifecycle tests for the kit's install / upgrade / rollback tool.
+"""Lifecycle tests for the kit's transactional install / upgrade / rollback tool.
 
 These run the real `pck.py` against a throwaway runtime directory.  Nothing
 here contacts GitHub, a provider, or the network.
 """
+import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -13,23 +15,23 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
 CANDIDATES = (
-    HERE.parents[0] / "scripts/pck.py",                       # inside the kit
+    HERE.parents[0] / "scripts/pck.py",                        # inside the kit
     HERE.parents[1] / "project-commander-kit/scripts/pck.py",  # source repo
 )
 PCK = next((path for path in CANDIDATES if path.is_file()), None)
 
 
 @unittest.skipIf(PCK is None, "pck.py not present in this layout")
-class KitLifecycleTests(unittest.TestCase):
+class KitLifecycleTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.runtime = root / "runtime"
         for name in ("repo", "worktrees"):
             (root / name).mkdir()
-        example = json.loads(
+        self.example = json.loads(
             (PCK.parents[1] / "config/config.example.json").read_text())
-        example.update({
+        self.example.update({
             "repository": "acme/widget", "queue_issue": 1,
             "commander_login": "acme-commander", "executor_login": "acme-executor",
             "runner_id": "acme-runner-01",
@@ -43,72 +45,212 @@ class KitLifecycleTests(unittest.TestCase):
             "quality_gates": {"none": []}, "enabled_quality_gates": ["none"],
         })
         self.config = root / "config.json"
-        self.config.write_text(json.dumps(example))
-        self.config.chmod(0o600)
+        self.write_config(self.example)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def pck(self, *args):
+    def write_config(self, value, mode=0o600):
+        self.config.write_text(value if isinstance(value, str) else json.dumps(value))
+        self.config.chmod(mode)
+
+    def pck(self, *args, with_config=True):
         # Signal that we are already inside the kit's own suite, so the script
         # does not re-launch it and recurse into this very test.
         environment = dict(os.environ, PCK_IN_SELFTEST="1")
-        result = subprocess.run([sys.executable, str(PCK), *args, "--config", str(self.config)],
-                                capture_output=True, text=True, env=environment, timeout=120)
-        return result, (json.loads(result.stdout) if result.stdout.strip().startswith("{") else {})
+        argv = [sys.executable, str(PCK), *args]
+        if with_config:
+            argv += ["--config", str(self.config)]
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                env=environment, timeout=300)
+        payload = json.loads(result.stdout) if result.stdout.strip().startswith("{") else {}
+        return result, payload
+
+    def current(self):
+        return self.runtime / "current"
 
     def entrypoint(self):
-        return self.runtime / "commander_runner.py"
+        return self.current() / "commander_runner.py"
 
-    def test_install_upgrade_rollback_round_trip_preserves_the_old_runtime(self):
+    def versions(self):
+        directory = self.runtime / "versions"
+        if not directory.is_dir():
+            return []
+        return sorted(path.name for path in directory.iterdir()
+                      if path.is_dir() and not path.name.startswith("."))
+
+
+class TransactionalInstallTests(KitLifecycleTestCase):
+    def test_install_creates_a_version_directory_and_a_current_pointer(self):
         result, report = self.pck("install")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.current().is_symlink())
         self.assertTrue(self.entrypoint().is_file())
+        self.assertEqual(len(self.versions()), 1)
+        self.assertIsNone(report["previous"])
+        self.assertIn("source_commit", report)
+        self.assertRegex(report["installed_at"], r"^\d{4}-\d{2}-\d{2}T")
 
-        # Mark the installed copy so we can prove rollback restores THIS content.
-        marker = "# drift-marker\n"
-        with self.entrypoint().open("a") as handle:
-            handle.write(marker)
+    def test_manifest_records_provenance_and_matches_the_installed_bytes(self):
+        self.pck("install")
+        manifest = json.loads((self.current() / "runtime-manifest.json").read_text())
+        self.assertEqual(manifest["schema_version"], 3)
+        self.assertIn("source_commit", manifest)
+        self.assertIn("installed_at", manifest)
+        for name, expected in manifest["files"].items():
+            actual = hashlib.sha256((self.current() / name).read_bytes()).hexdigest()
+            self.assertEqual(actual, expected, name)
+
+    def test_upgrade_switches_the_pointer_and_keeps_the_previous_version_intact(self):
+        self.pck("install")
+        first = self.current().resolve()
+        first_bytes = (first / "commander_runner.py").read_bytes()
 
         result, report = self.pck("upgrade")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn(marker, self.entrypoint().read_text())
-        self.assertTrue(report["backups"])
+        second = self.current().resolve()
+        self.assertNotEqual(first, second)
+        self.assertEqual(report["previous"], str(first))
+        # The previous version directory is left exactly as it was: upgrade
+        # writes a new directory and moves the pointer, it never edits in place.
+        self.assertEqual((first / "commander_runner.py").read_bytes(), first_bytes)
+        self.assertEqual(len(self.versions()), 2)
+
+    def test_rollback_repoints_to_the_previous_version_and_deletes_nothing(self):
+        self.pck("install")
+        first = self.current().resolve()
+        self.pck("upgrade")
+        second = self.current().resolve()
+        self.assertNotEqual(first, second)
 
         result, report = self.pck("rollback")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(marker, self.entrypoint().read_text())
+        self.assertEqual(self.current().resolve(), first)
+        self.assertEqual(report["previous"], str(second))
+        # Rollback repoints; it never removes. Both versions stay on disk so a
+        # roll-forward is still possible.
+        self.assertEqual(len(self.versions()), 2)
+        self.assertTrue((second / "commander_runner.py").is_file())
 
-    def test_backups_are_never_overwritten_within_the_same_second(self):
-        """Regression: a same-second collision let rollback destroy the backup
-        it was about to restore, losing the previous runtime entirely."""
+    def test_rollback_to_a_tampered_version_is_refused(self):
+        """Integrity is verified after the swap, not assumed from the label."""
         self.pck("install")
-        with self.entrypoint().open("a") as handle:
-            handle.write("# drift-marker\n")
+        first = self.current().resolve()
         self.pck("upgrade")
-        before = {path.name for path in self.runtime.glob("*.bak")}
-        self.pck("rollback")
-        after = {path.name for path in self.runtime.glob("*.bak")}
-        # Nothing may disappear, and rollback must add its own safety copy.
-        self.assertTrue(before <= after, f"backups lost: {before - after}")
-        self.assertGreater(len(after), len(before))
+        target = first / "commander_runner.py"
+        target.chmod(0o700)
+        with target.open("a") as handle:
+            handle.write("# tampered\n")
+        result, _ = self.pck("rollback")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("manifest digest", result.stderr)
 
-    def test_install_refuses_to_clobber_an_existing_runtime(self):
+    def test_a_failed_stage_leaves_the_running_version_active(self):
+        """The point of staging: a broken source cannot take the host down."""
+        self.pck("install")
+        live = self.current().resolve()
+        live_bytes = (live / "commander_runner.py").read_bytes()
+
+        spec = importlib.util.spec_from_file_location("pck_under_test", PCK)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        broken = Path(self.tmp.name) / "broken-source"
+        broken.mkdir()
+        # Only one of the two required runtime files exists.
+        (broken / "commander_runner.py").write_text("print('x')\n")
+        module.SOURCE = broken
+        os.environ["PCK_IN_SELFTEST"] = "1"
+        with self.assertRaises(module.DoctorFailure):
+            module.install_transactional(json.loads(self.config.read_text()))
+
+        self.assertEqual(self.current().resolve(), live)
+        self.assertEqual((live / "commander_runner.py").read_bytes(), live_bytes)
+        leftovers = [path.name for path in (self.runtime / "versions").iterdir()
+                     if path.name.startswith(".staging")]
+        self.assertEqual(leftovers, [])
+
+    def test_install_refuses_to_clobber_an_active_runtime(self):
         self.pck("install")
         result, _ = self.pck("install")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("upgrade", result.stderr.lower() + result.stdout.lower())
+        self.assertIn("upgrade", (result.stderr + result.stdout).lower())
 
-    def test_rollback_without_any_backup_fails_loudly(self):
+    def test_rollback_without_an_earlier_version_fails_loudly(self):
         self.pck("install")
         result, _ = self.pck("rollback")
         self.assertNotEqual(result.returncode, 0)
 
-    def test_world_readable_config_is_refused(self):
-        self.config.chmod(0o644)
-        result, _ = self.pck("install")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("600", result.stderr + result.stdout)
+
+class DoctorNegativeTests(KitLifecycleTestCase):
+    """`doctor` must never report ok:true on a config it could not use.
+
+    Every case here previously slipped through: the report was flattened and
+    any value that was not literally `False` counted as a passing check, so a
+    diagnostic string such as "invalid: ..." read as success.
+    """
+
+    def assert_doctor_fails(self, needle):
+        result, report = self.pck("doctor")
+        self.assertNotEqual(result.returncode, 0, f"doctor passed; report={report}")
+        self.assertFalse(report.get("ok", True))
+        joined = " ".join(report.get("failures", [])).lower()
+        self.assertIn(needle, joined, joined)
+
+    def test_corrupted_json_fails(self):
+        self.write_config("{ this is not json")
+        self.assert_doctor_fails("not valid json")
+
+    def test_world_readable_config_fails(self):
+        self.write_config(self.example, mode=0o644)
+        self.assert_doctor_fails("accessible")
+
+    def test_group_readable_config_fails(self):
+        self.write_config(self.example, mode=0o640)
+        self.assert_doctor_fails("accessible")
+
+    def test_missing_required_fields_fail(self):
+        for field in ("repository", "runner_id", "runtime_dir", "quality_gates",
+                      "commander_login", "executor_login"):
+            with self.subTest(field=field):
+                broken = dict(self.example)
+                broken.pop(field)
+                self.write_config(broken)
+                self.assert_doctor_fails("missing required fields")
+
+    def test_empty_critical_field_fails(self):
+        broken = dict(self.example)
+        broken["runner_id"] = "   "
+        self.write_config(broken)
+        self.assert_doctor_fails("non-empty")
+
+    def test_identical_commander_and_executor_logins_fail(self):
+        broken = dict(self.example)
+        broken["executor_login"] = broken["commander_login"]
+        self.write_config(broken)
+        self.assert_doctor_fails("different github accounts")
+
+    def test_config_that_is_not_an_object_fails(self):
+        self.write_config("[1, 2, 3]")
+        self.assert_doctor_fails("json object")
+
+    def test_missing_config_file_fails(self):
+        self.config.unlink()
+        self.assert_doctor_fails("not found")
+
+    def test_tampered_installed_runtime_fails(self):
+        self.pck("install")
+        target = self.current().resolve() / "commander_runner.py"
+        target.chmod(0o700)
+        with target.open("a") as handle:
+            handle.write("# tampered\n")
+        self.assert_doctor_fails("does not match its manifest digest")
+
+    def test_healthy_kit_without_a_config_still_reports_ok(self):
+        """The negative cases must not have made doctor unconditionally fail."""
+        result, report = self.pck("doctor", with_config=False)
+        self.assertEqual(result.returncode, 0, report)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["failures"], [])
 
 
 if __name__ == "__main__":

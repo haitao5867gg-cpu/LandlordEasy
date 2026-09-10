@@ -913,8 +913,13 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
             plist = plistlib.loads(launchagent.read_bytes())
             self.assertTrue(runtime_script.exists())
             self.assertEqual(plist["ProgramArguments"][1], str(runtime_script))
-            self.assertEqual(manifest["version"], 2)
+            self.assertEqual(manifest["schema_version"], runner.RUNTIME_MANIFEST_SCHEMA)
             self.assertEqual(manifest["entrypoint"], "commander_runner.py")
+            # Provenance fields must always be present, even when the source
+            # commit cannot be resolved (then it is explicitly null, not absent).
+            self.assertIn("source_commit", manifest)
+            self.assertIn("installed_at", manifest)
+            self.assertRegex(manifest["installed_at"], r"^\d{4}-\d{2}-\d{2}T")
             self.assertEqual(
                 manifest["files"]["commander_runner.py"],
                 runner.hashlib.sha256(runtime_script.read_bytes()).hexdigest())
@@ -998,7 +1003,28 @@ class ProviderAndQuotaTests(RunnerTestCase):
             with self.subTest(result=result), mock.patch.object(runner, "execute", return_value=result) as execute:
                 attempt, attempts = runner.execute_with_failover(job, self.config, self.repo)
                 self.assertEqual(len(attempts), 1); self.assertEqual(execute.call_count, 1)
-                self.assertIn(attempt.error_category, {"RUNTIME", "TIMEOUT"})
+                self.assertIn(attempt.error_category, {"UNKNOWN", "TIMEOUT"})
+
+    def test_bare_nonzero_exit_is_not_reported_as_a_code_failure(self):
+        """A nonzero exit alone is not evidence that the code under test broke.
+
+        Calling it CODE_FAILURE is what sent engineering problems to a human as
+        if they were product defects.
+        """
+        job = runner.Job.from_comment(self.comment(), self.config)
+        opaque = runner.Result(1, "ordinary failure", False, False, 0.1)
+        with mock.patch.object(runner, "execute", return_value=opaque):
+            attempt, _ = runner.execute_with_failover(job, self.config, self.repo)
+        self.assertEqual(attempt.error_category, "UNKNOWN")
+        self.assertEqual(runner.stop_class_for(attempt.error_category), "UNCLASSIFIED_FAILURE")
+
+    def test_positive_evidence_is_required_to_call_something_a_code_failure(self):
+        job = runner.Job.from_comment(self.comment(), self.config)
+        red = runner.Result(1, "Tests: 3 failed, 1 passed\nAssertionError: expected 2", False, False, 5.0)
+        with mock.patch.object(runner, "execute", return_value=red):
+            attempt, _ = runner.execute_with_failover(job, self.config, self.repo)
+        self.assertEqual(attempt.error_category, "RUNTIME")
+        self.assertEqual(runner.stop_class_for(attempt.error_category), "CODE_FAILURE")
 
     def test_dirty_write_worktree_prevents_safe_error_failover(self):
         job = runner.Job.from_comment(self.comment(profile="repo_write_test", quality_gate="unit"), self.config)

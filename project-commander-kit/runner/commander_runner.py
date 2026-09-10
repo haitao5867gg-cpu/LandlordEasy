@@ -67,7 +67,8 @@ STATE_TRANSITIONS = {
 }
 ERROR_CATEGORIES = frozenset({
     "AUTH", "RATE_LIMIT", "QUOTA", "MODEL", "RUNTIME", "TIMEOUT",
-    "OUTPUT_LIMIT", "OUTPUT_VALIDATION", "PERMISSION", "UNAVAILABLE", "WORKTREE_DIRTY", "UNKNOWN",
+    "OUTPUT_LIMIT", "OUTPUT_VALIDATION", "PERMISSION", "UNAVAILABLE", "WORKTREE_DIRTY",
+    "INVOCATION", "ENVIRONMENT", "PERSISTENCE", "UNKNOWN",
 })
 SAFE_FAILOVER_CATEGORIES = frozenset({"AUTH", "RATE_LIMIT", "QUOTA", "MODEL", "UNAVAILABLE"})
 
@@ -75,29 +76,48 @@ SAFE_FAILOVER_CATEGORIES = frozenset({"AUTH", "RATE_LIMIT", "QUOTA", "MODEL", "U
 # fail-closed conditions; the rest are ordinary engineering outcomes that may be
 # recovered locally or retried under a bounded budget.
 STOP_CLASSES = frozenset({
-    "SAFETY_STOP", "CODE_FAILURE", "TRANSIENT_FAILURE", "PROTOCOL_FAILURE",
-    "HUMAN_APPROVAL_REQUIRED",
+    "SAFETY_STOP", "HUMAN_APPROVAL_REQUIRED", "INVOCATION_FAILURE",
+    "ENVIRONMENT_FAILURE", "TRANSIENT_FAILURE", "PROTOCOL_FAILURE",
+    "CODE_FAILURE", "UNCLASSIFIED_FAILURE",
 })
 ERROR_CATEGORY_STOP_CLASS = {
     # Permission and boundary problems are never retried automatically.
     "PERMISSION": "SAFETY_STOP",
     "WORKTREE_DIRTY": "SAFETY_STOP",
+    # We asked for something the tool could not accept: a bad flag, an unknown
+    # subcommand, a test selector that matched nothing.  Re-running the same
+    # argv reproduces it exactly, so this is never retried -- and it is NEVER
+    # reported as a failure of the code under test.
+    "INVOCATION": "INVOCATION_FAILURE",
+    # The host could not provide something the run needs: a missing binary, an
+    # unresolvable path, a daemon that is not up yet, a failed local write.
+    # Bounded retry is allowed because these do clear on their own.
+    "ENVIRONMENT": "ENVIRONMENT_FAILURE",
+    "PERSISTENCE": "ENVIRONMENT_FAILURE",
+    "UNAVAILABLE": "ENVIRONMENT_FAILURE",
     # Provider-side availability problems: retry or fail over.
     "AUTH": "TRANSIENT_FAILURE",
     "RATE_LIMIT": "TRANSIENT_FAILURE",
     "QUOTA": "TRANSIENT_FAILURE",
     "MODEL": "TRANSIENT_FAILURE",
-    "UNAVAILABLE": "TRANSIENT_FAILURE",
     "TIMEOUT": "TRANSIENT_FAILURE",
-    # The provider ran but we could not parse what it produced.  Recover from
+    # The tool ran but we could not parse what it produced.  Recover from
     # persisted raw output first; never re-spend quota before trying that.
     "OUTPUT_VALIDATION": "PROTOCOL_FAILURE",
     "OUTPUT_LIMIT": "PROTOCOL_FAILURE",
-    # The provider ran and reported a genuine failure of the work itself.
+    # Positive evidence that the work itself failed: assertions, type errors,
+    # a red test suite.  Only reached when the output actually looks like one.
     "RUNTIME": "CODE_FAILURE",
-    "UNKNOWN": "CODE_FAILURE",
+    # We could not tell.  Guessing "your code is broken" here is exactly the
+    # misclassification that sent real engineering failures to a human as if
+    # they were product defects, so we say so instead.
+    "UNKNOWN": "UNCLASSIFIED_FAILURE",
 }
-RETRYABLE_STOP_CLASSES = frozenset({"TRANSIENT_FAILURE", "PROTOCOL_FAILURE"})
+# ENVIRONMENT_FAILURE is retryable because daemons and mounts come up late;
+# INVOCATION_FAILURE never is, because the same argv yields the same error.
+RETRYABLE_STOP_CLASSES = frozenset({
+    "TRANSIENT_FAILURE", "PROTOCOL_FAILURE", "ENVIRONMENT_FAILURE",
+})
 MAX_ATTEMPTS_CEILING = 5
 DEFAULT_MAX_ATTEMPTS = 3
 RETRY_BACKOFF_BASE_SECONDS = 2
@@ -219,6 +239,11 @@ class Config:
     # exhausted.  Inert unless `paid_overflow_authorized` is also true.
     paid_overflow_providers: frozenset[str] = dataclasses.field(default_factory=frozenset)
     paid_overflow_authorized: bool = False
+    # Hard ceilings on authorized paid capacity.  Both are enforced before a
+    # paid attempt is scheduled, so an exhausted free tier can never turn into
+    # unbounded spending.
+    paid_overflow_max_attempts: int = 1
+    paid_overflow_max_cost_usd: float = 5.0
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -236,11 +261,13 @@ class Config:
             "executable_paths", "provider_failover", "delivery_path_allowlists",
             "enabled_operations", "operation_definitions", "wake_pull_request",
             "max_attempts", "paid_overflow_providers", "paid_overflow_authorized",
+            "paid_overflow_max_attempts", "paid_overflow_max_cost_usd",
         }
         required = expected - {
             "delivery_path_allowlists", "enabled_operations", "operation_definitions",
             "wake_pull_request", "max_attempts", "paid_overflow_providers",
-            "paid_overflow_authorized",
+            "paid_overflow_authorized", "paid_overflow_max_attempts",
+            "paid_overflow_max_cost_usd",
         }
         unknown = set(raw) - expected
         missing = required - set(raw)
@@ -283,6 +310,12 @@ class Config:
             raw.get("paid_overflow_providers", []), WORKERS, "paid_overflow_providers")
         if paid_overflow_authorized and not paid_overflow_providers:
             raise ValidationError("paid overflow authorization requires at least one provider")
+        paid_overflow_max_attempts = bounded_int(
+            raw.get("paid_overflow_max_attempts", 1), 1, 3, "paid_overflow_max_attempts")
+        paid_cost = raw.get("paid_overflow_max_cost_usd", 5.0)
+        if (isinstance(paid_cost, bool) or not isinstance(paid_cost, (int, float))
+                or not 0 < float(paid_cost) <= 100):
+            raise ValidationError("paid_overflow_max_cost_usd must be a number in (0, 100]")
         if (not isinstance(raw["operational_executables"], dict)
                 or set(raw["operational_executables"]) != {"gh", "git", "python"}):
             raise ValidationError("operational_executables must contain gh, git, and python")
@@ -321,6 +354,8 @@ class Config:
                                      1, MAX_ATTEMPTS_CEILING, "max_attempts"),
             paid_overflow_providers=paid_overflow_providers,
             paid_overflow_authorized=paid_overflow_authorized,
+            paid_overflow_max_attempts=paid_overflow_max_attempts,
+            paid_overflow_max_cost_usd=float(paid_cost),
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -1399,6 +1434,19 @@ def execute_operation(job: OperationJob, config: Config, worktree: Path) -> Oper
         return OperationAttempt(result, None, "WORKTREE_DIRTY")
     return OperationAttempt(result, output, None)
 
+def observed_cost_usd(usage: str | None) -> float:
+    """Best-effort cost from a usage string; unknown cost counts as zero.
+
+    An unknown cost must not silently consume the ceiling, but it must also not
+    be invented.  The per-job attempt ceiling is the backstop for providers
+    that never report a price.
+    """
+    if not isinstance(usage, str):
+        return 0.0
+    match = re.search(r"cost_usd=([0-9]+(?:\.[0-9]+)?)", usage)
+    return float(match.group(1)) if match else 0.0
+
+
 def extract_visible_usage(text: str) -> str | None:
     match = re.search(r"(?i)\bcredits?\s*:\s*([0-9]+(?:\.[0-9]+)?)", text)
     if match: return f"credits={match.group(1)}"
@@ -1406,23 +1454,68 @@ def extract_visible_usage(text: str) -> str | None:
     if match: return f"cost_usd={match.group(1)}"
     return None
 
+# Ordered most-specific first.  Order matters: an invocation mistake often
+# also prints something that looks like a runtime error further down.
+INVOCATION_MARKERS = (
+    "usage:", "unrecognized argument", "unrecognized option", "unknown option",
+    "unknown flag", "unknown command", "unknown subcommand", "invalid option",
+    "invalid choice", "no such option", "unexpected argument", "expected one of",
+    "no tests found", "matched no tests", "testnamepattern", "found 0 tests",
+    "pattern did not match", "unknown argument", "missing required argument",
+    "cannot find module", "modulenotfounderror", "no configuration file found",
+)
+ENVIRONMENT_MARKERS = (
+    "command not found", "no such file or directory", "executable file not found",
+    "cannot connect to the docker daemon", "is the docker daemon running",
+    "connection refused", "could not connect", "network is unreachable",
+    "temporary failure in name resolution", "no space left on device",
+    "read-only file system", "address already in use", "daemon is not running",
+    "container is not running", "cannot allocate memory",
+)
+# Positive evidence that the work itself failed -- not merely that a process
+# exited nonzero.
+CODE_FAILURE_MARKERS = (
+    "assertionerror", "expect(", "tests:", "test suites:", "✕", "✗",
+    "error ts", "type error", "typeerror:", "failing", "failures:",
+    "assertion failed", "expected:", "snapshot test failed",
+)
+
+
 def classify_provider_error(result: Result | None, error: BaseException | None = None) -> str:
+    """Map an execution outcome onto an error category.
+
+    The bias is deliberate: a nonzero exit is NOT sufficient evidence that the
+    code under test is broken.  A wrong flag, a missing binary or a daemon that
+    is not up must be reported as what they are, because calling them a code
+    failure sends a human to debug a product that is fine.
+    """
     if isinstance(error, PermissionError): return "PERMISSION"
-    if isinstance(error, FileNotFoundError): return "UNAVAILABLE"
+    if isinstance(error, FileNotFoundError): return "ENVIRONMENT"
+    if isinstance(error, (OSError, RunnerError)) and error is not None:
+        return "ENVIRONMENT"
     if result is None: return "UNKNOWN"
     if result.timed_out: return "TIMEOUT"
     if result.overflow: return "OUTPUT_LIMIT"
     text = result.output.lower()
     patterns = (
+        ("PERMISSION", ("permission denied", "tool validation failed", "not allowed",
+                        "operation not permitted")),
         ("AUTH", ("not authenticated", "login required", "unauthorized", "authentication")),
         ("RATE_LIMIT", ("rate limit", "too many requests")),
         ("QUOTA", ("quota", "credits exhausted", "usage limit")),
         ("MODEL", ("unknown model", "unsupported model", "model not found")),
-        ("PERMISSION", ("permission denied", "tool validation failed", "not allowed")),
+        ("INVOCATION", INVOCATION_MARKERS),
+        ("ENVIRONMENT", ENVIRONMENT_MARKERS),
     )
     for category, needles in patterns:
-        if any(needle in text for needle in needles): return category
-    return "RUNTIME" if result.returncode else "UNKNOWN"
+        if any(needle in text for needle in needles):
+            return category
+    if not result.returncode:
+        return "UNKNOWN"
+    # Nonzero exit: only call it a code failure with positive evidence.
+    if any(marker in text for marker in CODE_FAILURE_MARKERS):
+        return "RUNTIME"
+    return "UNKNOWN"
 
 class QuotaLedger:
     """Locally records observed usage; unknown balances remain unknown."""
@@ -1443,6 +1536,21 @@ class QuotaLedger:
     def balance(self, worker: str) -> float | None:
         item = self.data.get(worker, {})
         return item.get("balance") if item.get("reset_key") == self.reset_key(worker) else None
+    def paid_spend(self) -> float:
+        """Observed paid-overflow spend inside the CURRENT paid window."""
+        item = self.data.get("__paid__", {})
+        if item.get("reset_key") != self.reset_key("kiro"):
+            return 0.0
+        try:
+            return float(item.get("spend_usd", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+    def record_paid_spend(self, amount: float) -> None:
+        if not isinstance(amount, (int, float)) or amount < 0:
+            raise ValidationError("paid spend must be a non-negative number")
+        self.data["__paid__"] = {"reset_key": self.reset_key("kiro"),
+                                 "spend_usd": self.paid_spend() + float(amount)}
+        self._write()
     def is_exhausted(self, worker: str) -> bool:
         """True only while the CURRENT quota window is known-exhausted.
 
@@ -1467,38 +1575,88 @@ class QuotaLedger:
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle: handle.write(payload)
 
+PREFERENCE_ORDER = {
+    "kiro": ("kiro", "copilot", "claude"),
+    "copilot": ("copilot", "kiro", "claude"),
+    "claude": ("claude", "kiro", "copilot"),
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class RouteStep:
+    worker: str
+    model: str
+    tier: str  # "free" or "paid"
+
+
+def plan_route(job: Job, config: Config,
+               ledger: "QuotaLedger | None" = None) -> list[RouteStep]:
+    """Build the ordered list of provider attempts for one job.
+
+    Two policies that used to be tangled are now separate:
+
+    * `provider_failover` governs whether we may SUBSTITUTE a different worker
+      for the one the Commander asked for.  It is a work-routing preference.
+    * paid overflow governs whether exhausted FREE capacity may be replaced by
+      authorized PAID capacity.  It is a spending decision.
+
+    Previously the first silently disabled the second: with
+    `provider_failover: false` the candidate list was truncated to one worker
+    before the paid tier was ever considered, so the owner's paid
+    authorization could never take effect.  Paid overflow now works regardless
+    of the failover setting, and is still gated on explicit authorization, a
+    per-job attempt ceiling and a spend ceiling.
+    """
+    capable = tuple(
+        worker for worker in PREFERENCE_ORDER[job.worker]
+        if worker in config.enabled_providers
+        and job.profile in PROVIDER_PROFILE_CAPABILITIES[worker]
+    )
+    # Substitution policy applies to the FREE tier only.
+    free_pool = capable if config.provider_failover else capable[:1]
+    if ledger is None:
+        return [RouteStep(worker, job.model if worker == job.worker
+                          else PROVIDER_DEFAULT_MODEL[worker], "free")
+                for worker in free_pool]
+
+    free = [worker for worker in free_pool if not ledger.is_exhausted(worker)]
+    steps = [RouteStep(worker, job.model if worker == job.worker
+                       else PROVIDER_DEFAULT_MODEL[worker], "free")
+             for worker in free]
+    if steps:
+        return steps
+
+    # Every free window this job may use is spent.  Paid overflow is the only
+    # remaining option and every gate must pass.
+    if not config.paid_overflow_authorized or not config.paid_overflow_providers:
+        return []
+    if config.paid_overflow_max_attempts < 1:
+        return []
+    if ledger.paid_spend() >= config.paid_overflow_max_cost_usd:
+        return []
+    paid_pool = [worker for worker in capable if worker in config.paid_overflow_providers]
+    return [RouteStep(worker, job.model if worker == job.worker
+                      else PROVIDER_DEFAULT_MODEL[worker], "paid")
+            for worker in paid_pool[:config.paid_overflow_max_attempts]]
+
+
 def route_candidates(job: Job, allow_failover: bool = True,
                      enabled: frozenset[str] = WORKERS,
                      ledger: "QuotaLedger | None" = None,
                      paid_overflow: frozenset[str] = frozenset(),
                      paid_overflow_authorized: bool = False) -> list[tuple[str, str]]:
-    """Order providers to try, cheapest authorized capacity first.
-
-    Free quota is spent before paid quota.  A provider whose free window is
-    known-exhausted drops out of the ordinary rotation; a provider listed in
-    `paid_overflow` is appended as a last resort ONLY when every free-quota
-    candidate is exhausted AND the owner has authorized paid overflow.
-    """
-    order = {
-        "kiro": ("kiro", "copilot", "claude"),
-        "copilot": ("copilot", "kiro", "claude"),
-        "claude": ("claude", "kiro", "copilot"),
-    }[job.worker]
-    if not allow_failover:
-        order = order[:1]
-    order = tuple(worker for worker in order
-                  if worker in enabled and job.profile in PROVIDER_PROFILE_CAPABILITIES[worker])
-    if ledger is not None:
-        free = tuple(worker for worker in order if not ledger.is_exhausted(worker))
-        if free:
-            order = free
-        elif paid_overflow_authorized:
-            # Every free window is spent; fall back to explicitly authorized
-            # paid capacity, preserving the configured preference order.
-            order = tuple(worker for worker in order if worker in paid_overflow)
-        else:
-            order = ()
-    return [(worker, job.model if worker == job.worker else PROVIDER_DEFAULT_MODEL[worker]) for worker in order]
+    """Backwards-compatible view of `plan_route` as (worker, model) pairs."""
+    shim = Config(
+        repository="x/y", queue_issue=1, commander_login="c", executor_login="e",
+        runner_id="shim", canonical_repo=Path("/"), worktree_root=Path("/"),
+        state_dir=Path("/"), origin_url="", runtime_dir=Path("/"),
+        operational_executables={}, enabled_providers=enabled,
+        enabled_profiles=frozenset(PROFILES), enabled_quality_gates=frozenset(),
+        quality_gates={}, provider_failover=allow_failover,
+        paid_overflow_providers=paid_overflow,
+        paid_overflow_authorized=paid_overflow_authorized,
+    )
+    return [(step.worker, step.model) for step in plan_route(job, shim, ledger)]
 
 def with_provider(job: Job, worker: str, model: str) -> Job:
     if worker not in WORKERS or job.profile not in PROVIDER_PROFILE_CAPABILITIES[worker]:
@@ -1618,9 +1776,7 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
     """
     attempts: list[ProviderAttempt] = []
     ledger = QuotaLedger(config.state_dir)
-    candidates = route_candidates(
-        job, config.provider_failover, config.enabled_providers, ledger,
-        config.paid_overflow_providers, config.paid_overflow_authorized)
+    candidates = plan_route(job, config, ledger)
     if not candidates:
         raise RunnerError("no enabled provider has authorized remaining capacity for the job")
 
@@ -1633,7 +1789,8 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
         attempts.append(attempt)
         return attempt
 
-    for index, (worker, model) in enumerate(candidates):
+    for index, step in enumerate(candidates):
+        worker, model = step.worker, step.model
         if ordinal >= budget:
             break
         ordinal += 1
@@ -1657,9 +1814,14 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
                 return blocked, attempts
             return attempt, attempts
 
-        # Persist before parsing.  This is the whole recovery guarantee.
-        with contextlib.suppress(OSError, ValidationError):
+        # Persist before parsing.  This is the whole recovery guarantee, so a
+        # failure here is NOT swallowed: without the bytes on disk we can no
+        # longer recover a parse failure for free, and publishing a success we
+        # cannot reproduce would be a lie.  Fail the attempt instead.
+        try:
             store_raw_output(config.state_dir, job.job_id, result.output, ordinal=ordinal)
+        except (OSError, ValidationError):
+            return record(worker, model, result, None, "PERSISTENCE"), attempts
 
         if result.returncode or result.timed_out or result.overflow:
             category = classify_provider_error(result)
@@ -1689,6 +1851,10 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
         if normalized.usage is None:
             normalized = dataclasses.replace(normalized, usage=extract_visible_usage(result.output))
         ledger.record(worker, normalized.usage)
+        if step.tier == "paid":
+            # Charge observed cost against the paid ceiling so the next job
+            # sees the spend even if this process dies immediately after.
+            ledger.record_paid_spend(observed_cost_usd(normalized.usage))
         return record(worker, model, result, normalized, None), attempts
 
     if not attempts:
@@ -2161,8 +2327,7 @@ def install_stable_runtime(config: Config, source: Path) -> tuple[Path, str]:
             raise RunnerError("stable runtime verification failed")
         manifest_fd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(manifest_fd, "w", encoding="utf-8") as handle:
-            json.dump({"version": 2, "entrypoint": target.name, "files": digests},
-                      handle, sort_keys=True)
+            json.dump(build_manifest(source, digests, target.name), handle, sort_keys=True)
         os.replace(staging, runtime_dir)
     except Exception:
         if staging.exists():
@@ -2170,31 +2335,158 @@ def install_stable_runtime(config: Config, source: Path) -> tuple[Path, str]:
         raise
     return runtime_dir / target.name, digests[target.name]
 
-def runtime_manifest_health(config: Config) -> bool:
-    manifest = config.runtime_dir / "runtime-manifest.json"
+RUNTIME_MANIFEST_SCHEMA = 3
+RUNTIME_SOURCE_SUBDIR = "tools/commander-runner"
+RUNTIME_FILES = ("commander_runner.py", "rehearsal_operations.py")
+
+
+def source_commit_for(source: Path) -> str | None:
+    """The git commit the runtime is being installed FROM, if knowable."""
+    git = shutil.which("git")
+    if git is None:
+        return None
     try:
-        if (config.runtime_dir.is_symlink()
-                or stat.S_IMODE(config.runtime_dir.stat().st_mode) != 0o700
+        result = execute([git, "rev-parse", "--verify", "HEAD"], timeout=15, cap=4096,
+                         cwd=source.parent, env=safe_environment())
+    except (OSError, RunnerError):
+        return None
+    head = result.output.strip()
+    if result.returncode or not SHA_RE.fullmatch(head):
+        return None
+    return head
+
+
+def build_manifest(source: Path, digests: Mapping[str, str], entrypoint: str) -> dict[str, Any]:
+    """Provenance record written beside the installed runtime.
+
+    Hashes alone only prove the files have not changed SINCE install.  Recording
+    the source commit lets `doctor` answer the question that actually matters:
+    is the runtime on this host the one that repository state says it is?
+    """
+    return {
+        "schema_version": RUNTIME_MANIFEST_SCHEMA,
+        "entrypoint": entrypoint,
+        "source_commit": source_commit_for(source),
+        "installed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "files": dict(digests),
+    }
+
+
+def runtime_root(config: Config) -> Path:
+    """Where the live runtime actually lives.
+
+    The transactional installer keeps immutable version directories under
+    `versions/` and flips a `current` symlink, so the active runtime is
+    `runtime_dir/current`.  A directly-populated `runtime_dir` (the original
+    flat layout, still installed on existing hosts) is honoured unchanged.
+    """
+    current = config.runtime_dir / "current"
+    if current.is_symlink():
+        return current.resolve(strict=False)
+    return config.runtime_dir
+
+
+def runtime_manifest_health(config: Config) -> dict[str, Any]:
+    """Verify the installed runtime's integrity AND its provenance.
+
+    Returns a structured report rather than a bare boolean so `doctor` can say
+    which property failed: a tampered file and an unverifiable commit are very
+    different problems.
+    """
+    report: dict[str, Any] = {
+        "ok": False, "schema_version": None, "source_commit": None,
+        "installed_at": None, "files_match_manifest": False,
+        "matches_source_commit": None, "reason": None,
+    }
+    root = runtime_root(config)
+    manifest = root / "runtime-manifest.json"
+    try:
+        current = config.runtime_dir / "current"
+        if current.is_symlink():
+            versions = (config.runtime_dir / "versions").resolve(strict=False)
+            # A `current` pointer that escapes the versions directory would let
+            # anything on the host become the runtime.
+            if not (root == versions or root.parent == versions):
+                report["reason"] = "current runtime pointer escapes the versions directory"
+                return report
+        if (root.is_symlink() or stat.S_IMODE(root.stat().st_mode) != 0o700
                 or manifest.is_symlink() or stat.S_IMODE(manifest.stat().st_mode) != 0o600):
-            return False
+            report["reason"] = "runtime directory or manifest has unsafe permissions"
+            return report
         value = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    files = value.get("files") if isinstance(value, dict) else None
-    if (value.get("version") != 2 or value.get("entrypoint") != "commander_runner.py"
-            or not isinstance(files, dict)
-            or set(files) != {"commander_runner.py", "rehearsal_operations.py"}):
-        return False
+    except (OSError, json.JSONDecodeError) as exc:
+        report["reason"] = f"manifest unreadable: {exc.__class__.__name__}"
+        return report
+    if not isinstance(value, dict):
+        report["reason"] = "manifest is not an object"
+        return report
+    report["schema_version"] = value.get("schema_version", value.get("version"))
+    report["source_commit"] = value.get("source_commit")
+    report["installed_at"] = value.get("installed_at")
+    if report["schema_version"] != RUNTIME_MANIFEST_SCHEMA:
+        report["reason"] = (
+            "legacy manifest without provenance; reinstall to record source_commit"
+            if report["schema_version"] in (1, 2) else "unsupported manifest schema")
+        return report
+    files = value.get("files")
+    if (value.get("entrypoint") != "commander_runner.py" or not isinstance(files, dict)
+            or set(files) != set(RUNTIME_FILES)):
+        report["reason"] = "manifest does not describe the expected runtime files"
+        return report
+    installed: dict[str, str] = {}
     for name, expected in files.items():
-        path = config.runtime_dir / name
+        path = root / name
         if (path.is_symlink() or not path.is_file()
                 or stat.S_IMODE(path.stat().st_mode) != 0o700 or not os.access(path, os.X_OK)
                 or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)):
-            return False
+            report["reason"] = f"{name}: missing, unsafe mode, or malformed digest"
+            return report
         try:
-            if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-                return False
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
+            report["reason"] = f"{name}: unreadable"
+            return report
+        if actual != expected:
+            report["reason"] = f"{name}: content does not match the manifest digest"
+            return report
+        installed[name] = actual
+    report["files_match_manifest"] = True
+
+    commit = report["source_commit"]
+    if not isinstance(commit, str) or not SHA_RE.fullmatch(commit):
+        report["reason"] = "manifest records no usable source commit"
+        return report
+    report["matches_source_commit"] = verify_against_commit(config, commit, installed)
+    if report["matches_source_commit"] is False:
+        report["reason"] = "installed runtime differs from the commit it claims to come from"
+        return report
+    if report["matches_source_commit"] is None:
+        report["reason"] = "source commit not available locally; provenance unverified"
+        return report
+    report["ok"] = True
+    return report
+
+
+def verify_against_commit(config: Config, commit: str,
+                          installed: Mapping[str, str]) -> bool | None:
+    """Compare installed bytes with the repository content at `commit`.
+
+    Returns None when the commit is simply not present locally -- that is an
+    unverified state, not a failed one, and the caller distinguishes them.
+    """
+    git = config.operational_executables.get("git")
+    if not git or not Path(git).is_file() or not config.canonical_repo.is_dir():
+        return None
+    for name, digest in installed.items():
+        try:
+            result = execute([git, "cat-file", "blob", f"{commit}:{RUNTIME_SOURCE_SUBDIR}/{name}"],
+                             timeout=30, cap=MAX_OUTPUT_BYTES, cwd=config.canonical_repo,
+                             env=safe_environment())
+        except (OSError, RunnerError):
+            return None
+        if result.returncode or result.timed_out or result.overflow:
+            return None
+        if hashlib.sha256(result.output.encode("utf-8")).hexdigest() != digest:
             return False
     return True
 
@@ -2224,19 +2516,22 @@ def doctor(config: Config) -> dict[str, Any]:
         "operational_executables": operational,
         "quality_gates": gates,
         "operations": operations,
-        "runtime_manifest": (runtime_manifest_health(config)
-                             if config.enabled_operations else True),
+        "runtime_manifest": runtime_manifest_health(config),
     }
     booleans_ok = all(value for key, value in checks.items()
                       if key not in {"providers", "operational_executables", "quality_gates",
-                                     "operations", "outbound_policy"})
+                                     "operations", "outbound_policy", "runtime_manifest"})
+    # Provenance is only required once the runtime is actually installed; a
+    # fresh host with no runtime_dir yet is not unhealthy.
+    manifest_ok = (checks["runtime_manifest"]["ok"]
+                   if config.runtime_dir.exists() else True)
     provider_ok = all(not item["enabled"] or (item["available"] and item["interface_ok"])
                       for item in providers.values())
     operational_ok = all(item["available"] and item["interface_ok"] for item in operational.values())
     operation_ok = all(not item["enabled"] or (item["available"] and item["interface_ok"])
                        for item in operations.values())
     checks["ok"] = (booleans_ok and provider_ok and operational_ok and operation_ok
-                    and all(gates.values()))
+                    and manifest_ok and all(gates.values()))
     return checks
 
 def run_once(config: Config, dry_run: bool = False) -> str:
@@ -2309,8 +2604,15 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                         operation_attempt = execute_operation(job, config, worktree)
                         result = operation_attempt.result
                         if result:
-                            with contextlib.suppress(OSError, ValidationError):
+                            # Persistence failure downgrades the outcome: an
+                            # operation whose evidence we could not store must
+                            # never be published as COMPLETED.
+                            try:
                                 store_raw_output(config.state_dir, job.job_id, result.output)
+                            except (OSError, ValidationError):
+                                operation_attempt = dataclasses.replace(
+                                    operation_attempt, output=None,
+                                    error_category="PERSISTENCE")
                         state.record_attempt(
                             job.job_id, 1, None, None, operation_attempt.error_category,
                             stop_class_for(operation_attempt.error_category))

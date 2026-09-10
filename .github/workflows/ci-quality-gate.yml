@@ -50,6 +50,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify the kit runner has not drifted from its source
+        run: python3 project-commander-kit/scripts/sync_from_source.py --check
+
       - name: Run Commander Runner offline suite
         run: python3 -m unittest discover -s tools/commander-runner/tests -v
 
