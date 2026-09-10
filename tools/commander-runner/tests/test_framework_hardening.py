@@ -520,6 +520,61 @@ class TargetBindingTests(HardeningTestCase):
                     human_approval_ref="issue-21"))
 
 
+class LaunchAgentConsistencyTests(HardeningTestCase):
+    """An upgrade launchd cannot see is not an upgrade.
+
+    Two installers existed: one pointed the LaunchAgent at a flat runtime_dir
+    file, the transactional one moves a `current` symlink.  After a
+    transactional upgrade the pointer moved but launchd kept running the old
+    flat file while every other check reported the new version as healthy.
+    """
+
+    def plist(self, script):
+        home = Path(self.tmp.name) / "home"
+        agents = home / "Library/LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        path = agents / "com.landlordeasy.commander-runner.plist"
+        import plistlib
+        path.write_bytes(plistlib.dumps({
+            "Label": "com.landlordeasy.commander-runner",
+            "ProgramArguments": [sys.executable, str(script), "--config", "/x/cfg.json", "serve"],
+        }))
+        return home
+
+    def test_flat_plist_after_versioned_install_is_inconsistent(self):
+        self.runtime.mkdir(parents=True)
+        version = self.runtime / "versions" / "v1"
+        version.mkdir(parents=True)
+        (version / "commander_runner.py").write_text("# v1\n")
+        os.symlink(version, self.runtime / "current")
+        home = self.plist(self.runtime / "commander_runner.py")  # the flat, stale path
+        with mock.patch.object(runner.Path, "home", return_value=home):
+            health = runner.launchagent_health(self.config)
+        self.assertIs(health["consistent"], False)
+
+    def test_plist_following_current_is_consistent(self):
+        self.runtime.mkdir(parents=True)
+        version = self.runtime / "versions" / "v1"
+        version.mkdir(parents=True)
+        (version / "commander_runner.py").write_text("# v1\n")
+        os.symlink(version, self.runtime / "current")
+        home = self.plist(self.runtime / "current" / "commander_runner.py")
+        with mock.patch.object(runner.Path, "home", return_value=home):
+            self.assertIs(runner.launchagent_health(self.config)["consistent"], True)
+
+    def test_plist_for_another_install_is_not_ours_to_judge(self):
+        """A second project on the same host must not fail this config's doctor."""
+        home = self.plist(Path(self.tmp.name) / "elsewhere" / "commander_runner.py")
+        with mock.patch.object(runner.Path, "home", return_value=home):
+            self.assertIsNone(runner.launchagent_health(self.config)["consistent"])
+
+    def test_no_plist_is_fine_before_first_install(self):
+        home = Path(self.tmp.name) / "home-empty"
+        home.mkdir()
+        with mock.patch.object(runner.Path, "home", return_value=home):
+            self.assertIs(runner.launchagent_health(self.config)["consistent"], True)
+
+
 # --- D11 / D12: quota-aware routing and authorized paid overflow -------------
 
 class QuotaRoutingTests(HardeningTestCase):
@@ -595,7 +650,48 @@ class StopConditionTests(HardeningTestCase):
         self.assertEqual(runner.stop_class_for("OUTPUT_VALIDATION"), "PROTOCOL_FAILURE")
         self.assertEqual(runner.stop_class_for("RUNTIME"), "CODE_FAILURE")
         self.assertIn("TRANSIENT_FAILURE", runner.RETRYABLE_STOP_CLASSES)
-        self.assertIn("PROTOCOL_FAILURE", runner.RETRYABLE_STOP_CLASSES)
+        # A protocol failure is recovered LOCALLY from persisted bytes.  It is
+        # deliberately not retryable: retrying would re-invoke the model.
+        self.assertEqual(runner.policy_for("OUTPUT_VALIDATION"), "LOCAL_RECOVERY")
+        self.assertNotIn("PROTOCOL_FAILURE", runner.RETRYABLE_STOP_CLASSES)
+
+    def test_every_stop_class_has_exactly_one_policy_and_retryable_is_derived(self):
+        for stop_class in runner.STOP_CLASSES:
+            self.assertIn(runner.STOP_CLASS_POLICY[stop_class], runner.POLICIES)
+        self.assertEqual(
+            runner.RETRYABLE_STOP_CLASSES,
+            frozenset(c for c, p in runner.STOP_CLASS_POLICY.items() if p == "BOUNDED_RETRY"))
+        for category in ("PERMISSION", "WORKTREE_DIRTY"):
+            self.assertEqual(runner.policy_for(category), "FAIL_CLOSED")
+
+    def test_read_only_timeout_fails_over_when_failover_is_enabled(self):
+        """Behavior change, stated plainly: a read-only job that times out on
+        one provider may try another.  It has no side effects and the attempt
+        budget is bounded, so the taxonomy's TRANSIENT verdict now actually
+        drives scheduling instead of being overruled by a hidden list."""
+        config = runner.dataclasses.replace(self.config, provider_failover=True, max_attempts=2)
+        timed_out = runner.Result(-15, "", True, False, 30.0)
+        with mock.patch.object(runner, "execute", return_value=timed_out) as execute:
+            _, attempts = runner.execute_with_failover(
+                self.job(worker="claude", model="claude-sonnet-5"), config, self.worktrees,
+                sleeper=lambda _: None)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(execute.call_count, 2)
+
+    def test_write_timeout_with_a_dirty_tree_is_a_safety_stop_not_a_retry(self):
+        config = runner.dataclasses.replace(
+            self.config, provider_failover=True, max_attempts=2,
+            enabled_quality_gates=frozenset({"none", "unit"}))
+        job = self.job(worker="claude", model="claude-sonnet-5",
+                       profile="repo_write_test", quality_gate="unit")
+        timed_out = runner.Result(-15, "", True, False, 30.0)
+        with mock.patch.object(runner, "execute", return_value=timed_out) as execute, \
+             mock.patch.object(runner, "worktree_is_clean", return_value=False):
+            final, attempts = runner.execute_with_failover(
+                job, config, self.worktrees, sleeper=lambda _: None)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(final.error_category, "WORKTREE_DIRTY")
+        self.assertEqual(runner.policy_for(final.error_category), "FAIL_CLOSED")
 
     def test_backoff_grows_and_stays_bounded(self):
         delays = [runner.retry_backoff_seconds(n) for n in range(1, 6)]

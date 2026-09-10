@@ -975,8 +975,12 @@ class ProviderAndQuotaTests(RunnerTestCase):
     def test_error_classification_and_safe_failover(self):
         result = runner.Result(1, "authentication required", False, False, 0.1)
         self.assertEqual(runner.classify_provider_error(result), "AUTH")
-        self.assertIn("AUTH", runner.SAFE_FAILOVER_CATEGORIES)
-        self.assertNotIn("TIMEOUT", runner.SAFE_FAILOVER_CATEGORIES)
+        # Scheduling is decided by policy, not by a second hand-kept list.
+        self.assertEqual(runner.policy_for("AUTH"), "BOUNDED_RETRY")
+        # TIMEOUT is transient by the documented taxonomy; the old separate
+        # list contradicted that and made the docs false in practice.
+        self.assertEqual(runner.policy_for("TIMEOUT"), "BOUNDED_RETRY")
+        self.assertEqual(runner.policy_for("INVOCATION"), "REPORT_AND_STOP")
         job = runner.Job.from_comment(self.comment(), self.config)
         calls = []
         def fake_execute(argv, **kwargs):

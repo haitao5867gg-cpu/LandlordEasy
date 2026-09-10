@@ -78,7 +78,6 @@ ERROR_CATEGORIES = frozenset({
     "OUTPUT_LIMIT", "OUTPUT_VALIDATION", "PERMISSION", "UNAVAILABLE", "WORKTREE_DIRTY",
     "INVOCATION", "ENVIRONMENT", "PERSISTENCE", "UNKNOWN",
 })
-SAFE_FAILOVER_CATEGORIES = frozenset({"AUTH", "RATE_LIMIT", "QUOTA", "MODEL", "UNAVAILABLE"})
 
 # Stop-condition taxonomy.  Only SAFETY_STOP and HUMAN_APPROVAL_REQUIRED are
 # fail-closed conditions; the rest are ordinary engineering outcomes that may be
@@ -121,11 +120,24 @@ ERROR_CATEGORY_STOP_CLASS = {
     # they were product defects, so we say so instead.
     "UNKNOWN": "UNCLASSIFIED_FAILURE",
 }
-# ENVIRONMENT_FAILURE is retryable because daemons and mounts come up late;
-# INVOCATION_FAILURE never is, because the same argv yields the same error.
-RETRYABLE_STOP_CLASSES = frozenset({
-    "TRANSIENT_FAILURE", "PROTOCOL_FAILURE", "ENVIRONMENT_FAILURE",
-})
+# The eight stop classes are DIAGNOSTIC: they say whose fault it was.  What
+# the runner actually DOES about it is one of four policies.  Keeping the two
+# axes separate is what lets the taxonomy drive scheduling instead of
+# decorating the terminal record while a second, unrelated list decided.
+POLICIES = frozenset({"FAIL_CLOSED", "LOCAL_RECOVERY", "BOUNDED_RETRY", "REPORT_AND_STOP"})
+STOP_CLASS_POLICY = {
+    "SAFETY_STOP": "FAIL_CLOSED",
+    "HUMAN_APPROVAL_REQUIRED": "FAIL_CLOSED",
+    "PROTOCOL_FAILURE": "LOCAL_RECOVERY",
+    "TRANSIENT_FAILURE": "BOUNDED_RETRY",
+    "ENVIRONMENT_FAILURE": "BOUNDED_RETRY",
+    "INVOCATION_FAILURE": "REPORT_AND_STOP",
+    "CODE_FAILURE": "REPORT_AND_STOP",
+    "UNCLASSIFIED_FAILURE": "REPORT_AND_STOP",
+}
+# Derived, never hand-maintained: a class is retryable iff its policy says so.
+RETRYABLE_STOP_CLASSES = frozenset(
+    cls for cls, policy in STOP_CLASS_POLICY.items() if policy == "BOUNDED_RETRY")
 MAX_ATTEMPTS_CEILING = 5
 DEFAULT_MAX_ATTEMPTS = 3
 RETRY_BACKOFF_BASE_SECONDS = 2
@@ -1880,7 +1892,15 @@ def worktree_is_clean(config: Config, worktree: Path) -> bool:
         return False
 
 def failover_allowed_after(attempt: ProviderAttempt, job: Job, config: Config, worktree: Path) -> bool:
-    if attempt.error_category not in SAFE_FAILOVER_CATEGORIES:
+    """Policy decides; the worktree check is the only extra gate for writers.
+
+    Previously a separate hard-coded set decided this and did not even include
+    TIMEOUT, so the documented taxonomy ("TIMEOUT is transient, retry it") was
+    false in practice.  A read-only job with a bounded budget may now fail
+    over on any BOUNDED_RETRY category; a write-capable job may only do so if
+    the tree is provably untouched.
+    """
+    if policy_for(attempt.error_category) != "BOUNDED_RETRY":
         return False
     if job.profile == "repo_read":
         return True
@@ -1890,7 +1910,12 @@ def stop_class_for(error_category: str | None) -> str | None:
     """Map a provider error category onto the coarse stop taxonomy."""
     if error_category is None:
         return None
-    return ERROR_CATEGORY_STOP_CLASS.get(error_category, "CODE_FAILURE")
+    return ERROR_CATEGORY_STOP_CLASS.get(error_category, "UNCLASSIFIED_FAILURE")
+
+def policy_for(error_category: str | None) -> str | None:
+    """The one of four actions the runner takes for this error category."""
+    stop_class = stop_class_for(error_category)
+    return None if stop_class is None else STOP_CLASS_POLICY[stop_class]
 
 def retry_backoff_seconds(ordinal: int) -> int:
     """Exponential backoff, bounded, for TRANSIENT_FAILURE retries."""
@@ -1941,7 +1966,7 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
                 if more_attempts_remain:
                     sleeper(retry_backoff_seconds(ordinal))
                 continue
-            if category in SAFE_FAILOVER_CATEGORIES and job.profile != "repo_read":
+            if policy_for(category) == "BOUNDED_RETRY" and job.profile != "repo_read":
                 blocked = dataclasses.replace(attempt, error_category="WORKTREE_DIRTY")
                 attempts[-1] = blocked
                 return blocked, attempts
@@ -1965,7 +1990,7 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
                 if more_attempts_remain:
                     sleeper(retry_backoff_seconds(ordinal))
                 continue
-            if category in SAFE_FAILOVER_CATEGORIES and job.profile != "repo_read":
+            if policy_for(category) == "BOUNDED_RETRY" and job.profile != "repo_read":
                 blocked = dataclasses.replace(attempt, error_category="WORKTREE_DIRTY")
                 attempts[-1] = blocked
                 return blocked, attempts
@@ -2456,6 +2481,48 @@ def make_launchagent(template: Mapping[str, Any], python: str, script: str, conf
     data["RunAtLoad"] = True
     return plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=True)
 
+def launchagent_script(path: Path) -> Path | None:
+    """The script launchd actually runs, or None if the plist is unreadable."""
+    try:
+        data = plistlib.loads(path.read_bytes())
+        arguments = data.get("ProgramArguments") or []
+        return Path(arguments[1]) if len(arguments) > 1 else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+def launchagent_health(config: Config) -> dict[str, Any]:
+    """Does launchd run the runtime `doctor` is inspecting?
+
+    Two installers existed: one wrote a flat runtime_dir and pointed the
+    LaunchAgent at it; the transactional one writes versions/ and a `current`
+    symlink.  After a transactional upgrade the pointer moved but launchd kept
+    executing the flat file, and every other check happily reported the new
+    version as healthy.  An upgrade that launchd does not see is not an
+    upgrade, so this mismatch is a failed check.
+    """
+    path = launchagent_path()
+    report: dict[str, Any] = {"present": path.is_file(), "script": None,
+                              "runtime_script": str(runtime_root(config) / "commander_runner.py"),
+                              "consistent": None}
+    if not report["present"]:
+        report["consistent"] = True  # nothing installed under launchd yet
+        return report
+    script = launchagent_script(path)
+    report["script"] = str(script) if script else None
+    if script is None:
+        report["consistent"] = False
+        return report
+    resolved = script.resolve(strict=False)
+    runtime_dir = config.runtime_dir.resolve(strict=False)
+    if resolved != runtime_dir and runtime_dir not in resolved.parents:
+        # launchd runs something outside this config's runtime_dir: another
+        # project or another install.  Not ours to judge -- and not a pass.
+        report["consistent"] = None
+        return report
+    expected = (runtime_root(config) / "commander_runner.py").resolve(strict=False)
+    report["consistent"] = resolved == expected
+    return report
+
 def launchagent_path() -> Path:
     return Path.home() / "Library/LaunchAgents/com.landlordeasy.commander-runner.plist"
 
@@ -2696,11 +2763,12 @@ def doctor(config: Config) -> dict[str, Any]:
         "operations": operations,
         "runtime_manifest": runtime_manifest_health(config),
         "wake_destination": wake_destination_health(config),
+        "launchagent": launchagent_health(config),
     }
     booleans_ok = all(value for key, value in checks.items()
                       if key not in {"providers", "operational_executables", "quality_gates",
                                      "operations", "outbound_policy", "runtime_manifest",
-                                     "wake_destination"})
+                                     "wake_destination", "launchagent"})
     # Provenance is only required once the runtime is actually installed; a
     # fresh host with no runtime_dir yet is not unhealthy.
     manifest_ok = (checks["runtime_manifest"]["ok"]
@@ -2711,8 +2779,9 @@ def doctor(config: Config) -> dict[str, Any]:
     operation_ok = all(not item["enabled"] or (item["available"] and item["interface_ok"])
                        for item in operations.values())
     wake_ok = checks["wake_destination"]["usable"] is not False
+    launchagent_ok = checks["launchagent"]["consistent"] is not False
     checks["ok"] = (booleans_ok and provider_ok and operational_ok and operation_ok
-                    and manifest_ok and wake_ok and all(gates.values()))
+                    and manifest_ok and wake_ok and launchagent_ok and all(gates.values()))
     return checks
 
 def run_once(config: Config, dry_run: bool = False) -> str:
@@ -2859,6 +2928,7 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                         detail = (f"operation={job.operation_id}; attempts=1; "
                                   f"attempt_id={attempt_id_for(job.job_id, 1)}; "
                                   f"stop_class={stop_class_for(operation_attempt.error_category) or 'NONE'}; "
+                                  f"policy={policy_for(operation_attempt.error_category) or 'NONE'}; "
                                   f"exit={exit_code}; duration={duration:.1f}s; "
                                   f"{redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)}")
                     else:
@@ -2911,6 +2981,7 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                         detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
                                   f"attempt_id={attempt_id_for(job.job_id, ordinal)}; "
                                   f"stop_class={stop_class or 'NONE'}; "
+                                  f"policy={policy_for(attempt.error_category) or 'NONE'}; "
                                   f"quality_gate={job.quality_gate}; "
                                   f"exit={exit_code}; duration={duration:.1f}s; {evidence}{artifact_note}")
                 except RunnerError as exc:
@@ -2934,12 +3005,42 @@ def command_install(args: argparse.Namespace) -> int:
     destination = launchagent_path()
     if destination.exists(): raise RunnerError("LaunchAgent already exists; refusing to overwrite")
     runtime_script, digest = install_stable_runtime(config, Path(__file__).resolve())
+    # If the transactional installer owns runtime_dir, launchd must follow its
+    # `current` pointer, not a flat file that later upgrades will not touch.
+    current = config.runtime_dir / "current"
+    if current.is_symlink():
+        runtime_script = current / "commander_runner.py"
     template = {"Label": "com.landlordeasy.commander-runner", "RunAtLoad": True, "KeepAlive": True}
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(make_launchagent(template, config.operational_executables["python"],
                                              str(runtime_script), str(Path(args.config).resolve()),
                                              str(config.state_dir)))
     os.chmod(destination, 0o600); print(f"Installed but not loaded. sha256={digest}"); return 0
+
+def command_relink(config: Config, confirm: bool) -> int:
+    """Point the LaunchAgent at the active runtime (runtime_dir/current/...).
+
+    Backs the plist up first; never deletes.  Takes effect on the next
+    stop/start, which stays an explicit operator action.
+    """
+    destination = launchagent_path(); verify_owned_launchagent(destination)
+    target = runtime_root(config) / "commander_runner.py"
+    if not target.is_file():
+        raise RunnerError("active runtime entrypoint is missing; install or upgrade first")
+    health = launchagent_health(config)
+    print(json.dumps(health, sort_keys=True))
+    if health["consistent"]:
+        print("LaunchAgent already points at the active runtime."); return 0
+    if not confirm: print("Not relinked: pass --confirm after review."); return 0
+    data = plistlib.loads(destination.read_bytes())
+    arguments = list(data.get("ProgramArguments") or [])
+    if len(arguments) < 2: raise RunnerError("LaunchAgent has no program arguments to relink")
+    backup = destination.with_name(destination.name + f".{int(time.time())}.bak")
+    shutil.copy2(destination, backup); os.chmod(backup, 0o600)
+    arguments[1] = str(target); data["ProgramArguments"] = arguments
+    destination.write_bytes(plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=True))
+    os.chmod(destination, 0o600)
+    print(f"RELINKED -> {target} (backup: {backup.name}); restart the runner to apply"); return 0
 
 def command_start() -> int:
     destination = launchagent_path(); verify_owned_launchagent(destination)
@@ -2970,6 +3071,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     recover.add_argument("--job", required=True, help="job UUID to recover")
     subs.add_parser("serve")
     subs.add_parser("start"); subs.add_parser("stop")
+    relink = subs.add_parser("relink-launchagent",
+                             help="point the LaunchAgent at runtime_dir/current (backs up the plist)")
+    relink.add_argument("--confirm", action="store_true")
     uninstall = subs.add_parser("uninstall"); uninstall.add_argument("--confirm", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -2995,6 +3099,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"runner error: {exc}", file=sys.stderr)
                     delay = min(600, max(config.poll_seconds, delay * 2))
                 time.sleep(delay)
+        if args.command == "relink-launchagent": return command_relink(config, args.confirm)
         if args.command == "start": return command_start()
         if args.command == "stop": return command_stop()
         if args.command == "uninstall": return command_uninstall(args)
