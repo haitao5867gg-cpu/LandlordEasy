@@ -159,9 +159,13 @@ def run_tests() -> dict:
     if os.environ.get(SELFTEST_GUARD):
         return {"passed": True, "summary": "skipped: already inside the kit self-test"}
     environment = dict(os.environ, **{SELFTEST_GUARD: "1"})
+    # Test the tree we INSTALL from.  Testing the kit copy while installing
+    # from tools/ meant a drift between the two could pass its own tests and
+    # still ship bytes that were never exercised.  The sync check makes drift
+    # unlikely; this makes it irrelevant.
     result = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover", "-s", str(KIT / "runner" / "tests")],
-        capture_output=True, text=True, cwd=str(KIT), env=environment, timeout=900)
+        [sys.executable, "-m", "unittest", "discover", "-s", str(SOURCE / "tests")],
+        capture_output=True, text=True, cwd=str(REPO), env=environment, timeout=900)
     tail = (result.stderr or result.stdout).strip().splitlines()
     return {"passed": result.returncode == 0, "summary": tail[-1] if tail else ""}
 

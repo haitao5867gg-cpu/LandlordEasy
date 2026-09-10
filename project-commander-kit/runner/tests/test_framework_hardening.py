@@ -273,17 +273,31 @@ class OutputRecoveryTests(HardeningTestCase):
 
     def test_long_claude_report_is_no_longer_discarded(self):
         """Incident: a 403s, exit-0, $0.91 Claude review with a 12131-char
-        summary was dropped whole because the cap was 2000 characters."""
+        summary was dropped whole because the cap was 2000 characters.
+
+        Length is no longer a rejection reason at all: the Issue gets a marked
+        excerpt, the artifact gets every character.
+        """
         summary = "F" * 12131
         output = runner.normalize_provider_output(self.claude_envelope(summary))
         self.assertEqual(output.status, "ok")
-        self.assertEqual(len(output.summary), 12131)
+        self.assertEqual(output.summary_chars, 12131)          # nothing lost
+        self.assertEqual(output.report_text, summary)
+        self.assertTrue(output.truncated)
+        self.assertLessEqual(len(output.summary), runner.MAX_SUMMARY_CHARS)
+        self.assertIn("full text in artifact", output.summary)
         self.assertEqual(output.usage, "cost_usd=0.9081394")
 
-    def test_summary_beyond_the_new_bound_is_still_refused(self):
+    def test_short_summary_is_passed_through_untouched(self):
+        output = runner.normalize_provider_output(self.claude_envelope("brief"))
+        self.assertEqual(output.summary, "brief")
+        self.assertFalse(output.truncated)
+        self.assertIsNone(output.full_summary)
+
+    def test_only_a_pathological_summary_is_refused(self):
         with self.assertRaises(runner.ValidationError):
             runner.normalize_provider_output(
-                self.claude_envelope("F" * (runner.MAX_SUMMARY_CHARS + 1)))
+                self.claude_envelope("F" * (runner.MAX_SUMMARY_CHARS_HARD + 1)))
 
     def test_raw_output_is_persisted_before_parsing_and_recovers_for_free(self):
         """The recovery guarantee: bytes hit disk before we try to parse them."""
@@ -292,7 +306,8 @@ class OutputRecoveryTests(HardeningTestCase):
         recovered = runner.renormalize_job(self.state, JOB_ID)
         self.assertEqual(recovered["provider_calls"], 0)
         self.assertEqual(recovered["status"], "ok")
-        self.assertEqual(recovered["summary_chars"], 9000)
+        self.assertEqual(recovered["summary_chars"], 9000)      # full length, not the excerpt
+        self.assertTrue(recovered["summary_truncated_for_issue"])
         self.assertEqual(recovered["evidence_items"], 2)
         self.assertTrue(Path(recovered["artifact"]).is_file())
         self.assertRegex(recovered["artifact_sha256"], r"^[0-9a-f]{64}$")
@@ -329,10 +344,12 @@ class OutputRecoveryTests(HardeningTestCase):
         self.assertIn("renormalize", terminal)
 
     def test_artifact_holds_the_full_report_while_the_issue_stays_bounded(self):
-        output = runner.NormalizedOutput("ok", "L" * 15000, ("evidence one",), "cost_usd=0.9")
+        excerpt, full = runner.bound_summary("L" * 15000)
+        output = runner.NormalizedOutput("ok", excerpt, ("evidence one",), "cost_usd=0.9", full)
         path, digest = runner.store_artifact(self.state, JOB_ID, 1, output)
         body = path.read_text()
-        self.assertIn("L" * 15000, body)
+        self.assertIn("L" * 15000, body)                         # artifact keeps everything
+        self.assertLessEqual(len(output.summary), runner.MAX_SUMMARY_CHARS)
         self.assertIn(runner.attempt_id_for(JOB_ID, 1), body)
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
         self.assertLessEqual(len(runner.redact(body, runner.MAX_ISSUE_EVIDENCE_CHARS)),
@@ -578,11 +595,16 @@ class LaunchAgentConsistencyTests(HardeningTestCase):
 # --- D11 / D12: quota-aware routing and authorized paid overflow -------------
 
 class QuotaRoutingTests(HardeningTestCase):
+    def routing(self, **changes):
+        base = dict(provider_failover=True)
+        base.update(changes)
+        return runner.dataclasses.replace(self.config, **base)
+
     def test_exhausted_provider_is_skipped_in_favour_of_free_capacity(self):
         ledger = runner.QuotaLedger(self.state)
         ledger.mark_exhausted("kiro")
-        order = runner.route_candidates(self.job(), True, frozenset(runner.WORKERS), ledger)
-        self.assertNotIn("kiro", [worker for worker, _ in order])
+        order = runner.plan_route(self.job(), self.routing(), ledger)
+        self.assertNotIn("kiro", [step.worker for step in order])
         self.assertTrue(order)
 
     def test_exhaustion_expires_with_the_quota_window(self):
@@ -596,24 +618,22 @@ class QuotaRoutingTests(HardeningTestCase):
         ledger = runner.QuotaLedger(self.state)
         for worker in runner.WORKERS:
             ledger.mark_exhausted(worker)
-        self.assertEqual(
-            runner.route_candidates(self.job(), True, frozenset(runner.WORKERS), ledger), [])
+        self.assertEqual(runner.plan_route(self.job(), self.routing(), ledger), [])
 
     def test_paid_overflow_is_used_only_after_every_free_window_is_spent(self):
         ledger = runner.QuotaLedger(self.state)
         # With free capacity remaining, paid overflow must NOT be selected.
         ledger.mark_exhausted("kiro")
-        order = runner.route_candidates(
-            self.job(), True, frozenset(runner.WORKERS), ledger,
-            paid_overflow=frozenset({"kiro"}), paid_overflow_authorized=True)
-        self.assertNotIn("kiro", [worker for worker, _ in order])
+        paid = self.routing(paid_overflow_providers=frozenset({"kiro"}),
+                            paid_overflow_authorized=True)
+        order = runner.plan_route(self.job(), paid, ledger)
+        self.assertNotIn("kiro", [step.worker for step in order])
+        self.assertTrue(all(step.tier == "free" for step in order))
         # Once everything free is spent, authorized paid capacity takes over.
         for worker in runner.WORKERS:
             ledger.mark_exhausted(worker)
-        order = runner.route_candidates(
-            self.job(), True, frozenset(runner.WORKERS), ledger,
-            paid_overflow=frozenset({"kiro"}), paid_overflow_authorized=True)
-        self.assertEqual([worker for worker, _ in order], ["kiro"])
+        order = runner.plan_route(self.job(), paid, ledger)
+        self.assertEqual([(step.worker, step.tier) for step in order], [("kiro", "paid")])
 
     def test_paid_overflow_config_requires_an_explicit_provider_list(self):
         with self.assertRaises(runner.ValidationError):

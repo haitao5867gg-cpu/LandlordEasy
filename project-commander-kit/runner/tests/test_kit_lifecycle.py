@@ -181,6 +181,14 @@ class TransactionalInstallTests(KitLifecycleTestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+class InstallerTestsWhatItShips(KitLifecycleTestCase):
+    def test_pck_runs_the_suite_of_the_tree_it_installs_from(self):
+        """P1-6: the gate must exercise the bytes that will be installed."""
+        text = PCK.read_text()
+        self.assertIn('str(SOURCE / "tests")', text)
+        self.assertNotIn('str(KIT / "runner" / "tests")', text)
+
+
 class DoctorNegativeTests(KitLifecycleTestCase):
     """`doctor` must never report ok:true on a config it could not use.
 

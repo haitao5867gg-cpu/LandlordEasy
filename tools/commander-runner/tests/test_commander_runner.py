@@ -1002,8 +1002,8 @@ class ProviderAndQuotaTests(RunnerTestCase):
             if profile == "repo_delivery":
                 changes["human_approval_ref"] = "approval-17"
             job = runner.Job.from_comment(self.comment(**changes), config)
-            candidates = runner.route_candidates(job, True, config.enabled_providers)
-            self.assertEqual([worker for worker, _ in candidates], ["kiro", "claude"])
+            candidates = runner.plan_route(job, config)
+            self.assertEqual([step.worker for step in candidates], ["kiro", "claude"])
             calls = []
 
             def fake_execute(argv, **kwargs):

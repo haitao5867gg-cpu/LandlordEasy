@@ -151,7 +151,14 @@ MAX_OUTPUT_BYTES = 1_048_576
 # Structured-output bounds govern what a provider may return, not what is
 # posted to GitHub.  Long reports become a local artifact; the Issue receives a
 # bounded excerpt and the artifact's sha256.
-MAX_SUMMARY_CHARS = 20_000
+# Issue-facing bound.  Anything longer is NOT rejected: the summary is
+# truncated for the Issue and the full text goes to the local artifact.  The
+# previous 20 000 bought nothing -- the Issue excerpt is clamped to 3 000 anyway
+# -- while costing the Commander tokens on every read.  4 000 keeps the Issue a
+# useful index and leaves the report where reports belong.
+MAX_SUMMARY_CHARS = 4_000
+# Beyond this the output is pathological rather than merely long, and is refused.
+MAX_SUMMARY_CHARS_HARD = 200_000
 MAX_EVIDENCE_ITEMS = 200
 MAX_EVIDENCE_ITEM_CHARS = 4_000
 MAX_ISSUE_EVIDENCE_CHARS = 3_000
@@ -918,7 +925,9 @@ def store_artifact(state_dir: Path, job_id: str, ordinal: int,
         f"attempt_id: {attempt_id_for(job_id, ordinal)}",
         f"status: {output.status}",
         f"usage: {output.usage or 'unknown'}",
-        "", "## Summary", "", output.summary, "", "## Evidence", "",
+        f"summary_chars: {output.summary_chars}",
+        f"summary_truncated_for_issue: {str(output.truncated).lower()}",
+        "", "## Summary", "", output.report_text, "", "## Evidence", "",
         *(f"{index}. {item}" for index, item in enumerate(output.evidence, start=1)),
         "",
     ])
@@ -957,7 +966,8 @@ def renormalize_job(state_dir: Path, job_id: str) -> dict[str, Any]:
         artifact, digest = store_artifact(state_dir, job_id, 1, output)
         return {
             "job_id": job_id, "recovered_from": path.name, "status": output.status,
-            "summary_chars": len(output.summary), "evidence_items": len(output.evidence),
+            "summary_chars": output.summary_chars, "summary_truncated_for_issue": output.truncated,
+            "evidence_items": len(output.evidence),
             "usage": output.usage, "artifact": str(artifact), "artifact_sha256": digest,
             "provider_calls": 0,
         }
@@ -1429,9 +1439,23 @@ def adapter_argv(job: Job, executable_paths: Mapping[str, str]) -> list[str]:
 @dataclasses.dataclass(frozen=True)
 class NormalizedOutput:
     status: str
-    summary: str
+    summary: str                       # Issue-facing; <= MAX_SUMMARY_CHARS
     evidence: tuple[str, ...]
     usage: str | None = None
+    full_summary: str | None = None    # untruncated text when `summary` was cut
+
+    @property
+    def report_text(self) -> str:
+        """What the artifact stores: the whole thing, never the excerpt."""
+        return self.full_summary if self.full_summary is not None else self.summary
+
+    @property
+    def summary_chars(self) -> int:
+        return len(self.report_text)
+
+    @property
+    def truncated(self) -> bool:
+        return self.full_summary is not None
 
 @dataclasses.dataclass(frozen=True)
 class ProviderAttempt:
@@ -1475,7 +1499,7 @@ def normalize_provider_output(text: str) -> NormalizedOutput:
         usage = value.get("usage")
         if status not in {"ok", "blocked"} or not isinstance(summary, str) or not summary.strip():
             continue
-        if (len(summary) > MAX_SUMMARY_CHARS or not isinstance(evidence, list)
+        if (len(summary) > MAX_SUMMARY_CHARS_HARD or not isinstance(evidence, list)
                 or len(evidence) > MAX_EVIDENCE_ITEMS):
             continue
         if any(not isinstance(item, str) or not item.strip()
@@ -1483,8 +1507,25 @@ def normalize_provider_output(text: str) -> NormalizedOutput:
             continue
         if usage is not None and (not isinstance(usage, str) or len(usage) > 200):
             continue
-        return NormalizedOutput(status, summary.strip(), tuple(item.strip() for item in evidence), usage)
+        full = summary.strip()
+        excerpt, kept_full = bound_summary(full)
+        return NormalizedOutput(status, excerpt, tuple(item.strip() for item in evidence),
+                                usage, kept_full)
     raise ValidationError("provider output failed structured validation")
+
+
+def bound_summary(full: str) -> tuple[str, str | None]:
+    """Cut a long summary for the Issue without losing a byte of it.
+
+    A 12 131-character review was once discarded whole because it exceeded a
+    2 000-character cap.  Length is never again a reason to reject: the Issue
+    gets a marked excerpt and the artifact gets the entire text.
+    """
+    if len(full) <= MAX_SUMMARY_CHARS:
+        return full, None
+    marker = f" …[+{len(full) - MAX_SUMMARY_CHARS} chars; full text in artifact]"
+    cut = max(1, MAX_SUMMARY_CHARS - len(marker))
+    return full[:cut] + marker, full
 
 def normalize_operation_output(text: str) -> NormalizedOutput:
     """Operations must emit exactly one normalized JSON object, with no wrapper prose."""
@@ -1748,24 +1789,6 @@ def plan_route(job: Job, config: Config,
                       else PROVIDER_DEFAULT_MODEL[worker], "paid")
             for worker in paid_pool[:config.paid_overflow_max_attempts]]
 
-
-def route_candidates(job: Job, allow_failover: bool = True,
-                     enabled: frozenset[str] = WORKERS,
-                     ledger: "QuotaLedger | None" = None,
-                     paid_overflow: frozenset[str] = frozenset(),
-                     paid_overflow_authorized: bool = False) -> list[tuple[str, str]]:
-    """Backwards-compatible view of `plan_route` as (worker, model) pairs."""
-    shim = Config(
-        repository="x/y", queue_issue=1, commander_login="c", executor_login="e",
-        runner_id="shim", canonical_repo=Path("/"), worktree_root=Path("/"),
-        state_dir=Path("/"), origin_url="", runtime_dir=Path("/"),
-        operational_executables={}, enabled_providers=enabled,
-        enabled_profiles=frozenset(PROFILES), enabled_quality_gates=frozenset(),
-        quality_gates={}, provider_failover=allow_failover,
-        paid_overflow_providers=paid_overflow,
-        paid_overflow_authorized=paid_overflow_authorized,
-    )
-    return [(step.worker, step.model) for step in plan_route(job, shim, ledger)]
 
 def with_provider(job: Job, worker: str, model: str) -> Job:
     if worker not in WORKERS or job.profile not in PROVIDER_PROFILE_CAPABILITIES[worker]:
@@ -2964,7 +2987,8 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                                     config.state_dir, job.job_id, ordinal, attempt.output)
                                 artifact_note = (f"\nartifact={artifact.name}"
                                                  f"\nartifact_sha256={digest}"
-                                                 f"\nsummary_chars={len(attempt.output.summary)}")
+                                                 f"\nsummary_chars={attempt.output.summary_chars}"
+                                                 f"\nsummary_truncated={str(attempt.output.truncated).lower()}")
                             evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
                         else:
                             evidence = f"provider_error={attempt.error_category}"
