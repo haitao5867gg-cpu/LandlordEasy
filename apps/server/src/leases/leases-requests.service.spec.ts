@@ -17,8 +17,8 @@ describe('LeasesService 退租违约/换租申请', () => {
     prisma = {
       $transaction: jest.fn((callback) => callback(prisma)),
       $queryRaw: jest.fn(),
-      lease: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-      room: { findUnique: jest.fn(), update: jest.fn() },
+      lease: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+      room: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
       tenant: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
       contractSigningTask: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
       contractSettings: { findFirst: jest.fn() },
@@ -69,6 +69,59 @@ describe('LeasesService 退租违约/换租申请', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
+  describe('create 新签租约 房间原子claim', () => {
+    const createDto = {
+      roomId: 5,
+      tenantName: '李四',
+      tenantPhone: '13900000001',
+      tenantIdCard: '310101199001011235',
+      startDate: '2026-10-01',
+      endDate: '2027-09-30',
+      rent: 2000,
+      deposit: 2000,
+    };
+
+    it('房间为空置时原子claim为已租并创建租约', async () => {
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      (prisma.tenant.findFirst as jest.Mock).mockResolvedValue(null);
+      (prisma.tenant.create as jest.Mock).mockResolvedValue({ id: 50 });
+      (prisma.lease.create as jest.Mock).mockResolvedValue({ id: 400, roomId: 5, tenantId: 50 });
+
+      const result = await service.create(createDto, 1);
+
+      expect(prisma.room.updateMany).toHaveBeenCalledWith({
+        where: { id: 5, status: 'VACANT' },
+        data: { status: 'RENTED' },
+      });
+      expect(prisma.lease.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ roomId: 5, tenantId: 50 }),
+      });
+      expect(prisma.depositRecord.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ leaseId: 400, type: 'RECEIVE', amount: 2000 }),
+      });
+      expect(result).toEqual({ id: 400, roomId: 5, tenantId: 50 });
+    });
+
+    it('claim受影响行数为0时拒绝且不创建租客或租约', async () => {
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+      (prisma.room.findUnique as jest.Mock).mockResolvedValue({ id: 5, status: 'RENTED' });
+
+      await expect(service.create(createDto, 1)).rejects.toThrow('房间不是空置状态,无法签约');
+      expect(prisma.tenant.findFirst).not.toHaveBeenCalled();
+      expect(prisma.tenant.create).not.toHaveBeenCalled();
+      expect(prisma.lease.create).not.toHaveBeenCalled();
+      expect(prisma.depositRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('claim受影响行数为0且房间不存在时返回404', async () => {
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+      (prisma.room.findUnique as jest.Mock).mockResolvedValue(null);
+
+      await expect(service.create(createDto, 1)).rejects.toThrow(NotFoundException);
+      expect(prisma.lease.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createTerminationRequest', () => {
     it('租约不存在或不属于该租客时抛404', async () => {
       (prisma.lease.findUnique as jest.Mock).mockResolvedValue({ id: 1, tenantId: 99, status: 'ACTIVE' });
@@ -95,6 +148,22 @@ describe('LeasesService 退租违约/换租申请', () => {
       await expect(
         service.createTerminationRequest(1, 1, { requestedMoveOutDate: '2026-10-01' }),
       ).rejects.toThrow('已有一条待处理的退租申请');
+    });
+
+    it('该租约已有待处理换租申请时拒绝提交退租申请', async () => {
+      // 两种申请是不同的行、走不同的行锁,同时存在时两个审批都会走到结束租约,
+      // 这是并发重复结束租约的前置条件。
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+        id: 1,
+        tenantId: 1,
+        status: 'ACTIVE',
+        rent: new Prisma.Decimal(1800),
+      });
+      (prisma.leaseTerminationRequest.findFirst as jest.Mock).mockResolvedValue(null);
+      (prisma.roomTransferRequest.findFirst as jest.Mock).mockResolvedValue({ id: 7 });
+      await expect(
+        service.createTerminationRequest(1, 1, { requestedMoveOutDate: '2026-10-01' }),
+      ).rejects.toThrow('该租约已有待处理的换租申请');
     });
 
     it('按合同签约任务的违约金月数计算建议违约金', async () => {
@@ -151,7 +220,7 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.leaseTerminationRequest.update as jest.Mock).mockImplementation(({ data }) => data);
 
       const result = await service.approveTerminationRequest(7, {}, 1);
@@ -159,8 +228,11 @@ describe('LeasesService 退租违约/换租申请', () => {
       expect(prisma.depositRecord.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ leaseId: 1, type: 'DEDUCT', amount: 1800 }),
       });
-      expect(prisma.lease.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ status: 'ENDED' }) }),
+      expect(prisma.lease.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: 1, status: 'ACTIVE' }),
+          data: expect.objectContaining({ status: 'ENDED' }),
+        }),
       );
       expect(prisma.bill.create).not.toHaveBeenCalled();
       expect(result.finalPenalty).toBe(1800);
@@ -174,7 +246,7 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.bill.create as jest.Mock).mockResolvedValue({ id: 99 });
       (prisma.leaseTerminationRequest.update as jest.Mock).mockImplementation(({ data }) => data);
 
@@ -201,7 +273,7 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.bill.create as jest.Mock).mockResolvedValue({ id: 99 });
       (prisma.billItem.create as jest.Mock).mockRejectedValue(new Error('injected bill item failure'));
 
@@ -242,7 +314,7 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.leaseTerminationRequest.update as jest.Mock).mockImplementation(async ({ data }) => {
         status = data.status;
         return { ...baseRequest, ...data };
@@ -254,7 +326,7 @@ describe('LeasesService 退租违约/换租申请', () => {
       ]);
       expect(results).toHaveLength(2);
       expect(prisma.leaseTerminationRequest.update).toHaveBeenCalledTimes(1);
-      expect(prisma.lease.update).toHaveBeenCalledTimes(1);
+      expect(prisma.lease.updateMany).toHaveBeenCalledTimes(1);
       expect(prisma.depositRecord.create).toHaveBeenCalledTimes(1);
     });
 
@@ -276,7 +348,7 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.leaseTerminationRequest.update as jest.Mock).mockImplementation(async ({ data }) => {
         status = data.status;
         return { ...baseRequest, ...data };
@@ -291,7 +363,24 @@ describe('LeasesService 退租违约/换租申请', () => {
       expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
       expect(status).toBe('APPROVED');
       expect(prisma.leaseTerminationRequest.update).toHaveBeenCalledTimes(1);
-      expect(prisma.lease.update).toHaveBeenCalledTimes(1);
+      expect(prisma.lease.updateMany).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('createTransferRequest', () => {
+    it('该租约已有待处理退租申请时拒绝提交换租申请', async () => {
+      // 与 createTerminationRequest 对称的纵深防御。
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+        id: 1,
+        tenantId: 1,
+        status: 'ACTIVE',
+        rent: new Prisma.Decimal(1800),
+      });
+      (prisma.roomTransferRequest.findFirst as jest.Mock).mockResolvedValue(null);
+      (prisma.leaseTerminationRequest.findFirst as jest.Mock).mockResolvedValue({ id: 5 });
+      await expect(
+        service.createTransferRequest(1, 1, { preferredRoom: 'A101', reason: '换房' }),
+      ).rejects.toThrow('该租约已有待处理的退租申请');
     });
   });
 
@@ -307,9 +396,19 @@ describe('LeasesService 退租违约/换租申请', () => {
       },
     };
 
-    it('目标房间非空置时拒绝', async () => {
+    it('目标房间非空置时拒绝,且不创建新租约或押金记录', async () => {
       (prisma.roomTransferRequest.findUnique as jest.Mock).mockResolvedValue(baseRequest);
       (prisma.room.findUnique as jest.Mock).mockResolvedValue({ id: 5, status: 'RENTED', roomNo: '101' });
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+        id: 1,
+        roomId: 2,
+        status: 'ACTIVE',
+        deposit: new Prisma.Decimal(1800),
+      });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      (prisma.tenant.findFirst as jest.Mock).mockResolvedValue(baseRequest.lease.tenant);
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+
       await expect(
         service.approveTransferRequest(
           3,
@@ -317,6 +416,39 @@ describe('LeasesService 退租违约/换租申请', () => {
           1,
         ),
       ).rejects.toThrow('目标房间不是空置状态');
+      expect(prisma.room.updateMany).toHaveBeenCalledWith({
+        where: { id: 5, status: 'VACANT' },
+        data: { status: 'RENTED' },
+      });
+      expect(prisma.lease.create).not.toHaveBeenCalled();
+      expect(prisma.depositRecord.create).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ type: 'RECEIVE' }) }),
+      );
+    });
+
+    it('目标房间不存在时claim失败并返回404', async () => {
+      (prisma.roomTransferRequest.findUnique as jest.Mock).mockResolvedValue(baseRequest);
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+        id: 1,
+        roomId: 2,
+        status: 'ACTIVE',
+        deposit: new Prisma.Decimal(1800),
+      });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      (prisma.tenant.findFirst as jest.Mock).mockResolvedValue(baseRequest.lease.tenant);
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+      // 首次(存在性预检)返回房间行,原子claim失败后的回查模拟房间已被移除的边界情况。
+      (prisma.room.findUnique as jest.Mock)
+        .mockResolvedValueOnce({ id: 5, status: 'VACANT', roomNo: '101' })
+        .mockResolvedValueOnce(null);
+
+      await expect(
+        service.approveTransferRequest(
+          3,
+          { targetRoomId: 5, newRent: 2000, newDeposit: 2000, newEndDate: '2027-01-01' },
+          1,
+        ),
+      ).rejects.toThrow(NotFoundException);
     });
 
     it('租客缺身份证号且审批时也没补充时拒绝', async () => {
@@ -343,8 +475,9 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.tenant.findFirst as jest.Mock).mockResolvedValue(baseRequest.lease.tenant);
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.lease.create as jest.Mock).mockResolvedValue({ id: 200 });
       (prisma.contractSigningTask.create as jest.Mock).mockResolvedValue({
         id: 300,
@@ -362,6 +495,10 @@ describe('LeasesService 退租违约/换租申请', () => {
         1,
       );
 
+      expect(prisma.room.updateMany).toHaveBeenCalledWith({
+        where: { id: 5, status: 'VACANT' },
+        data: { status: 'RENTED' },
+      });
       expect(prisma.lease.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ roomId: 5, tenantId: 10, rent: 2000, deposit: 2000 }),
       });
@@ -393,8 +530,9 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.tenant.findFirst as jest.Mock).mockResolvedValue(tenantWithoutIdCard);
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.tenant.update as jest.Mock).mockImplementation(({ data }) => ({
         ...tenantWithoutIdCard,
         ...data,
@@ -453,8 +591,9 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.tenant.findFirst as jest.Mock).mockResolvedValue(baseRequest.lease.tenant);
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.lease.create as jest.Mock).mockResolvedValue({ id: 200 });
       (prisma.contractSigningTask.create as jest.Mock).mockResolvedValue({
         id: 300,
@@ -492,8 +631,9 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.tenant.findFirst as jest.Mock).mockResolvedValue(baseRequest.lease.tenant);
+      (prisma.room.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.lease.create as jest.Mock).mockRejectedValue(new Error('injected lease failure'));
 
       await expect(
@@ -533,11 +673,12 @@ describe('LeasesService 退租违约/换租申请', () => {
         status: 'ACTIVE',
         deposit: new Prisma.Decimal(1800),
       }));
-      (prisma.room.update as jest.Mock).mockImplementation(async ({ where, data }) => {
-        if (where.id === 5) targetStatus = data.status;
-        return { id: where.id, ...data };
+      (prisma.room.updateMany as jest.Mock).mockImplementation(async ({ where }) => {
+        if (where.id !== 5 || targetStatus !== 'VACANT') return { count: 0 };
+        targetStatus = 'RENTED';
+        return { count: 1 };
       });
-      (prisma.lease.update as jest.Mock).mockResolvedValue({ status: 'ENDED' });
+      (prisma.lease.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       (prisma.tenant.findFirst as jest.Mock).mockImplementation(async ({ where }) => ({
         id: where.phone === '13800000000' ? 10 : 11,
         idCard: '310101199001011234',
