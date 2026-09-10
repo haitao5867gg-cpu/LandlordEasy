@@ -772,5 +772,24 @@ class BranchPrefixBindingTests(PRBTestCase):
         self.assertIsNone(attempt.error_category)
         self.assertEqual(seen[0][-2:], ["--candidate-sha", SHA])
 
+
+class OperationHealthTests(PRBTestCase):
+    def test_doctor_survives_a_suite_operation_with_a_pnpm_flag(self):
+        """Live 2026-09-10: enabling rel001_mysql_suite made doctor crash on argv unpacking."""
+        definition = runner.OperationDefinition(
+            argv=(sys.executable, sys.executable, "--docker", sys.executable,
+                  "--mode", "rel001_suite", "--pnpm", sys.executable),
+            mode="isolated_test", allowed_target_shas=frozenset(), max_timeout_seconds=60,
+            max_output_bytes=4096, require_clean_worktree=True, description="suite",
+            allowed_target_branches=frozenset({"fix/*"}))
+        config = runner.dataclasses.replace(
+            self.config, enabled_operations=frozenset({"rel001_mysql_suite"}),
+            operation_definitions={"rel001_mysql_suite": definition})
+        with mock.patch.object(runner, "execute",
+                               return_value=runner.Result(0, "OPS001_PROBE_INTERFACE_OK\n", False, False, 0.1)):
+            health = runner.operation_health(config)
+        self.assertTrue(health["rel001_mysql_suite"]["available"])
+        self.assertTrue(health["rel001_mysql_suite"]["interface_ok"])
+
 if __name__ == "__main__":
     unittest.main()

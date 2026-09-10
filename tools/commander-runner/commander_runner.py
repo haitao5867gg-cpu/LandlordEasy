@@ -2579,9 +2579,15 @@ def operation_health(config: Config) -> dict[str, dict[str, Any]]:
         available = False
         interface_ok: bool | None = None
         if definition is not None:
-            python, helper, _, docker = definition.argv
+            # argv is [python, helper, --flag, value, ...]; --docker is mandatory,
+            # --pnpm optional (isolated_test).  Unpacking exactly four broke
+            # doctor the moment a suite operation was configured.
+            python, helper = definition.argv[0], definition.argv[1]
+            flags = dict(zip(definition.argv[2::2], definition.argv[3::2]))
+            docker = flags.get("--docker", "")
+            executables = [python, helper, docker] + ([flags["--pnpm"]] if "--pnpm" in flags else [])
             available = all(Path(path).is_file() and os.access(path, os.X_OK)
-                            for path in (python, helper, docker))
+                            for path in executables)
             if enabled and available:
                 result = execute(
                     [python, helper, "--docker", docker, "--self-check"],
