@@ -263,7 +263,7 @@
             },
             "uniqueItems": true,
             "maxItems": 20,
-            "description": "Branches whose CURRENT head this operation may run against. Avoids the pin/edit/pin deadlock. main/dev/master/HEAD are refused."
+            "description": "Owner-approved branch names, or prefixes ending in '*' (e.g. 'fix/*', 'job-*'). The job's exact SHA must be the current origin head of a bound branch. main/dev/master/HEAD/release/* are never bindable."
           },
           "max_timeout_seconds": {
             "type": "integer",

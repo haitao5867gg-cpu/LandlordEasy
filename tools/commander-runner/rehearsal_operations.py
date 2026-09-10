@@ -255,6 +255,7 @@ REQUIRED_PORT = "33317"
 REQUIRED_HOST = "127.0.0.1"
 CONTAINER_NAME = f"/{PROJECT}-{SERVICE}-1"
 SUITE_TIMEOUT = 1_800
+INSTALL_TIMEOUT = 900
 STARTUP_ATTEMPTS = 3
 HEALTH_DEADLINE = 180
 
@@ -370,6 +371,24 @@ def run_rel001_suite(docker: str, pnpm: str, repo: Path, sha: str) -> dict[str, 
 
     started = False
     try:
+        # The runner hands us a FRESH worktree: no node_modules.  The first live
+        # dispatch (2026-09-10) skipped this and reported `pnpm exec prisma`
+        # failing as schema_push_failed -- a code failure that was really a
+        # missing dependency tree.  Install from the lockfile, store-first.
+        code, out = _sh([pnpm, "install", "--frozen-lockfile", "--prefer-offline"],
+                        repo, env, INSTALL_TIMEOUT)
+        if code != 0:
+            raise ProbeError("dependency_install_failed", evidence)
+        evidence.append("dependencies=installed")
+        # The suite imports @prisma/client; in a fresh tree the client is not
+        # generated, and every spec then fails at load with 0 tests -- which
+        # `db push --skip-generate` below deliberately does not fix.
+        code, out = _sh([pnpm, "--filter", "server", "exec", "prisma", "generate"],
+                        repo, env, INSTALL_TIMEOUT)
+        if code != 0:
+            raise ProbeError("prisma_generate_failed", evidence)
+        evidence.append("prisma_client=generated")
+
         # Always start from nothing.  An unattended operation must not inherit
         # a container left behind by an earlier run, whose database would no
         # longer be empty.
