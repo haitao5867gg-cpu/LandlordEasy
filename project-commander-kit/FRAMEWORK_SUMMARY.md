@@ -55,6 +55,13 @@ about content.
 
 Terminal states: `CLAIMED`, `COMPLETED`, `FAILED`, `TIMED_OUT`, `REJECTED`.
 
+PR B adds `COMMANDER_PLAN_V1` (a bounded, forward-only chain of derived jobs
+and operations; transitions are table lookups on `ok` / stop class /
+`verdict.*`), `COMMANDER_PLAN_RUNNER_V1` (one record per plan, embedding
+`USER_UPDATE_V1`), the pinned `CURRENT_USER_STATUS`, `USER_ACTION_REQUIRED_V1`
+and the Commander's `COMMANDER_ACK_V1`. With `evidence_issue` set, all
+Executor records move to the evidence Issue.
+
 ## 5. Stop classes
 
 | Class | Response |

@@ -129,6 +129,10 @@
         },
         "python": {
           "type": "string"
+        },
+        "osascript": {
+          "type": "string",
+          "description": "Optional. Required only when notify_channel is imessage; the fixed AppleScript shipped in the runner is the only script ever run."
         }
       },
       "description": "Absolute paths. No shell interpreter is ever used."
@@ -316,6 +320,37 @@
       ],
       "default": "legacy",
       "description": "legacy: historical behaviour, target not enforced. wake_bus: target must be an OPEN PR or wake posts are refused and doctor fails."
+    },
+    "evidence_issue": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "default": null,
+      "description": "PR B. Optional second Issue that receives every Executor record (CLAIMED, terminals, REJECTED, USER_*, CURRENT_USER_STATUS). Must differ from queue_issue and wake_pull_request. Null keeps the single-issue layout."
+    },
+    "notify_channel": {
+      "enum": [
+        "none",
+        "imessage"
+      ],
+      "default": "none",
+      "description": "PR B. Owner push channel. imessage sends through Messages.app on this host via osascript."
+    },
+    "notify_recipient": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128,
+      "default": null,
+      "description": "Phone number (optional +country) or Apple ID e-mail. Lives ONLY in this 0600 file; never read from a comment, never posted."
+    },
+    "notify_enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Default off. Requires notify_channel != none and notify_recipient. Payload is state + short id + stop class + link; never evidence."
     }
   }
 }

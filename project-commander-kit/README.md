@@ -15,12 +15,13 @@ project-commander-kit/
 ├── README.md                     ← you are here
 ├── ARCHITECTURE.md               data flow, identities, trust boundaries
 ├── SECURITY_MODEL.md             what is fail-closed and what is not
-├── FAILURE_AND_RETRY_POLICY.md   the five stop classes; retry and quota rules
+├── FAILURE_AND_RETRY_POLICY.md   eight stop classes × four policies; retry, quota, plans
 ├── PROTOCOLS.md                  message schemas and invariants
 ├── NEW_PROJECT_BOOTSTRAP.md      adopt this in a fresh repository
 ├── MIGRATION_FROM_LANDLORDEASY.md  moving off the original deployment
 ├── FRAMEWORK_SUMMARY.md          complete standalone summary (no chat context)
 ├── ONBOARDING_PROMPT.md          single-file prompt to hand a new project's AI
+├── COMMANDER_CONSOLE_PROMPT.md   instructions for the front-door Commander (ChatGPT Project)
 ├── runner/                       commander_runner.py + helper + full test suite
 ├── scripts/pck.py                doctor / install / upgrade / rollback
 ├── config/                       JSON schema + neutral example config

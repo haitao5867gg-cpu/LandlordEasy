@@ -126,8 +126,40 @@ a merged PR is a confusing place to receive them.
 python3 project-commander-kit/runner/tests/canary_end_to_end.py
 ```
 
-Expect 21/21. Then dispatch one real `repo_read` job and confirm the terminal
-record carries `attempt_id`, `stop_class`, and an artifact digest.
+Expect every check green (34 as of PR B). Then dispatch one real `repo_read`
+job and confirm the terminal record carries `attempt_id`, `stop_class`, and an
+artifact digest.
+
+### 7. (PR B) Split evidence off the queue
+
+Create a long-lived Issue from the Executor or Commander account titled so it
+is obviously not a queue (LandlordEasy: #29 "Commander evidence log — do not
+close"), then set `"evidence_issue": 29`. From the next tick every Executor
+record lands there; records already queued for the queue Issue are still
+delivered to the queue Issue (the outbox row says where it must go).
+`rebuild-claims` scans both Issues. The high-water cursor stays a queue
+cursor.
+
+### 8. (PR B) Owner notification
+
+```json
+"operational_executables": {"gh": "…", "git": "…", "python": "…", "osascript": "/usr/bin/osascript"},
+"notify_channel": "imessage",
+"notify_recipient": "<phone or Apple ID, this file only>",
+"notify_enabled": true
+```
+
+Run `commander_runner.py --config <path> notify-test --confirm` once while
+sitting at the host: macOS will ask whether `python3` may control Messages.
+Allow it; the test message should arrive within seconds.
+
+### 9. (PR B) Plan canary, then wake retirement
+
+Have the Commander post one two-step `COMMANDER_PLAN_V1` (an operation, then
+a `repo_read` review with `{"from_step": …}`). Expect one
+`COMMANDER_PLAN_RUNNER_V1 COMPLETED` on the evidence Issue and one phone
+notification. Only after that passes set `"wake_pull_request": null`; no
+wake code or table is removed.
 
 ## Lessons worth carrying forward
 

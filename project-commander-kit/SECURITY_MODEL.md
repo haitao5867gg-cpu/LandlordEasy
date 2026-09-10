@@ -16,7 +16,7 @@ A comment can only select from what the owner already enabled.
 |---|---|
 | Owner config → Runner | `Config.load` refuses group/world-readable config (`st_mode & 0o077`); every path must be absolute; unknown or missing fields are fatal |
 | Commander → Runner | only comments authored by `commander_login` on the fixed queue Issue are read; Executor-authored job-shaped comments are ignored by construction |
-| Runner → GitHub | `GitHubClient._api` allows exactly: GET the queue Issue and its comments, POST a comment to the queue Issue, POST a comment to the optional wake PR, plus read-only `api user`. Everything else raises |
+| Runner → GitHub | `GitHubClient._api` allows exactly: GET the queue Issue and the optional evidence Issue and their comment listings, GET one comment by id (bound to one of those Issues by the caller), GET the wake PR's state; POST a comment to the queue Issue, the evidence Issue, or the wake PR; PATCH **one** comment — the pinned `CURRENT_USER_STATUS` — and only when the caller names its id; plus read-only `api user`. Everything else raises |
 | Runner → filesystem | worktrees are created under a configured root; `checked_child` rejects symlinks and any path whose resolved parent is not the root |
 | Runner → subprocess | explicit argv, `shell=False`, `start_new_session=True`, filtered environment, bounded timeout and output, process-group kill on timeout/overflow |
 | Job → execution | a job selects an ID from an owner-configured registry; it never supplies a command, argument, path, URL, or environment variable |
@@ -124,9 +124,10 @@ escape into a different ref.
 
 ## The token is the boundary, not `_api`
 
-`GitHubClient._api` narrows what **this program asks for**: queue-Issue
-comments, single-comment reads bound to the queue Issue, the wake PR's
-comments (POST-only) and state (GET), and read-only `api user`. It cannot
+`GitHubClient._api` narrows what **this program asks for**: queue- and
+evidence-Issue comments, single-comment reads bound to one of those Issues,
+one named PATCH, the wake PR's comments (POST-only) and state (GET), and
+read-only `api user`. It cannot
 narrow what the **credential permits**, and `git push` for delivery branches
 uses the same credential outside `_api` entirely. Treat `_api` as a
 convention that keeps the code honest, and the Executor token's scope as the
@@ -146,12 +147,36 @@ full-disk encryption (FileVault on macOS), exclude `state_dir` from Time
 Machine, iCloud Drive and any other backup or sync tool, and treat the Runner
 host as dedicated.
 
-## The Commander ledger is not the Runner's
+## Owner-facing records are written, never read
 
-Any Commander-side ledger (`COMMANDER_ACTION_*`, `USER_UPDATE_V1`,
-`CURRENT_USER_STATUS`) lives on a plane the Runner **never reads or writes**.
-**Do not widen the `_api` allowlist to let the Runner see it.** The ledger is
-the Commander's problem by design.
+Since PR B the Runner **writes** `CURRENT_USER_STATUS`, `USER_ACTION_REQUIRED_V1`
+and the `USER_UPDATE_V1` block of a plan record on the evidence Issue. It
+still reads nothing the Commander writes except queue comments: any
+Commander-side ledger (`COMMANDER_ACTION_*`, its own notes) stays on a plane
+the Runner never consumes, and the only Commander comment that changes Runner
+state without dispatching work is the fixed-shape `COMMANDER_ACK_V1`. **Do not
+widen the `_api` allowlist beyond the two Issues, the wake PR and the one
+named PATCH.**
+
+## Owner notification channel (iMessage)
+
+- Default off (`notify_enabled: false`). Enabling requires
+  `notify_channel: "imessage"`, a `notify_recipient` (phone number or Apple
+  ID e-mail, validated against a fixed pattern) and
+  `operational_executables.osascript`.
+- The recipient lives **only** in the 0600 config. It is never read from a
+  comment, never posted, never logged.
+- The AppleScript is a constant shipped in the runner (`IMESSAGE_SCRIPT`).
+  Recipient and text are passed as `argv` to `osascript`, never interpolated
+  into the script; option-shaped text is refused.
+- The payload is `[Commander] <STATE> <8-char id> (<stop class>) <link>`,
+  ≤ 400 characters. It carries no summary, evidence, prompt, or secret; the
+  link points at the evidence Issue, which is where detail lives.
+- At-least-once through `notify_outbox`, one row per job / plan / decision,
+  `NOTIFY_MAX_ATTEMPTS` (5) then `gave_up` with a stderr line. A disabled
+  channel settles rows as `disabled` so enabling later never floods.
+- macOS asks once (TCC) whether the runner's `python3` may control Messages.
+  Until the owner allows it, sends fail and are retried within the bound.
 
 ## Response nonce
 

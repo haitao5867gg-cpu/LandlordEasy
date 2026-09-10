@@ -97,5 +97,9 @@
   },
   "wake_destination_kind": "legacy",
   "paid_overflow_max_attempts": 1,
-  "paid_overflow_max_cost_usd": 5.0
+  "paid_overflow_max_cost_usd": 5.0,
+  "evidence_issue": null,
+  "notify_channel": "none",
+  "notify_recipient": null,
+  "notify_enabled": false
 }

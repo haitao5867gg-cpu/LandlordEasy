@@ -66,14 +66,24 @@ method = argv[argv.index("--method") + 1]
 endpoint = argv[argv.index("--method") + 2]
 state = json.load(open(store))
 if method == "GET":
+    if endpoint.endswith("/issues/43"):
+        print(json.dumps({"number": 43, "state": "open"})); raise SystemExit(0)
     if "/issues/comments/" in endpoint:
-        # single-comment lookup, bound to the queue issue
+        # single-comment lookup; posted comments belong to the issue they were posted on
         wanted = endpoint.rsplit("/", 1)[1]
         for c in state["comments"]:
             if str(c["id"]) == wanted:
                 c = dict(c); c.setdefault("issue_url", "https://api.github.com/repos/canary/repo/issues/42")
                 print(json.dumps(c)); raise SystemExit(0)
+        for index, p in enumerate(state["posts"]):
+            if str(9000 + index + 1) == wanted and p["endpoint"].endswith("/comments"):
+                issue = p["endpoint"].rsplit("/", 2)[1]
+                print(json.dumps({"id": int(wanted), "user": {"login": "%s"}, "body": p["body"],
+                                  "issue_url": "https://api.github.com/repos/canary/repo/issues/" + issue}))
+                raise SystemExit(0)
         print("{}"); raise SystemExit(1)
+    if "/issues/43/comments" in endpoint:
+        print("[]"); raise SystemExit(0)
     page = 1
     m = re.search(r"[?&]page=(\d+)", endpoint)
     if m:
@@ -88,7 +98,17 @@ state["posts"].append({"endpoint": endpoint, "body": body})
 new_id = 9000 + len(state["posts"])
 json.dump(state, open(store, "w"))
 print(json.dumps({"id": new_id}))
-''' % EXECUTOR
+''' % (EXECUTOR, EXECUTOR)
+
+
+OSASCRIPT = '''#!/usr/bin/env python3
+import json, sys
+argv = sys.argv[1:]
+if argv[:2] == ["-e", "return 1"]:
+    print("1"); raise SystemExit(0)
+with open("__SENT__", "a") as handle:
+    handle.write(json.dumps(argv) + "\\n")
+'''
 
 
 def write_exec(path: Path, content: str) -> Path:
@@ -271,6 +291,76 @@ def main() -> int:
                   all(row[0] != job_id for row in rows))
         finally:
             state.close()
+
+        # 10. PR B: evidence split, plan chain, status comment, owner notification.
+        sent = root / "sent.jsonl"
+        osascript = write_exec(bin_dir / "osascript", OSASCRIPT.replace("__SENT__", str(sent)))
+        prb_root = root / "prb"
+        prb_root.mkdir()
+        (prb_root / "worktrees").mkdir()
+        prb_config = make_config(
+            prb_root, canonical, gh, provider, store,
+            evidence_issue=43, notify_channel="imessage", notify_recipient="+10000000000",
+            notify_enabled=True,
+            operational_executables={"gh": str(gh), "git": GIT, "python": sys.executable,
+                                     "osascript": str(osascript)})
+        plan_id = str(uuid.uuid4())
+        step = {"kind": "job", "worker": "claude", "model": "claude-sonnet-5",
+                "profile": "repo_read", "quality_gate": "none",
+                "prompt": "Review {resolved_sha}; return the contract.",
+                "timeout_seconds": 120, "output_limit_bytes": 65536,
+                "expected_evidence": "summary; evidence"}
+        plan = {"schema": runner.PLAN_SCHEMA, "plan_id": plan_id, "repository": "canary/repo",
+                "queue_issue": 42, "runner_id": RUNNER_ID, "authorization_ref": "canary owner",
+                "max_steps": 3,
+                "steps": [dict(step, id="s1", target={"sha": sha}, on={"ok": "s2", "*": "stop"}),
+                          dict(step, id="s2", target={"from_step": "s1"}, on={"*": "stop"})]}
+        plan_body = "COMMANDER_PLAN_V1\n```json\n" + json.dumps(plan) + "\n```"
+        outcome10, posts10 = run(prb_config, store,
+                                 [{"id": 7, "user": {"login": COMMANDER}, "body": plan_body}])
+        check("plan_completes_unattended", outcome10 == f"PLAN_COMPLETED {plan_id}", outcome10)
+        evidence_posts = [p for p in posts10 if p["endpoint"].endswith("/issues/43/comments")]
+        queue_posts = [p for p in posts10 if p["endpoint"].endswith("/issues/42/comments")]
+        check("all_executor_records_on_evidence_issue", queue_posts == [] and len(evidence_posts) >= 4,
+              f"{len(evidence_posts)} evidence, {len(queue_posts)} queue")
+        plan_records = [p["body"] for p in evidence_posts
+                        if p["body"].startswith("COMMANDER_PLAN_RUNNER_V1 COMPLETED")]
+        check("plan_record_is_single_and_summarizes_steps",
+              len(plan_records) == 1 and "steps=s1:ok,s2:ok" in plan_records[0]
+              and "USER_UPDATE_V1" in plan_records[0])
+        step_terminals = [p["body"] for p in evidence_posts
+                          if p["body"].startswith("COMMANDER_RUNNER_V1 COMPLETED")]
+        check("each_step_has_its_own_terminal", len(step_terminals) == 2, str(len(step_terminals)))
+        check("second_step_pinned_to_first_steps_sha",
+              all(f"sha={sha}" in body for body in step_terminals))
+        status_posts = [p for p in evidence_posts if p["body"].startswith("CURRENT_USER_STATUS")]
+        status_patches = [p for p in posts10 if "/issues/comments/" in p["endpoint"]
+                          and p["body"].startswith("CURRENT_USER_STATUS")]
+        check("status_comment_created_once", len(status_posts) == 1, str(len(status_posts)))
+        # Second tick: the plan record was completed last tick, so the status is
+        # dirty and must be PATCHed (not re-posted); the notification drains.
+        outcome11, posts11 = run(prb_config, store, [])
+        check("second_tick_idle", outcome11 == "NO_JOB", outcome11)
+        patches11 = [p for p in posts11 if "/issues/comments/" in p["endpoint"]]
+        reposts11 = [p for p in posts11 if p["body"].startswith("CURRENT_USER_STATUS")
+                     and p["endpoint"].endswith("/comments")]
+        check("status_is_patched_in_place_not_reposted", len(patches11) == 1 and reposts11 == [],
+              f"{len(patches11)} patches, {len(reposts11)} reposts")
+        lines = sent.read_text().splitlines() if sent.exists() else []
+        check("one_owner_notification_for_the_whole_plan", len(lines) == 1, str(len(lines)))
+        if lines:
+            argv = json.loads(lines[0])
+            check("notification_argv_is_recipient_then_text",
+                  argv[-2] == "+10000000000" and argv[-1].startswith("[Commander] COMPLETED"))
+            check("notification_carries_no_evidence",
+                  "CANARY" not in argv[-1] and "issues/43#issuecomment-" in argv[-1], argv[-1])
+            check("script_is_the_shipped_constant",
+                  tuple(argv[i + 1] for i, a in enumerate(argv) if a == "-e") == runner.IMESSAGE_SCRIPT)
+        # 12. A replayed plan comment does nothing.
+        outcome12, posts12 = run(prb_config, store,
+                                 [{"id": 7, "user": {"login": COMMANDER}, "body": plan_body}])
+        check("plan_not_replayed", outcome12 == "NO_JOB" and not any(
+            p["endpoint"].endswith("/comments") and "PLAN" in p["body"] for p in posts12), outcome12)
 
     ok = all(item["ok"] for item in checks)
     print(json.dumps({"canary": "commander-runner-e2e", "ok": ok,
