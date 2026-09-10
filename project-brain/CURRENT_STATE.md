@@ -6,7 +6,8 @@ As of 2026-09-08 UTC. Release decision: **NO-GO**. Production V1 feature freeze 
 
 - `main`: `c3b5b2d849745d7ed4e0c2b5d674900d1f4bf286` — M18 production baseline.
 - `origin/dev`: `63f2ba039b5a39db45d80874caa2cf013a0fe0a5` — M21 candidate plus merged Project Commander control plane, read-only CI quality gate, accepted ORG-002 Runner integration, and the ORG-003/ORG-004 control-plane merge via PR #23.
-- Rehearsal candidate: `104de1521cf194c9dc76ccca52741f05a75f1180` — contains the SEC-001, SEC-002, REL-001 and REL-002 changes. Its CI Quality Gate passed. It is **not** deployed to Production and not merged to `main`.
+- Rehearsal candidate **content**: `104de1521cf194c9dc76ccca52741f05a75f1180` — contains the SEC-001, SEC-002, REL-001 and REL-002 changes. Its CI Quality Gate passed. It is **not** deployed to Production and not merged to `main`.
+- Branch `release/v1-rehearsal-candidate` **head**: `fd23cdc` — `104de15` plus one CI-trigger-only commit (`release/**` PR bases and `test/**`/`infra/**` pushes). The workflow stays `contents: read` with no deploy step, so the candidate's application content is unchanged. **The branch head is therefore no longer equal to the candidate SHA above**; cite `104de15` when you mean the reviewed application content, and the branch head when you mean what CI actually runs.
 - Commander Runner baseline (ORG-002, `tools/commander-runner/`): `77487255a60502ae5cef9f753380629289ba39e1`.
 - PR #6 merged the control plane into `dev`; its push and pull-request quality-gate runs passed.
 - PR #18 merged the accepted ORG-002 Runner into `dev` after CI passed on head `51143ead031fdf6c3dd90ec7fe286d371056bcc0`.
@@ -30,7 +31,7 @@ Historical production evidence includes real WeChat OAuth and a ¥0.01 JSAPI pay
 | REL-001 | P1 | REVIEWED / ACTIVE — OPS-001 read-only MySQL probe accepted (Issue #17 job `d91f4b6c-3e72-4a85-b9d1-6f204c8e57a3`) | `fix/rel001-transaction-safety` / Draft PR #11 at `defa102` | real MySQL rollback, locking/deadlock, concurrent approval and provider-recovery evidence — **not yet passed** |
 | REL-003 | P1 | CI MERGED / ENFORCEMENT_PENDING | workflow merged through PR #6; superseded PR #9 closed | configure enforceable required checks / branch rules |
 
-The blocker PRs are intentionally stacked: `dev` → SEC-001 → SEC-002 → REL-002 → REL-001. Do not merge or deploy the stack merely because CI is green. The rehearsal candidate `104de1521cf194c9dc76ccca52741f05a75f1180` aggregates these four changes with a passing CI Quality Gate; that is evidence the gate passed on that exact candidate, not that the fixes are verified in a running rehearsal environment or deployed to Production.
+The blocker PRs are intentionally stacked: `dev` → SEC-001 → SEC-002 → REL-002 → REL-001. Do not merge or deploy the stack merely because CI is green. The rehearsal candidate content `104de1521cf194c9dc76ccca52741f05a75f1180` aggregates these four changes with a passing CI Quality Gate; that is evidence the gate passed on that exact content, not that the fixes are verified in a running rehearsal environment or deployed to Production.
 
 ## AI organization
 
