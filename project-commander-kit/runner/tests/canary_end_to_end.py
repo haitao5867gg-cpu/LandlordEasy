@@ -34,10 +34,14 @@ RUNNER_ID = "canary-runner-01"
 # A stub provider that returns a contract-shaped report whose summary is far
 # larger than the old 2000-character limit, wrapped in a Claude-style envelope.
 PROVIDER = '''#!/usr/bin/env python3
-import json, sys
+import json, re, sys
+# A real provider reads the nonce from the prompt and echoes it; so does this stub.
+prompt = " ".join(sys.argv[1:])
+match = re.search(r"nonce must be exactly the string ([0-9a-f-]{36})", prompt)
 summary = "CANARY " * 2000
 inner = json.dumps({"status": "ok", "summary": summary,
-                    "evidence": ["read spec", "checked head"]})
+                    "evidence": ["read spec", "checked head"],
+                    "nonce": match.group(1) if match else "missing"})
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                   "total_cost_usd": 0.42,
                   "result": "Done.\\n\\n```json\\n" + inner + "\\n```"}))

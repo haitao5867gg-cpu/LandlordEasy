@@ -398,10 +398,11 @@ class SecurityTests(RunnerTestCase):
         expected = {"HOME": "/safe", "PATH": "/bin", "LANG": "C", "USER": "trusted_user"}
         models = {"kiro": "gpt-5.6-luna", "copilot": "default", "claude": "claude-sonnet-5"}
         captured = {}
+        answer = json.dumps({"status": "ok", "summary": "done", "evidence": [],
+                             "nonce": runner.attempt_id_for(JOB_ID, 1)})
         def fake_execute(argv, **kwargs):
             captured[Path(argv[0]).name + str(len(captured))] = kwargs["env"]
-            return runner.Result(0, '{"status":"ok","summary":"done","evidence":[]}',
-                                 False, False, 0.1)
+            return runner.Result(0, answer, False, False, 0.1)
         record = types.SimpleNamespace(pw_name="trusted_user")
         with mock.patch.object(runner.os, "environ", source), \
              mock.patch.object(runner.os, "getuid", return_value=501), \
