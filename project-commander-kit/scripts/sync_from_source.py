@@ -22,18 +22,24 @@ REPO = Path(__file__).resolve().parents[2]
 SOURCE = REPO / "tools/commander-runner"
 TARGET = REPO / "project-commander-kit/runner"
 
-# Everything the kit ships from the canonical runner. Kit-only files (such as
-# the lifecycle tests' own fixtures) are not listed and are never touched.
-SYNCED = (
-    "commander_runner.py",
-    "rehearsal_operations.py",
-    "config.example.json",
-    "tests/test_commander_runner.py",
-    "tests/test_operations.py",
-    "tests/test_framework_hardening.py",
-    "tests/test_kit_lifecycle.py",
-    "tests/canary_end_to_end.py",
-)
+# Everything the kit ships from the canonical runner is DERIVED from the
+# source tree, so a file added under tools/commander-runner/ is synced (and
+# drift-checked) by default.  A hand-kept list made new files opt-in: they
+# were never copied and `--check` still passed.  Exclusions are the opt-out.
+EXCLUDED = frozenset({".gitignore", "README.md", "com.landlordeasy.commander-runner.plist.template"})
+SOURCE_GLOBS = ("*.py", "*.json", "tests/*.py")
+
+
+def synced_files() -> tuple[str, ...]:
+    found: set[str] = set()
+    for pattern in SOURCE_GLOBS:
+        for path in SOURCE.glob(pattern):
+            if path.is_file() and path.name not in EXCLUDED and "__pycache__" not in path.parts:
+                found.add(path.relative_to(SOURCE).as_posix())
+    return tuple(sorted(found))
+
+
+SYNCED = synced_files()
 
 
 def digest(path: Path) -> str | None:
@@ -73,7 +79,9 @@ def main() -> int:
     # ship something the canonical runner does not have.
     for target in sorted(TARGET.rglob("*.py")) + sorted(TARGET.rglob("*.json")):
         relative = target.relative_to(TARGET).as_posix()
-        if relative not in SYNCED and (SOURCE / relative).exists() is False:
+        if "__pycache__" in target.parts:
+            continue
+        if relative not in SYNCED and not (SOURCE / relative).exists():
             problems.append(f"{relative}: present in kit but not in the source")
 
     if problems:

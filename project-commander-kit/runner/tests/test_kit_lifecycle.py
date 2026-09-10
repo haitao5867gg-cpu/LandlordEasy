@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parents[1]
 CANDIDATES = (
@@ -187,6 +188,62 @@ class InstallerTestsWhatItShips(KitLifecycleTestCase):
         text = PCK.read_text()
         self.assertIn('str(SOURCE / "tests")', text)
         self.assertNotIn('str(KIT / "runner" / "tests")', text)
+
+
+class AuditFollowupTests(KitLifecycleTestCase):
+    def test_install_refuses_when_the_kit_copy_has_drifted(self):
+        """P1-6(a): the gate must be the tree being installed, in sync."""
+        kit_copy = PCK.parents[1] / "runner" / "commander_runner.py"
+        original = kit_copy.read_bytes()
+        try:
+            with kit_copy.open("ab") as handle:
+                handle.write(b"\n# drift\n")
+            result, _ = self.pck("install")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("drift", result.stderr.lower())
+        finally:
+            kit_copy.write_bytes(original)
+
+    def test_a_dangling_pointer_from_a_crashed_swap_is_swept(self):
+        """P2-7: a `.current.<pid>` temporary left between symlink and rename."""
+        self.pck("install")
+        stray = self.runtime / ".current.999.1"
+        os.symlink(self.runtime / "versions", stray)
+        self.pck("upgrade")
+        self.assertFalse(stray.exists() or stray.is_symlink())
+
+    def test_prune_never_removes_a_young_version_or_the_launchd_target(self):
+        spec = importlib.util.spec_from_file_location("pck_under_test", PCK)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        config = json.loads(self.config.read_text())
+        versions = self.runtime / "versions"
+        for name in ("v01", "v02", "v03"):
+            (versions / name).mkdir(parents=True)
+            (versions / name / "commander_runner.py").write_text("#")
+        os.symlink(versions / "v03", self.runtime / "current")
+        # v01 is old enough to prune; v02 is old too but launchd runs from it.
+        ancient = 30 * 24 * 3600
+        for name in ("v01", "v02"):
+            os.utime(versions / name, (ancient, ancient))
+        with mock.patch.object(module, "launchd_target", return_value=(versions / "v02").resolve()):
+            removed = module.prune_versions(config, keep=1)
+        self.assertEqual(removed, ["v01"])
+        self.assertTrue((versions / "v02").is_dir())
+
+    def test_sync_list_is_derived_so_a_new_source_file_is_not_silently_skipped(self):
+        """P1-6(c): a hand-kept SYNCED tuple made new files opt-in."""
+        sync = PCK.parent / "sync_from_source.py"
+        source_dir = PCK.parents[2] / "tools" / "commander-runner"
+        probe = source_dir / "zz_probe_new_file.py"
+        try:
+            probe.write_text("# probe\n")
+            result = subprocess.run([sys.executable, str(sync), "--check"],
+                                    capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("zz_probe_new_file.py", result.stderr)
+        finally:
+            probe.unlink(missing_ok=True)
 
 
 class DoctorNegativeTests(KitLifecycleTestCase):

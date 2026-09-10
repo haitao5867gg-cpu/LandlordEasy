@@ -230,10 +230,22 @@ def stage_version(config: dict) -> Path:
         raise
 
 
+def sweep_dangling_pointers(config: dict) -> int:
+    """Remove `.current.*` temporaries left by a crash between symlink and rename."""
+    root = runtime_dir(config)
+    removed = 0
+    for stray in root.glob(".current.*"):
+        if stray.is_symlink():
+            stray.unlink()
+            removed += 1
+    return removed
+
+
 def activate(config: dict, version: Path) -> Path | None:
     """Atomically point `current` at `version`; returns the previous target."""
     link = current_link(config)
     previous = link.resolve() if link.is_symlink() else None
+    sweep_dangling_pointers(config)
     temporary = link.with_name(f".current.{os.getpid()}.{dt.datetime.now().microsecond}")
     if temporary.exists() or temporary.is_symlink():
         temporary.unlink()
@@ -259,25 +271,65 @@ def verify_live(config: dict) -> dict:
     return manifest
 
 
+MIN_VERSION_AGE_SECONDS = 7 * 24 * 3600
+
+
+def launchd_target(config: dict) -> Path | None:
+    """The script launchd is configured to run, if a LaunchAgent exists.
+
+    A daemon started before `current` moved is still executing the version
+    directory it started from; protecting only `current` would let prune
+    delete the tree under a running process.
+    """
+    for plist in (Path.home() / "Library/LaunchAgents").glob("*.plist"):
+        try:
+            import plistlib
+            arguments = plistlib.loads(plist.read_bytes()).get("ProgramArguments") or []
+        except (OSError, ValueError):
+            continue
+        if len(arguments) > 1 and str(runtime_dir(config)) in str(arguments[1]):
+            return Path(arguments[1]).resolve().parent
+    return None
+
+
 def prune_versions(config: dict, keep: int = KEEP_VERSIONS) -> list[str]:
-    """Drop the oldest versions; never the active one, never the newest `keep`."""
+    """Drop the oldest versions -- never the active one, never the launchd
+    target, never anything younger than a week, never the newest `keep`."""
     versions = versions_dir(config)
     if not versions.is_dir():
         return []
-    live = active_root(config)
+    # Resolve both sides: macOS tmp paths (/var -> /private/var) and any
+    # symlinked runtime_dir would otherwise defeat the comparison.
+    protected = {path.resolve() for path in (active_root(config), launchd_target(config)) if path}
     entries = sorted((path for path in versions.iterdir()
                       if path.is_dir() and not path.name.startswith(".")),
                      key=lambda path: path.name)
     removed: list[str] = []
+    now = dt.datetime.now().timestamp()
     for path in (entries[:-keep] if len(entries) > keep else []):
-        if live is not None and path.resolve() == live:
+        if path.resolve() in protected:
+            continue
+        if now - path.stat().st_mtime < MIN_VERSION_AGE_SECONDS:
             continue
         shutil.rmtree(path, ignore_errors=True)
         removed.append(path.name)
     return removed
 
 
+def kit_in_sync() -> bool:
+    result = subprocess.run(
+        [sys.executable, str(KIT / "scripts/sync_from_source.py"), "--check"],
+        capture_output=True, text=True, timeout=120)
+    return result.returncode == 0
+
+
 def install_transactional(config: dict) -> dict:
+    # The gate used to be "a green suite for a tree that is not the one being
+    # installed".  Tests now run against SOURCE, and drift between SOURCE and
+    # the kit copy refuses the install outright.
+    if not kit_in_sync():
+        raise DoctorFailure("refusing to install: kit copy has drifted from tools/commander-runner "
+                            "(run sync_from_source.py --write)")
     tests = run_tests()
     if not tests["passed"]:
         raise DoctorFailure(f"refusing to install: kit tests fail ({tests['summary']})")

@@ -285,6 +285,11 @@ class Config:
     # unbounded spending.
     paid_overflow_max_attempts: int = 1
     paid_overflow_max_cost_usd: float = 5.0
+    # Window-level ceiling on paid ATTEMPTS, charged when a paid attempt is
+    # dispatched -- not when it succeeds, and not only when a price is visible.
+    # Kiro and Copilot report credits, not dollars, so a purely monetary
+    # ceiling never fired for them and a timed-out paid attempt cost "0".
+    paid_overflow_max_attempts_per_window: int = 10
     # Local artifacts hold complete provider reports, which quote private
     # source.  They are pruned by age like raw output; the host itself is
     # inside the trust boundary (see SECURITY_MODEL.md: FileVault, and keep
@@ -309,13 +314,14 @@ class Config:
             "max_attempts", "paid_overflow_providers", "paid_overflow_authorized",
             "paid_overflow_max_attempts", "paid_overflow_max_cost_usd",
             "wake_destination_kind", "artifact_retention_days",
+            "paid_overflow_max_attempts_per_window",
         }
         required = expected - {
             "delivery_path_allowlists", "enabled_operations", "operation_definitions",
             "wake_pull_request", "max_attempts", "paid_overflow_providers",
             "paid_overflow_authorized", "paid_overflow_max_attempts",
             "paid_overflow_max_cost_usd", "wake_destination_kind",
-            "artifact_retention_days",
+            "artifact_retention_days", "paid_overflow_max_attempts_per_window",
         }
         unknown = set(raw) - expected
         missing = required - set(raw)
@@ -412,6 +418,9 @@ class Config:
             wake_destination_kind=wake_destination_kind,
             artifact_retention_days=bounded_int(
                 raw.get("artifact_retention_days", 30), 1, 365, "artifact_retention_days"),
+            paid_overflow_max_attempts_per_window=bounded_int(
+                raw.get("paid_overflow_max_attempts_per_window", 10), 1, 1000,
+                "paid_overflow_max_attempts_per_window"),
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -449,8 +458,7 @@ class Job:
             "runner_id", "worker", "model", "profile", "assigned", "prompt",
             "timeout_seconds", "output_limit_bytes", "expected_evidence", "quality_gate",
         }
-        allowed = required | {"human_approval_ref"}
-        if set(data) != required and not (required | {"human_approval_ref"}) == set(data):
+        if set(data) not in (required, required | {"human_approval_ref"}):
             raise ValidationError("job has unknown or missing fields")
         if data.get("schema") != SCHEMA:
             raise ValidationError("unsupported schema")
@@ -495,16 +503,21 @@ class Job:
             approval = approval.strip()
             if not config.delivery_path_allowlists.get(data["quality_gate"]):
                 raise ValidationError("repo_delivery requires a non-empty owner path allowlist")
-        for key in ("assigned", "expected_evidence"):
-            validate_job_text(data[key], key, max_chars=512, allow_newlines=False)
-        validate_job_text(data["prompt"], "prompt", max_chars=MAX_PROMPT_CHARS)
+        assigned = validate_job_text(data["assigned"], "assigned", max_chars=512, allow_newlines=False)
+        expected_evidence = validate_job_text(data["expected_evidence"], "expected_evidence",
+                                              max_chars=512, allow_newlines=False)
+        prompt = validate_job_text(data["prompt"], "prompt", max_chars=MAX_PROMPT_CHARS)
         if approval is not None:
             approval = validate_job_text(approval, "human_approval_ref", max_chars=512,
                                          allow_newlines=False)
         timeout = bounded_int(data["timeout_seconds"], 1, MAX_TIMEOUT_SECONDS, "timeout_seconds")
         cap = bounded_int(data["output_limit_bytes"], 1, MAX_OUTPUT_BYTES, "output_limit_bytes")
+        # Use what was validated, not the raw dict it was validated from.  The
+        # stripped text and bounded ints were computed and then discarded.
         values = {k: data.get(k) for k in cls.__dataclass_fields__}
-        values["human_approval_ref"] = approval
+        values.update(assigned=assigned, expected_evidence=expected_evidence, prompt=prompt,
+                      timeout_seconds=timeout, output_limit_bytes=cap,
+                      human_approval_ref=approval)
         return cls(**values)
 
 @dataclasses.dataclass(frozen=True)
@@ -702,8 +715,12 @@ def validate_operation_definitions(value: Any, operational: Mapping[str, str],
                     raise ValidationError("operation argv candidate SHA must be exact")
                 normalized_parts += [flag, value]
         normalized = tuple(normalized_parts)
-        helper = runtime_dir / "rehearsal_operations.py"
-        if normalized[0] != operational["python"] or Path(normalized[1]) != helper:
+        # The helper may live in the flat layout or under the transactional
+        # installer's `current/`; either resolved location is the fixed contract.
+        helpers = {(runtime_dir / "rehearsal_operations.py").resolve(strict=False),
+                   (runtime_dir / "current" / "rehearsal_operations.py").resolve(strict=False)}
+        if normalized[0] != operational["python"] \
+                or Path(normalized[1]).resolve(strict=False) not in helpers:
             raise ValidationError("operation argv does not match the fixed helper contract")
         if raw["mode"] not in OPERATION_MODES:
             raise ValidationError("operation mode is not implemented")
@@ -1012,9 +1029,10 @@ def renormalize_job(state_dir: Path, job_id: str,
             except ValidationError as exc:
                 errors.append(f"{path.name}: {exc}")
                 continue
-        artifact, digest = store_artifact(state_dir, job_id, 1, output)
+        artifact, digest = store_artifact(state_dir, job_id, attempt_ordinal, output)
         return {
             "job_id": job_id, "recovered_from": path.name, "status": output.status,
+            "attempt_ordinal": attempt_ordinal,
             "nonce_verified": nonce_used is not None,
             "summary_chars": output.summary_chars, "summary_truncated_for_issue": output.truncated,
             "evidence_items": len(output.evidence),
@@ -1651,20 +1669,38 @@ def response_nonce(job: "Job", ordinal: int = 1) -> str:
     return attempt_id_for(job.job_id, ordinal)
 
 
+MAX_JSON_CANDIDATES = 64
+
+
 def _candidate_json_objects(text: str) -> Iterable[str]:
+    """Places an answer object might be.  Bounded: a hostile 1 MiB output
+    full of `{` used to trigger a raw_decode at every one of them."""
     stripped = text.strip()
     if stripped:
         yield stripped
+    yielded = 1
     for match in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE):
         yield match.group(1)
+        yielded += 1
+        if yielded >= MAX_JSON_CANDIDATES:
+            return
     decoder = json.JSONDecoder()
-    for index, character in enumerate(text):
-        if character == "{":
-            with contextlib.suppress(json.JSONDecodeError):
-                _, end = decoder.raw_decode(text[index:])
-                yield text[index:index + end]
+    index = 0
+    while yielded < MAX_JSON_CANDIDATES:
+        index = text.find("{", index)
+        if index < 0:
+            return
+        try:
+            _, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        yield text[index:index + end]
+        yielded += 1
+        index += max(1, end)
 
-def normalize_provider_output(text: str, nonce: str | None = None) -> NormalizedOutput:
+def normalize_provider_output(text: str, nonce: str | None = None,
+                              _depth: int = 0) -> NormalizedOutput:
     """Parse the provider's structured answer.
 
     `nonce` is REQUIRED on the live path (every job supplies one).  It may be
@@ -1676,10 +1712,12 @@ def normalize_provider_output(text: str, nonce: str | None = None) -> Normalized
             value = json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and isinstance(value.get("result"), str):
-            # Claude --output-format json wraps the assistant response.
+        if isinstance(value, dict) and isinstance(value.get("result"), str) and _depth < 2:
+            # Claude --output-format json wraps the assistant response.  One
+            # level of unwrapping is the real shape; deeper nesting is not an
+            # answer and must not become a RecursionError escaping the tick.
             with contextlib.suppress(ValidationError):
-                normalized = normalize_provider_output(value["result"], nonce)
+                normalized = normalize_provider_output(value["result"], nonce, _depth + 1)
                 visible = value.get("total_cost_usd")
                 usage = normalized.usage if visible is None else f"cost_usd={visible}"
                 return dataclasses.replace(normalized, usage=usage)
@@ -1925,11 +1963,35 @@ class QuotaLedger:
             return float(item.get("spend_usd", 0.0))
         except (TypeError, ValueError):
             return 0.0
+    def paid_attempts(self) -> int:
+        item = self.data.get("__paid__", {})
+        if item.get("reset_key") != self.reset_key("kiro"):
+            return 0
+        try:
+            return int(item.get("attempts", 0))
+        except (TypeError, ValueError):
+            return 0
+    def charge_paid_attempt(self) -> None:
+        """Count a paid attempt the moment it is dispatched.
+
+        Outcome-independent by design: a paid call that times out, fails, or
+        returns no price still consumed paid capacity.  This is the ceiling
+        that works for providers that never report a monetary cost.
+        """
+        item = dict(self.data.get("__paid__", {}))
+        if item.get("reset_key") != self.reset_key("kiro"):
+            item = {}
+        item["reset_key"] = self.reset_key("kiro")
+        item["attempts"] = self.paid_attempts() + 1
+        item.setdefault("spend_usd", 0.0)
+        self.data["__paid__"] = item
+        self._write()
     def record_paid_spend(self, amount: float) -> None:
         if not isinstance(amount, (int, float)) or amount < 0:
             raise ValidationError("paid spend must be a non-negative number")
         self.data["__paid__"] = {"reset_key": self.reset_key("kiro"),
-                                 "spend_usd": self.paid_spend() + float(amount)}
+                                 "spend_usd": self.paid_spend() + float(amount),
+                                 "attempts": self.paid_attempts()}
         self._write()
     def is_exhausted(self, worker: str) -> bool:
         """True only while the CURRENT quota window is known-exhausted.
@@ -1946,8 +2008,17 @@ class QuotaLedger:
         self.data[worker] = item
         self._write()
     def record(self, worker: str, usage: str | None, balance: float | None = None) -> None:
+        """Record observed usage WITHOUT touching the exhaustion flag.
+
+        A successful paid attempt used to write exhausted=False, "reviving"
+        the provider's free window.  The next job then routed to the free tier
+        -- which upstream was still exhausted -- and paid accounting was
+        bypassed.  Exhaustion clears only when the reset window rolls over.
+        """
+        current = self.data.get(worker, {})
+        exhausted = bool(current.get("exhausted")) and current.get("reset_key") == self.reset_key(worker)
         self.data[worker] = {"reset_key": self.reset_key(worker), "usage": usage,
-                             "balance": balance, "exhausted": False}
+                             "balance": balance, "exhausted": exhausted}
         self._write()
     def _write(self) -> None:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2014,7 +2085,13 @@ def plan_route(job: Job, config: Config,
         return []
     if ledger.paid_spend() >= config.paid_overflow_max_cost_usd:
         return []
-    paid_pool = [worker for worker in capable if worker in config.paid_overflow_providers]
+    if ledger.paid_attempts() >= config.paid_overflow_max_attempts_per_window:
+        return []
+    # Same substitution policy as the free tier: with provider_failover off,
+    # paid capacity may only come from the worker the Commander asked for.
+    # Drawing from `capable` here contradicted the docstring above and let a
+    # disabled failover still swap in another worker -- for money.
+    paid_pool = [worker for worker in free_pool if worker in config.paid_overflow_providers]
     return [RouteStep(worker, job.model if worker == job.worker
                       else PROVIDER_DEFAULT_MODEL[worker], "paid")
             for worker in paid_pool[:config.paid_overflow_max_attempts]]
@@ -2066,24 +2143,53 @@ def wake_destination_health(config: Config) -> dict[str, Any]:
     if config.wake_pull_request is None:
         report["usable"] = True  # bridge disabled; nothing to deliver
         return report
+    try:
+        value = GitHubClient(config)._api(
+            "GET", f"repos/{config.repository}/pulls/{config.wake_pull_request}")
+    except (OSError, RunnerError, ValidationError):
+        return report
+    if not isinstance(value, dict):
+        return report
+    state = f"{value.get('state')}/{str(bool(value.get('merged'))).lower()}"
+    report["state"] = state
+    live = value.get("state") == "open" and not value.get("merged")
+    # A legacy destination is reported but not enforced; a declared wake bus
+    # must actually be open, or the operator is being misled about delivery.
+    report["usable"] = True if config.wake_destination_kind == "legacy" else live
+    return report
+
+
+OVERBROAD_TOKEN_SCOPES = frozenset({"admin:org", "admin:repo_hook", "delete_repo", "workflow",
+                                    "admin:public_key", "admin:gpg_key", "write:packages"})
+
+
+def token_scope_health(config: Config) -> dict[str, Any]:
+    """Report the Executor token's scopes.  The real boundary is the token.
+
+    `_api` narrows what THIS program asks for; it cannot narrow what the
+    credential permits, and `git push` uses the same credential outside `_api`
+    entirely.  Over-broad scopes are reported as a warning: fixing them is an
+    owner action (a fine-grained PAT limited to this repository).
+    """
+    report: dict[str, Any] = {"scopes": None, "overbroad": None, "fine_grained": None}
     gh = config.operational_executables.get("gh")
     if not gh:
         return report
     try:
-        result = execute(
-            [gh, "api", f"repos/{config.repository}/pulls/{config.wake_pull_request}",
-             "--jq", ".state + \"/\" + (.merged|tostring)"],
-            timeout=30, cap=8192, env=safe_environment())
+        result = execute([gh, "api", "-i", "user"], timeout=30, cap=16384, env=safe_environment())
     except (OSError, RunnerError):
         return report
     if result.returncode or result.timed_out or result.overflow:
         return report
-    state = result.output.strip()
-    report["state"] = state
-    live = state.startswith("open") and state.endswith("false")
-    # A legacy destination is reported but not enforced; a declared wake bus
-    # must actually be open, or the operator is being misled about delivery.
-    report["usable"] = True if config.wake_destination_kind == "legacy" else live
+    match = re.search(r"(?im)^x-oauth-scopes:\s*(.*)$", result.output)
+    if not match:
+        report["fine_grained"] = True   # fine-grained PATs send no classic scope header
+        report["scopes"], report["overbroad"] = [], []
+        return report
+    scopes = sorted(s.strip() for s in match.group(1).split(",") if s.strip())
+    report["scopes"] = scopes
+    report["fine_grained"] = False
+    report["overbroad"] = sorted(set(scopes) & OVERBROAD_TOKEN_SCOPES)
     return report
 
 
@@ -2209,6 +2315,10 @@ def execute_with_failover(job: Job, config: Config, worktree: Path,
         # record, so the sleep is skipped once no further attempt can happen.
         more_attempts_remain = index + 1 < len(candidates) and ordinal < budget
         candidate = with_provider(job, worker, model)
+        if step.tier == "paid":
+            # Charged before the call: paid capacity is consumed whether or
+            # not the attempt succeeds or reports a price.
+            ledger.charge_paid_attempt()
         try:
             result = execute(adapter_argv(candidate, config.executable_paths, ordinal), timeout=job.timeout_seconds,
                              cap=job.output_limit_bytes, cwd=worktree, env=safe_environment())
@@ -2420,18 +2530,60 @@ def stage_and_validate(config: Config, worktree: Path, *,
     validate_delivery_snapshot(entries, "\n".join(snapshot_parts), allowed_paths)
     return entries
 
+class QualityGateFailure(RunnerError):
+    """A gate command did not pass.  Carries the classified category and the
+    tail of the output so the terminal record can say WHAT failed."""
+    def __init__(self, reason: str, category: str, tail: str, ordinal: int):
+        super().__init__(reason)
+        self.category = category
+        self.tail = tail
+        self.ordinal = ordinal
+
+
+def store_gate_output(state_dir: Path, job_id: str, ordinal: int, text: str) -> Path:
+    """Persist a quality-gate command's output next to provider raw output."""
+    if not valid_uuid(job_id):
+        raise ValidationError("invalid job ID for gate output")
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= 50:
+        raise ValidationError("gate ordinal is out of range")
+    directory = state_dir / "raw-output"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    target = directory / f"{job_id}.gate-{ordinal}.log"
+    if target.is_symlink():
+        raise ValidationError("gate output target may not be a symlink")
+    target.write_text(text, encoding="utf-8", errors="replace")
+    os.chmod(target, 0o600)
+    return target
+
+
 def run_quality_gate(config: Config, job: Job, worktree: Path) -> tuple[Result, ...]:
+    """Run the gate's commands; on failure keep the evidence and say why.
+
+    Raising a bare "quality gate failed" discarded the Result -- the test
+    output that already contained the answer -- and the terminal record said
+    nothing.  That is the exact failure mode this kit exists to remove, and
+    it survived on the one path where the diagnosis is both known and free.
+    """
     if job.quality_gate == "none": return ()
     if job.quality_gate not in config.enabled_quality_gates:
         raise RunnerError("quality gate is not enabled")
     results: list[Result] = []
-    for argv in config.quality_gates[job.quality_gate]:
+    for ordinal, argv in enumerate(config.quality_gates[job.quality_gate], start=1):
         result = execute(argv, timeout=job.timeout_seconds, cap=job.output_limit_bytes,
                          cwd=worktree, env=safe_environment())
         results.append(result)
+        # Persist before judging, exactly as for provider output.
+        try:
+            store_gate_output(config.state_dir, job.job_id, ordinal, result.output)
+        except (OSError, ValidationError):
+            raise QualityGateFailure("quality gate output could not be persisted",
+                                     "PERSISTENCE", "", ordinal)
         if result.returncode or result.timed_out or result.overflow:
             reason = "timeout" if result.timed_out else "overflow" if result.overflow else "failed"
-            raise RunnerError(f"quality gate {reason}")
+            category = classify_provider_error(result)
+            raise QualityGateFailure(f"quality gate {reason}", category,
+                                     last_words(result.output), ordinal)
     return tuple(results)
 
 def deliver_worktree(config: Config, job: Job, worktree: Path) -> str:
@@ -2464,13 +2616,20 @@ class GitHubClient:
                          if self.config.wake_pull_request is not None else None)
         single_comment = re.fullmatch(
             re.escape(f"repos/{self.config.repository}/issues/comments/") + r"[1-9][0-9]*", endpoint)
+        # The wake destination's state.  Listed here so the allowlist is the
+        # complete truth about what this client reads; it used to be fetched
+        # around this method, which made "_api is the boundary" a fiction.
+        wake_pull = (f"repos/{self.config.repository}/pulls/{self.config.wake_pull_request}"
+                     if self.config.wake_pull_request is not None else None)
         fixed_endpoints = {expected, comments}
         if wake_comments is not None:
             fixed_endpoints.add(wake_comments)
         listing = re.fullmatch(
             re.escape(comments) + rf"\?per_page={QUEUE_PAGE_SIZE}&page=[1-9][0-9]*"
             r"(?:&since=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)?", endpoint)
-        if endpoint not in fixed_endpoints and not listing and not (single_comment and method == "GET"):
+        if wake_pull is not None and endpoint == wake_pull and method == "GET":
+            pass
+        elif endpoint not in fixed_endpoints and not listing and not (single_comment and method == "GET"):
             raise ValidationError("GitHub endpoint outside queue issue")
         allowed_posts = {comments}
         if wake_comments is not None:
@@ -2561,6 +2720,10 @@ class RejectedEnvelope:
     runner_id: str
     schema: str
 
+FUTURE_SCHEMA_RE = re.compile(
+    r"\A\s*COMMANDER_(JOB|OPERATION)_V(\d+)\s*\n```json\s*\n(\{.*\})\s*\n```\s*\Z", re.DOTALL)
+
+
 def envelope_for_rejection(body: str, config: Config) -> RejectedEnvelope | None:
     """Identify a job we must explicitly REJECT rather than silently skip.
 
@@ -2573,12 +2736,19 @@ def envelope_for_rejection(body: str, config: Config) -> RejectedEnvelope | None
     disabled profile — is a REJECTED terminal, not silence.  Silence was the
     defect: the Commander could not tell "not seen yet" from "refused".
     """
-    for pattern, schema in ((COMMENT_RE, SCHEMA), (OPERATION_COMMENT_RE, OPERATION_SCHEMA)):
+    patterns = [(COMMENT_RE, SCHEMA), (OPERATION_COMMENT_RE, OPERATION_SCHEMA)]
+    future = FUTURE_SCHEMA_RE.fullmatch(body)
+    if future and future.group(2) != "1":
+        # A V2+ message addressed to a V1 runner.  Skipping it silently would
+        # look identical to "not polled yet"; the honest answer is REJECTED
+        # with "unsupported protocol version, upgrade the runner".
+        patterns.append((FUTURE_SCHEMA_RE, f"COMMANDER_{future.group(1)}_V{future.group(2)}"))
+    for pattern, schema in patterns:
         match = pattern.fullmatch(body)
         if not match:
             continue
         try:
-            data = strict_json_loads(match.group(1))
+            data = strict_json_loads(match.group(match.lastindex))
         except (json.JSONDecodeError, ValidationError):
             return None
         if not isinstance(data, dict):
@@ -3157,11 +3327,12 @@ def doctor(config: Config) -> dict[str, Any]:
         "wake_destination": wake_destination_health(config),
         "launchagent": launchagent_health(config),
         "queue": queue_health(config),
+        "token_scopes": token_scope_health(config),
     }
     booleans_ok = all(value for key, value in checks.items()
                       if key not in {"providers", "operational_executables", "quality_gates",
                                      "operations", "outbound_policy", "runtime_manifest",
-                                     "wake_destination", "launchagent", "queue"})
+                                     "wake_destination", "launchagent", "queue", "token_scopes"})
     # Provenance is only required once the runtime is actually installed; a
     # fresh host with no runtime_dir yet is not unhealthy.
     manifest_ok = (checks["runtime_manifest"]["ok"]
@@ -3418,6 +3589,16 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                                     f"policy={policy_for(attempt.error_category) or 'NONE'}; "
                                     f"quality_gate={job.quality_gate}; "
                                     f"exit={exit_code}; duration={duration:.1f}s; {evidence}{artifact_note}")
+                  except QualityGateFailure as exc:
+                      stop_class = stop_class_for(exc.category)
+                      policy = policy_for(exc.category)
+                      internal_state = "failed" if policy == "REPORT_AND_STOP" else "blocked"
+                      state_name = "FAILED"
+                      detail = (f"quality_gate={job.quality_gate}; gate_step={exc.ordinal}; "
+                                f"gate_category={exc.category}; stop_class={stop_class}; "
+                                f"policy={policy}; {exc}; "
+                                f"gate_output={job.job_id}.gate-{exc.ordinal}.log\n"
+                                f"{redact(exc.tail, 1500)}")
                   except RunnerError as exc:
                       state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
                   delivered = post_terminal_lifecycle(

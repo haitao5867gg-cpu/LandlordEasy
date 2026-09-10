@@ -549,6 +549,196 @@ class QueueHealthTests(HardeningTestCase):
         self.assertEqual(report["pending_terminals"], 0)
 
 
+class PaidAttemptAccountingTests(HardeningTestCase):
+    """P1-9: paid capacity is consumed on dispatch, not on a visible price."""
+
+    def paid_config(self, **changes):
+        base = dict(provider_failover=False, paid_overflow_providers=frozenset({"kiro"}),
+                    paid_overflow_authorized=True, paid_overflow_max_attempts=1,
+                    paid_overflow_max_cost_usd=50.0, paid_overflow_max_attempts_per_window=2)
+        base.update(changes)
+        return runner.dataclasses.replace(self.config, **base)
+
+    def test_a_timed_out_paid_attempt_still_counts(self):
+        ledger = runner.QuotaLedger(self.state)
+        for worker in runner.WORKERS:
+            ledger.mark_exhausted(worker)
+        timed_out = runner.Result(-15, "", True, False, 900.0)
+        with mock.patch.object(runner, "execute", return_value=timed_out):
+            runner.execute_with_failover(self.job(), self.paid_config(), self.worktrees,
+                                         sleeper=lambda _: None)
+        self.assertEqual(runner.QuotaLedger(self.state).paid_attempts(), 1)
+
+    def test_credits_only_providers_hit_the_attempt_ceiling(self):
+        """Kiro/Copilot report credits=N, never dollars; the monetary ceiling
+        alone would never fire and N jobs could each spend paid attempts with
+        the ledger at 0.00."""
+        ledger = runner.QuotaLedger(self.state)
+        for worker in runner.WORKERS:
+            ledger.mark_exhausted(worker)
+        answer = json.dumps({"status": "ok", "summary": "d", "evidence": ["e"],
+                             "nonce": runner.attempt_id_for(JOB_ID, 1)})
+        ok = runner.Result(0, "credits: 3\n" + answer, False, False, 1.0)
+        config = self.paid_config()
+        with mock.patch.object(runner, "execute", return_value=ok) as execute:
+            for _ in range(2):
+                runner.execute_with_failover(self.job(), config, self.worktrees,
+                                             sleeper=lambda _: None)
+            self.assertEqual(execute.call_count, 2)
+            self.assertEqual(runner.QuotaLedger(self.state).paid_spend(), 0.0)  # honest: unknown price
+            with self.assertRaises(runner.RunnerError):                      # ceiling reached
+                runner.execute_with_failover(self.job(), config, self.worktrees,
+                                             sleeper=lambda _: None)
+            self.assertEqual(execute.call_count, 2)
+
+    def test_attempt_counter_resets_with_the_window(self):
+        ledger = runner.QuotaLedger(self.state)
+        ledger.charge_paid_attempt(); ledger.charge_paid_attempt()
+        self.assertEqual(ledger.paid_attempts(), 2)
+        ledger.data["__paid__"]["reset_key"] = "monthly:1970-01-01"
+        self.assertEqual(ledger.paid_attempts(), 0)
+
+
+class QualityGateEvidenceTests(HardeningTestCase):
+    """P1-11: a failed gate must leave its output behind and say what failed."""
+
+    def gate_config(self, argv):
+        return runner.dataclasses.replace(
+            self.config, enabled_quality_gates=frozenset({"none", "unit"}),
+            quality_gates={"none": (), "unit": (tuple(argv),)})
+
+    def test_failed_gate_output_is_persisted_and_classified(self):
+        config = self.gate_config([sys.executable, "-c",
+                                   "print('Tests: 1 failed, 4 passed'); raise SystemExit(1)"])
+        job = runner.Job.from_comment(
+            self.comment(profile="repo_write_test", quality_gate="unit"), config)
+        with self.assertRaises(runner.QualityGateFailure) as failed:
+            runner.run_quality_gate(config, job, self.worktrees)
+        self.assertEqual(failed.exception.category, "RUNTIME")
+        self.assertIn("Tests: 1 failed", failed.exception.tail)
+        self.assertTrue((self.state / "raw-output" / f"{JOB_ID}.gate-1.log").is_file())
+
+    def test_gate_terminal_record_carries_diagnosis_not_a_bare_stop_condition(self):
+        config = self.gate_config([sys.executable, "-c",
+                                   "print('usage: tool [--flag]'); raise SystemExit(2)"])
+        answer = json.dumps({"status": "ok", "summary": "wrote code", "evidence": ["e"],
+                             "nonce": runner.attempt_id_for(JOB_ID, 1)})
+        provider_ok = runner.Result(0, answer, False, False, 1.0)
+        real_execute = runner.execute
+
+        def execute(argv, **kwargs):
+            # The provider call is stubbed; the gate command runs for real.
+            if argv[0] == config.executable_paths["kiro"] and "--no-interactive" in argv:
+                return provider_ok
+            return real_execute(argv, **kwargs)
+
+        client, posts = self.queue(self.comment(profile="repo_write_test", quality_gate="unit"))
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "prepare_worktree", return_value=self.worktrees), \
+             mock.patch.object(runner, "execute", side_effect=execute):
+            self.assertEqual(runner.run_once(config), f"FAILED {JOB_ID}")
+        terminal = [p for p in posts if "FAILED" in p][-1]
+        self.assertIn("gate_category=INVOCATION", terminal)   # a wrong flag is not a code defect
+        self.assertIn("policy=REPORT_AND_STOP", terminal)
+        self.assertIn("usage: tool", terminal)
+        self.assertIn(f"{JOB_ID}.gate-1.log", terminal)
+        self.assertNotIn("runner stop condition: quality gate", terminal)
+
+
+class AuditP2RegressionTests(HardeningTestCase):
+    """Smaller findings from the independent audit, each verified against code."""
+
+    def test_paid_tier_respects_the_substitution_policy(self):
+        """P2-4: with failover off, paid capacity may only come from the worker
+        the Commander asked for -- never a silent swap, and never for money."""
+        ledger = runner.QuotaLedger(self.state)
+        for worker in runner.WORKERS:
+            ledger.mark_exhausted(worker)
+        config = runner.dataclasses.replace(
+            self.config, provider_failover=False,
+            paid_overflow_providers=frozenset({"claude"}), paid_overflow_authorized=True)
+        # Job asks for kiro; claude is the only paid provider; failover is off.
+        self.assertEqual(runner.plan_route(self.job(worker="kiro"), config, ledger), [])
+        on = runner.dataclasses.replace(config, provider_failover=True)
+        self.assertEqual([s.worker for s in runner.plan_route(self.job(worker="kiro"), on, ledger)],
+                         ["claude"])
+
+    def test_renormalize_writes_the_artifact_for_the_attempt_it_recovered(self):
+        """P2-3: recovering attempt 3 used to overwrite attempt 1's artifact."""
+        answer = json.dumps({"status": "ok", "summary": "third", "evidence": ["e"],
+                             "nonce": runner.attempt_id_for(JOB_ID, 3)})
+        runner.store_raw_output(self.state, JOB_ID, answer, ordinal=3)
+        report = runner.renormalize_job(self.state, JOB_ID)
+        self.assertEqual(report["attempt_ordinal"], 3)
+        self.assertTrue(report["artifact"].endswith("attempt-3.md"))
+        self.assertFalse((self.state / "artifacts" / JOB_ID / "attempt-1.md").exists())
+
+    def test_nested_envelopes_do_not_recurse_without_bound(self):
+        """P2-6: a RecursionError is not a RunnerError and escaped the tick."""
+        inner = json.dumps({"result": json.dumps({"result": json.dumps({"result": "deep"})})})
+        with self.assertRaises(runner.ValidationError):
+            runner.normalize_provider_output(inner, runner.attempt_id_for(JOB_ID, 1))
+
+    def test_hostile_brace_soup_is_bounded_not_quadratic(self):
+        soup = "{" * 200_000
+        with self.assertRaises(runner.ValidationError):
+            runner.normalize_provider_output(soup, runner.attempt_id_for(JOB_ID, 1))
+
+    def test_a_newer_protocol_version_is_rejected_not_skipped(self):
+        """Missing item 5: a V2 job on a V1 runner must say so, not vanish."""
+        body = "COMMANDER_JOB_V2\n```json\n" + json.dumps(self.data()) + "\n```"
+        envelope = runner.envelope_for_rejection(body, self.config)
+        self.assertIsNotNone(envelope)
+        self.assertEqual(envelope.schema, "COMMANDER_JOB_V2")
+        client, posts = self.queue(body)
+        with mock.patch.object(runner, "GitHubClient", client):
+            self.assertEqual(runner.run_once(self.config), f"REJECTED {JOB_ID}")
+        self.assertTrue(any("REJECTED" in p and "COMMANDER_JOB_V2" in p for p in posts))
+
+    def test_job_carries_its_own_normalized_values(self):
+        """Unnumbered: validated/stripped values were computed then discarded."""
+        job = self.job(assigned="  ORG-002  ", expected_evidence="  summary  ", prompt="  read  ")
+        self.assertEqual(job.assigned, "ORG-002")
+        self.assertEqual(job.expected_evidence, "summary")
+        self.assertEqual(job.prompt, "read")
+
+    def test_operation_helper_may_live_under_the_versioned_layout(self):
+        definition = {"rel001_mysql_suite": {
+            "argv": [sys.executable, str(self.runtime / "current" / "rehearsal_operations.py"),
+                     "--docker", "/usr/local/bin/docker", "--mode", "rel001_suite",
+                     "--pnpm", "/usr/local/bin/pnpm"],
+            "mode": "isolated_test", "allowed_target_shas": [],
+            "allowed_target_branches": ["fix/x"], "max_timeout_seconds": 60,
+            "max_output_bytes": 4096, "require_clean_worktree": True, "description": "d"}}
+        result = runner.validate_operation_definitions(
+            definition, {"python": sys.executable, "gh": "/usr/bin/true", "git": "/usr/bin/git"},
+            self.runtime)
+        self.assertIn("current", result["rel001_mysql_suite"].argv[1])
+
+    def test_wake_destination_state_is_read_through_the_allowlisted_client(self):
+        """P1-10 (code half): the wake PR read goes through _api, so the
+        allowlist is the complete truth about what this client fetches."""
+        config = runner.dataclasses.replace(self.config, wake_pull_request=22)
+        with mock.patch.object(runner.GitHubClient, "_api",
+                               return_value={"state": "open", "merged": False}) as api:
+            health = runner.wake_destination_health(config)
+        self.assertEqual(health["state"], "open/false")
+        self.assertTrue(health["usable"])
+        self.assertIn("pulls/22", api.call_args.args[1])
+        # And the allowlist itself refuses a pulls endpoint for any other PR.
+        client = runner.GitHubClient(config)
+        with self.assertRaises(runner.ValidationError):
+            client._api("GET", "repos/owner/repo/pulls/23")
+
+    def test_overbroad_token_scopes_are_reported(self):
+        headers = "HTTP/2 200\nx-oauth-scopes: gist, read:org, repo, workflow\n\n{}"
+        with mock.patch.object(runner, "execute",
+                               return_value=runner.Result(0, headers, False, False, 0.1)):
+            report = runner.token_scope_health(self.config)
+        self.assertEqual(report["overbroad"], ["workflow"])
+        self.assertFalse(report["fine_grained"])
+
+
 # --- D3 / D4: long output survives, and recovery costs no quota --------------
 
 class OutputRecoveryTests(HardeningTestCase):
@@ -1376,8 +1566,8 @@ class WakeDestinationTests(HardeningTestCase):
     def test_a_legacy_destination_is_reported_but_not_enforced(self):
         config = runner.dataclasses.replace(
             self.config, wake_pull_request=22, wake_destination_kind="legacy")
-        merged = runner.Result(0, "closed/true", False, False, 0.1)
-        with mock.patch.object(runner, "execute", return_value=merged):
+        with mock.patch.object(runner.GitHubClient, "_api",
+                               return_value={"state": "closed", "merged": True}):
             health = runner.wake_destination_health(config)
         self.assertEqual(health["state"], "closed/true")
         self.assertTrue(health["usable"])

@@ -265,16 +265,28 @@ def _sh(argv: Sequence[str], cwd: Path, env: dict[str, str], timeout: int) -> tu
         list(argv), cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         start_new_session=True)
+    # Bounded read: keep only the tail as it streams, so a runaway pnpm or
+    # prisma cannot make the helper buffer gigabytes before the cap applies.
+    tail = ""
+    started = time.monotonic()
+    assert process.stdout is not None
     try:
-        output, _ = process.communicate(timeout=timeout)
+        while True:
+            if time.monotonic() - started > timeout:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            chunk = process.stdout.read(65536)
+            if not chunk:
+                break
+            tail = (tail + chunk)[-COMMAND_CAP:]
+        process.wait(timeout=max(1, int(timeout - (time.monotonic() - started))))
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        output, _ = process.communicate()
-        return 124, (output or "")[-COMMAND_CAP:]
-    return process.returncode, (output or "")[-COMMAND_CAP:]
+        process.wait()
+        return 124, tail
+    return process.returncode, tail
 
 
 def _suite_env(docker: str, sha: str) -> dict[str, str]:
