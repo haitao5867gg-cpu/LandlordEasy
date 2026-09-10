@@ -97,7 +97,15 @@ are constrained hard:
 - the argv is **entirely owner-configured** and must match a fixed helper
   contract; the job supplies only an `operation_id`
 - shell interpreters and `env` wrappers are rejected in config validation
-- only `read_only` mode is implemented
+- two modes exist: `read_only` (the OPS-001 probe) and `isolated_test`
+  (`rel001_mysql_suite`). **`isolated_test` writes**: it brings up a
+  loopback-only, tmpfs-backed, zero-volume MySQL container from the
+  repository's compose file, applies the Prisma schema, runs the suite, and
+  tears the container down. The database is synthetic and disposable, is
+  asserted empty before and after, and is bound to an exact compose project,
+  container name and image digest. This *is* a real-database path — an
+  isolated one. Earlier text said only `read_only` existed and that no
+  database path existed; both were false once `isolated_test` landed.
 - a clean worktree is required before and after
 - a reduced environment (no Docker routing or provider variables)
 - authorization is an exact SHA allowlist **or** the current head of an

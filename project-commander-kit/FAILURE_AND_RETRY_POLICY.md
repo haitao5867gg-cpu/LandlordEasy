@@ -22,6 +22,31 @@ walks into production.
 | `CODE_FAILURE` | The work genuinely failed, with positive evidence: assertions, a red suite, type errors. | Report it. Do not retry — a retry cannot make failing tests pass. |
 | `UNCLASSIFIED_FAILURE` | A nonzero exit we could not explain. | Say so. Guessing "your code is broken" is the misclassification this taxonomy exists to prevent. |
 
+## The four policies (what the runner DOES)
+
+The eight classes above are diagnostic — whose fault it was. Scheduling
+consults only the policy, and `RETRYABLE_STOP_CLASSES` is derived from it. The
+two axes used to be one enum while a separate hard-coded list quietly decided
+failover (it did not even include TIMEOUT), so the documented classes were
+decorative.
+
+| Policy | Classes | Behaviour |
+|---|---|---|
+| `FAIL_CLOSED` | `SAFETY_STOP`, `HUMAN_APPROVAL_REQUIRED` | stop immediately, preserve the scene, never retry or fail over |
+| `LOCAL_RECOVERY` | `PROTOCOL_FAILURE` | re-parse persisted raw bytes; **never** re-invoke the model |
+| `BOUNDED_RETRY` | `TRANSIENT_FAILURE`, `ENVIRONMENT_FAILURE` | capped exponential backoff and/or failover within `max_attempts`; write-capable jobs only if the worktree is provably clean |
+| `REPORT_AND_STOP` | `INVOCATION_FAILURE`, `CODE_FAILURE`, `UNCLASSIFIED_FAILURE` | record honestly and stop; a retry cannot change the outcome |
+
+Availability classes (`AUTH`, `RATE_LIMIT`, `QUOTA`, `MODEL`, `PERMISSION`)
+are diagnosed from a tool's **last three non-empty lines**, not its whole
+output: a review that discusses "quota" in its body must not mark a provider
+exhausted for its whole reset window.
+
+Quality-gate failures use the same taxonomy: gate output is persisted to
+`<job>.gate-N.log` before it is judged, and the terminal record carries the
+category, policy, step and the tool's last words. A wrong flag in a gate
+command is `INVOCATION_FAILURE`, not a defect in the code under test.
+
 ## Mapping
 
 ```
