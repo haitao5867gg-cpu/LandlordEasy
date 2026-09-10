@@ -649,5 +649,57 @@ class PlanExecutionTests(PRBTestCase):
         self.assertEqual(runner.commander_job_identity(comments[0], self.config), PLAN_ID)
 
 
+
+class BlockedOperationClassificationTests(PRBTestCase):
+    """Live plan canary 2026-09-10: ops001 reported category=container_identity_mismatch
+    but the terminal said stop_class=NONE and the plan degraded to UNCLASSIFIED_FAILURE."""
+
+    def test_blocked_categories_map_onto_the_stop_taxonomy(self):
+        blocked = runner.NormalizedOutput("blocked", "OPS-001 probe blocked",
+                                          ("category=container_identity_mismatch",))
+        self.assertEqual(runner.operation_block_stop_class(blocked), "ENVIRONMENT_FAILURE")
+        safety = runner.NormalizedOutput("blocked", "x", ("category=mutation_command_rejected",))
+        self.assertEqual(runner.operation_block_stop_class(safety), "SAFETY_STOP")
+        unknown = runner.NormalizedOutput("blocked", "x", ("category=never_heard_of_it",))
+        self.assertEqual(runner.operation_block_stop_class(unknown), "UNCLASSIFIED_FAILURE")
+        ok = runner.NormalizedOutput("ok", "fine", ())
+        self.assertIsNone(runner.operation_block_stop_class(ok))
+        self.assertTrue(set(runner.OPERATION_BLOCK_STOP_CLASS.values()) <= runner.STOP_CLASSES)
+
+    def test_a_blocked_operation_terminal_carries_the_mapped_class(self):
+        definition = runner.OperationDefinition(
+            argv=(sys.executable, "-c", "print('x')"), mode="read_only",
+            allowed_target_shas=frozenset({SHA}), max_timeout_seconds=60,
+            max_output_bytes=4096, require_clean_worktree=False, description="probe")
+        config = runner.dataclasses.replace(
+            self.config, enabled_operations=frozenset({"ops001_mysql_probe"}),
+            operation_definitions={"ops001_mysql_probe": definition})
+        data = {"schema": runner.OPERATION_SCHEMA, "job_id": JOB_ID, "repository": "owner/repo",
+                "queue_issue": 42, "target_sha": SHA, "worktree_id": runner.derive_worktree_id(JOB_ID),
+                "runner_id": "runner-001", "operation_id": "ops001_mysql_probe",
+                "timeout_seconds": 30, "output_limit_bytes": 4096,
+                "expected_evidence": "probe", "human_approval_ref": "owner"}
+        body = "COMMANDER_OPERATION_V1\n```json\n" + json.dumps(data) + "\n```"
+        blocked = runner.OperationAttempt(
+            runner.Result(0, "{}", False, False, 1.0),
+            runner.NormalizedOutput("blocked", "OPS-001 probe blocked",
+                                    ("category=container_identity_mismatch",)), None)
+        Client, posts = self.client([{"id": 5, "user": {"login": "commander"}, "body": body}])
+        with mock.patch.object(runner, "GitHubClient", Client), \
+             mock.patch.object(runner, "prepare_worktree", return_value=self.worktrees), \
+             mock.patch.object(runner, "execute_operation", return_value=blocked):
+            outcome = runner.run_once(config)
+        self.assertEqual(outcome, f"FAILED {JOB_ID}")
+        terminal = [p for p in posts["terminal"] if p.startswith("COMMANDER_OPERATION_RUNNER_V1 FAILED")]
+        self.assertEqual(len(terminal), 1)
+        self.assertIn("stop_class=ENVIRONMENT_FAILURE", terminal[0])
+        self.assertIn("policy=BOUNDED_RETRY", terminal[0])
+        self.assertNotIn("stop_class=NONE", terminal[0])
+        state = runner.State(self.state)
+        try:
+            self.assertEqual(state.latest_attempt(JOB_ID)[5], "ENVIRONMENT_FAILURE")
+        finally:
+            state.close()
+
 if __name__ == "__main__":
     unittest.main()

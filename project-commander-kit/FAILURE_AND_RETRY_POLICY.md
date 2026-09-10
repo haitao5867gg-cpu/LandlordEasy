@@ -109,6 +109,19 @@ declared default.
 - One owner notification per plan, at the end. Steps are not notified
   individually.
 
+## Blocked operations
+
+An operation that runs to completion but answers `status: blocked` names its
+reason in an evidence line `category=<token>`. `OPERATION_BLOCK_STOP_CLASS`
+maps those tokens onto the taxonomy (`container_*`, `docker_*`,
+`mysql_startup_failed` → `ENVIRONMENT_FAILURE`; `isolation_boundary_rejected`,
+`mutation_command_rejected`, `docker_socket_invalid` → `SAFETY_STOP`;
+`database_*`, `schema_push_failed`, `unexpected_table_name` → `CODE_FAILURE`;
+malformed inputs → `PROTOCOL_FAILURE`; anything unknown →
+`UNCLASSIFIED_FAILURE`). The first live plan canary (2026-09-10) published such
+a terminal as `stop_class=NONE`, which left the plan nothing to route on; that
+is the defect this rule closes.
+
 ## Why PROTOCOL_FAILURE is special
 
 The incident that motivated this kit:

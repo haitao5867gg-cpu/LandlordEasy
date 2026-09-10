@@ -2588,6 +2588,52 @@ def failover_allowed_after(attempt: ProviderAttempt, job: Job, config: Config, w
         return True
     return worktree_is_clean(config, worktree)
 
+# An operation that ran to completion but reports status "blocked" names why in
+# an evidence line `category=<token>`.  Those tokens are the operation's own
+# vocabulary (rehearsal_operations.py); this maps them onto the stop taxonomy so
+# a blocked operation is never published as stop_class=NONE and a plan can route
+# on it.  Unknown tokens are UNCLASSIFIED_FAILURE, honestly.
+OPERATION_BLOCK_STOP_CLASS = {
+    # the host could not provide the thing the operation needs
+    "container_identity_mismatch": "ENVIRONMENT_FAILURE",
+    "container_health_mismatch": "ENVIRONMENT_FAILURE",
+    "container_image_mismatch": "ENVIRONMENT_FAILURE",
+    "container_binding_mismatch": "ENVIRONMENT_FAILURE",
+    "container_storage_mismatch": "ENVIRONMENT_FAILURE",
+    "docker_command_timeout": "ENVIRONMENT_FAILURE",
+    "docker_output_overflow": "ENVIRONMENT_FAILURE",
+    "docker_executable_invalid": "ENVIRONMENT_FAILURE",
+    "local_runtime_unavailable": "ENVIRONMENT_FAILURE",
+    "mysql_startup_failed": "ENVIRONMENT_FAILURE",
+    "pnpm_executable_invalid": "ENVIRONMENT_FAILURE",
+    # a boundary refused to be crossed: never retried
+    "docker_socket_invalid": "SAFETY_STOP",
+    "isolation_boundary_rejected": "SAFETY_STOP",
+    "mutation_command_rejected": "SAFETY_STOP",
+    # the thing under test produced the wrong answer
+    "database_evidence_mismatch": "CODE_FAILURE",
+    "database_name_mismatch": "CODE_FAILURE",
+    "database_not_empty_after": "CODE_FAILURE",
+    "database_not_empty_before": "CODE_FAILURE",
+    "database_table_count_mismatch": "CODE_FAILURE",
+    "database_version_mismatch": "CODE_FAILURE",
+    "schema_push_failed": "CODE_FAILURE",
+    "unexpected_table_name": "CODE_FAILURE",
+    # we asked for something malformed
+    "candidate_sha_invalid": "PROTOCOL_FAILURE",
+    "invalid_container_metadata": "PROTOCOL_FAILURE",
+}
+
+def operation_block_stop_class(output: "NormalizedOutput | None") -> str | None:
+    """Stop class of a blocked operation output, from its `category=` evidence line."""
+    if output is None or output.status != "blocked":
+        return None
+    for item in output.evidence:
+        match = re.fullmatch(r"category=([a-z_]+)", item.strip())
+        if match:
+            return OPERATION_BLOCK_STOP_CLASS.get(match.group(1), "UNCLASSIFIED_FAILURE")
+    return "UNCLASSIFIED_FAILURE"
+
 def stop_class_for(error_category: str | None) -> str | None:
     """Map a provider error category onto the coarse stop taxonomy."""
     if error_category is None:
@@ -4275,9 +4321,15 @@ def run_job_to_terminal(client: GitHubClient, state: State, config: Config,
                     operation_attempt = dataclasses.replace(
                         operation_attempt, output=None,
                         error_category="PERSISTENCE")
+            # A blocked operation has no error_category (it ran fine) but does
+            # have a reason; publish that reason's stop class, not NONE.
+            operation_stop_class = (stop_class_for(operation_attempt.error_category)
+                                    or operation_block_stop_class(operation_attempt.output))
+            operation_policy = (STOP_CLASS_POLICY.get(operation_stop_class)
+                                if operation_stop_class else None)
             state.record_attempt(
                 job.job_id, 1, None, None, operation_attempt.error_category,
-                stop_class_for(operation_attempt.error_category))
+                operation_stop_class)
             if operation_attempt.error_category == "TIMEOUT":
                 state_name, internal_state = "TIMED_OUT", "blocked"
             elif operation_attempt.error_category:
@@ -4295,8 +4347,8 @@ def run_job_to_terminal(client: GitHubClient, state: State, config: Config,
             exit_code = result.returncode if result else -1
             detail = (f"operation={job.operation_id}; attempts=1; "
                       f"attempt_id={attempt_id_for(job.job_id, 1)}; "
-                      f"stop_class={stop_class_for(operation_attempt.error_category) or 'NONE'}; "
-                      f"policy={policy_for(operation_attempt.error_category) or 'NONE'}; "
+                      f"stop_class={operation_stop_class or 'NONE'}; "
+                      f"policy={operation_policy or 'NONE'}; "
                       f"exit={exit_code}; duration={duration:.1f}s; "
                       f"{redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)}")
         else:
