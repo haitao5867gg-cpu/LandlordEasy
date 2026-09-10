@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -426,6 +427,126 @@ class LostStateTests(HardeningTestCase):
         with mock.patch.object(runner, "execute", return_value=foreign), \
              self.assertRaises(runner.RunnerError):
             client.comment("7")
+
+
+class ArtifactRetentionTests(HardeningTestCase):
+    def test_old_artifacts_are_pruned_and_fresh_ones_kept(self):
+        root = self.state / "artifacts"
+        old_job = "123e4567-e89b-12d3-a456-426614174011"
+        (root / old_job).mkdir(parents=True)
+        stale = root / old_job / "attempt-1.md"
+        stale.write_text("old")
+        ancient = time.time() - 90 * 24 * 3600
+        os.utime(stale, (ancient, ancient))
+        os.utime(root / old_job, (ancient, ancient))
+        output = runner.NormalizedOutput("ok", "fresh", ("e",), None)
+        runner.store_artifact(self.state, JOB_ID, 1, output, retention_days=30)
+        self.assertFalse((root / old_job).exists())
+        self.assertTrue((root / JOB_ID / "attempt-1.md").is_file())
+
+    def test_pruning_ignores_symlinks_and_foreign_directories(self):
+        root = self.state / "artifacts"
+        root.mkdir(parents=True, mode=0o700)
+        (root / "not-a-uuid").mkdir()
+        os.symlink(self.tmp.name, root / "123e4567-e89b-12d3-a456-426614174022")
+        self.assertEqual(runner.prune_artifacts(self.state, 0), 0)
+        self.assertTrue((root / "not-a-uuid").is_dir())
+
+    def test_retention_config_is_bounded(self):
+        for bad in (0, 366, "30", True):
+            with self.subTest(bad=bad), self.assertRaises(runner.ValidationError):
+                runner.bounded_int(bad, 1, 365, "artifact_retention_days")
+
+
+class VerdictSchemaTests(HardeningTestCase):
+    """A-7: defined and parsed now; consumed by nothing until PR B."""
+
+    def verdict(self, **changes):
+        base = {"verdict": "revise", "p0": 0, "p1": 2, "code_changed": True,
+                "exact_sha_verified": "a" * 40, "recommended_transition": "step-2"}
+        base.update(changes)
+        return base
+
+    def test_valid_verdict_parses_and_is_recorded_not_acted_on(self):
+        payload = json.dumps({"status": "ok", "summary": "s", "evidence": ["e"],
+                              "nonce": runner.attempt_id_for(JOB_ID, 1), "verdict": self.verdict()})
+        output = runner.normalize_provider_output(payload, runner.attempt_id_for(JOB_ID, 1))
+        self.assertEqual(output.verdict.verdict, "revise")
+        self.assertIn("recommended_transition=step-2", output.verdict.as_record())
+        # Nothing in the runner branches on it: the outcome is still the
+        # provider's status, not the verdict.
+        self.assertEqual(output.status, "ok")
+
+    def test_invalid_verdicts_are_refused(self):
+        cases = (dict(verdict="maybe"), dict(p0=-1), dict(p1=True), dict(code_changed="yes"),
+                 dict(exact_sha_verified="main"), dict(recommended_transition="a\nb"),
+                 dict(extra="field"), dict(schema="COMMANDER_VERDICT_V0"))
+        for changes in cases:
+            with self.subTest(changes=changes), self.assertRaises(runner.ValidationError):
+                runner.normalize_provider_verdict(self.verdict(**changes))
+        with self.assertRaises(runner.ValidationError):
+            runner.normalize_provider_verdict("accept")  # natural language is not a verdict
+
+    def test_a_malformed_verdict_makes_the_whole_answer_invalid(self):
+        payload = json.dumps({"status": "ok", "summary": "s", "evidence": ["e"],
+                              "nonce": runner.attempt_id_for(JOB_ID, 1),
+                              "verdict": self.verdict(verdict="LGTM")})
+        with self.assertRaises(runner.ValidationError):
+            runner.normalize_provider_output(payload, runner.attempt_id_for(JOB_ID, 1))
+
+    def test_verdict_travels_into_the_terminal_record(self):
+        answer = json.dumps({"status": "ok", "summary": "s", "evidence": ["e"],
+                             "nonce": runner.attempt_id_for(JOB_ID, 1), "verdict": self.verdict()})
+        client, posts = self.queue(self.comment())
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "prepare_worktree", return_value=self.worktrees), \
+             mock.patch.object(runner, "execute",
+                               return_value=runner.Result(0, answer, False, False, 1.0)):
+            self.assertEqual(runner.run_once(self.config), f"COMPLETED {JOB_ID}")
+        terminal = [p for p in posts if "COMPLETED" in p][-1]
+        self.assertIn("COMMANDER_VERDICT_V1 verdict=revise", terminal)
+
+
+class QueueHealthTests(HardeningTestCase):
+    def test_fresh_install_is_not_penalized_for_never_having_polled(self):
+        with mock.patch.object(runner.GitHubClient, "comments", return_value=[]):
+            report = runner.queue_health(self.config)
+        self.assertIsNone(report["poll_fresh"])
+        self.assertTrue(report["queue_consumable"])
+
+    def test_a_successful_tick_records_the_poll_and_a_stale_one_is_flagged(self):
+        client, _ = self.queue("noise")
+        with mock.patch.object(runner, "GitHubClient", client):
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        report = runner.queue_health(self.config)
+        self.assertTrue(report["poll_fresh"])
+        state = runner.State(self.state)
+        try:
+            stale = int(time.time()) - self.config.poll_seconds * 50
+            state.db.execute("UPDATE metadata SET value=? WHERE key='last_successful_poll'", (str(stale),))
+        finally:
+            state.close()
+        self.assertFalse(runner.queue_health(self.config)["poll_fresh"])
+
+    def test_an_unreadable_queue_is_unhealthy_even_with_a_live_process(self):
+        runner.State(self.state).close()
+        with mock.patch.object(runner.GitHubClient, "comments",
+                               side_effect=runner.RunnerError("GitHub API request failed")):
+            self.assertFalse(runner.queue_health(self.config)["queue_consumable"])
+
+    def test_active_job_and_outbox_depths_are_reported(self):
+        state = runner.State(self.state)
+        try:
+            state.claim("1", JOB_ID, "h" * 64)
+            state.set_status("1", "running")
+            state.record_attempt(JOB_ID, 1, "kiro", "gpt-5.6-luna", None, None)
+        finally:
+            state.close()
+        with mock.patch.object(runner.GitHubClient, "comments", return_value=[]):
+            report = runner.queue_health(self.config)
+        self.assertEqual(report["active_job"]["job_id"], JOB_ID)
+        self.assertEqual(report["active_attempt"]["ordinal"], 1)
+        self.assertEqual(report["pending_terminals"], 0)
 
 
 # --- D3 / D4: long output survives, and recovery costs no quota --------------

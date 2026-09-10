@@ -1305,7 +1305,11 @@ class ProviderAndQuotaTests(RunnerTestCase):
                                             enabled_quality_gates=frozenset({"none"}))
         with mock.patch.object(runner, "provider_health", return_value=providers), \
              mock.patch.object(runner, "operational_health", return_value=operational), \
-             mock.patch.object(runner, "quality_gate_health", return_value={"none": True}):
+             mock.patch.object(runner, "quality_gate_health", return_value={"none": True}), \
+             mock.patch.object(runner.GitHubClient, "comments", return_value=[]):
+            # doctor now reads page one of the queue; this fixture's gh is
+            # sys.executable, so the read is stubbed rather than letting an
+            # environment limitation fail the check under test.
             self.assertTrue(runner.doctor(config)["ok"])
 
     def test_comments_uses_one_bounded_incremental_page(self):

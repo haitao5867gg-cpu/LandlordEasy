@@ -285,6 +285,11 @@ class Config:
     # unbounded spending.
     paid_overflow_max_attempts: int = 1
     paid_overflow_max_cost_usd: float = 5.0
+    # Local artifacts hold complete provider reports, which quote private
+    # source.  They are pruned by age like raw output; the host itself is
+    # inside the trust boundary (see SECURITY_MODEL.md: FileVault, and keep
+    # state_dir out of backup sync).
+    artifact_retention_days: int = 30
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -303,13 +308,14 @@ class Config:
             "enabled_operations", "operation_definitions", "wake_pull_request",
             "max_attempts", "paid_overflow_providers", "paid_overflow_authorized",
             "paid_overflow_max_attempts", "paid_overflow_max_cost_usd",
-            "wake_destination_kind",
+            "wake_destination_kind", "artifact_retention_days",
         }
         required = expected - {
             "delivery_path_allowlists", "enabled_operations", "operation_definitions",
             "wake_pull_request", "max_attempts", "paid_overflow_providers",
             "paid_overflow_authorized", "paid_overflow_max_attempts",
             "paid_overflow_max_cost_usd", "wake_destination_kind",
+            "artifact_retention_days",
         }
         unknown = set(raw) - expected
         missing = required - set(raw)
@@ -404,6 +410,8 @@ class Config:
             paid_overflow_max_attempts=paid_overflow_max_attempts,
             paid_overflow_max_cost_usd=float(paid_cost),
             wake_destination_kind=wake_destination_kind,
+            artifact_retention_days=bounded_int(
+                raw.get("artifact_retention_days", 30), 1, 365, "artifact_retention_days"),
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -909,8 +917,30 @@ def raw_output_paths(state_dir: Path, job_id: str) -> tuple[Path, ...]:
             found.append((ordinal, candidate))
     return tuple(path for _, path in sorted(found))
 
+def prune_artifacts(state_dir: Path, retention_days: int) -> int:
+    """Age out whole artifact directories; never touches anything else."""
+    root = state_dir / "artifacts"
+    if not root.is_dir() or root.is_symlink():
+        return 0
+    cutoff = time.time() - retention_days * 24 * 3600
+    removed = 0
+    for entry in root.iterdir():
+        if entry.is_symlink() or not entry.is_dir() or not valid_uuid(entry.name):
+            continue
+        try:
+            newest = max((child.stat().st_mtime for child in entry.iterdir()
+                          if child.is_file() and not child.is_symlink()),
+                         default=entry.stat().st_mtime)
+        except OSError:
+            continue
+        if newest < cutoff:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 def store_artifact(state_dir: Path, job_id: str, ordinal: int,
-                   output: "NormalizedOutput") -> tuple[Path, str]:
+                   output: "NormalizedOutput", retention_days: int = 30) -> tuple[Path, str]:
     """Write the full normalized report locally and return its path and digest.
 
     GitHub comments are size-limited and are the audit index, not the report
@@ -925,6 +955,7 @@ def store_artifact(state_dir: Path, job_id: str, ordinal: int,
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     for parent in (state_dir / "artifacts", directory):
         os.chmod(parent, 0o700)
+    prune_artifacts(state_dir, retention_days)
     body = "\n".join([
         f"# Commander job {job_id} attempt {ordinal}",
         f"attempt_id: {attempt_id_for(job_id, ordinal)}",
@@ -1239,6 +1270,21 @@ class State:
         row = self.db.execute(
             "SELECT value FROM metadata WHERE key='high_water_updated_at'").fetchone()
         return row[0] if row and ISO_TIMESTAMP_RE.fullmatch(str(row[0])) else None
+    def note_successful_poll(self) -> None:
+        self.db.execute("INSERT INTO metadata(key,value) VALUES ('last_successful_poll',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(int(time.time())),))
+    def last_successful_poll(self) -> int | None:
+        row = self.db.execute("SELECT value FROM metadata WHERE key='last_successful_poll'").fetchone()
+        try: return int(row[0]) if row else None
+        except (TypeError, ValueError): return None
+    def active_claims(self) -> tuple[tuple[str, str, str], ...]:
+        rows = self.db.execute(
+            "SELECT comment_id,job_id,status FROM claims WHERE status IN ('claimed','running') "
+            "ORDER BY claimed_at").fetchall()
+        return tuple((str(a), str(b), str(c)) for a, b, c in rows)
+    def latest_attempt(self, job_id: str) -> tuple[Any, ...] | None:
+        rows = self.attempts_for(job_id)
+        return rows[-1] if rows else None
     def claims_count(self) -> int:
         return int(self.db.execute("SELECT count(*) FROM claims").fetchone()[0])
     def seed_terminal_claim(self, comment_id: str, job_id: str, content_hash_value: str,
@@ -1512,6 +1558,58 @@ def adapter_argv(job: Job, executable_paths: Mapping[str, str], ordinal: int = 1
                 "--output-format", "json"]
     raise ValidationError("unknown worker")
 
+VERDICT_SCHEMA = "COMMANDER_VERDICT_V1"
+VERDICTS = frozenset({"accept", "revise", "reject", "blocked"})
+
+
+@dataclasses.dataclass(frozen=True)
+class ProviderVerdict:
+    """Structured review outcome.  DEFINED HERE, CONSUMED NOWHERE YET.
+
+    This is the contract a future plan executor (PR B) will read to choose
+    the next step.  The runner never derives an action from natural language;
+    a verdict is either this shape or it does not exist.  In this release it is
+    only parsed and recorded in the terminal record.
+    """
+    verdict: str
+    p0: int
+    p1: int
+    code_changed: bool
+    exact_sha_verified: str | None
+    recommended_transition: str
+
+    def as_record(self) -> str:
+        return (f"verdict={self.verdict}; p0={self.p0}; p1={self.p1}; "
+                f"code_changed={str(self.code_changed).lower()}; "
+                f"exact_sha_verified={self.exact_sha_verified or 'none'}; "
+                f"recommended_transition={self.recommended_transition}")
+
+
+def normalize_provider_verdict(value: Any) -> ProviderVerdict:
+    if not isinstance(value, dict):
+        raise ValidationError("verdict must be an object")
+    required = {"verdict", "p0", "p1", "code_changed", "exact_sha_verified", "recommended_transition"}
+    if set(value) - (required | {"schema"}) or not required.issubset(value):
+        raise ValidationError("verdict has unknown or missing fields")
+    if value.get("schema", VERDICT_SCHEMA) != VERDICT_SCHEMA:
+        raise ValidationError("unsupported verdict schema")
+    if value["verdict"] not in VERDICTS:
+        raise ValidationError("verdict is not one of accept/revise/reject/blocked")
+    for key in ("p0", "p1"):
+        if isinstance(value[key], bool) or not isinstance(value[key], int) \
+                or value[key] < 0 or value[key] > 10_000:
+            raise ValidationError(f"{key} must be a non-negative integer")
+    if not isinstance(value["code_changed"], bool):
+        raise ValidationError("code_changed must be a boolean")
+    sha = value["exact_sha_verified"]
+    if sha is not None and (not isinstance(sha, str) or not SHA_RE.fullmatch(sha)):
+        raise ValidationError("exact_sha_verified must be an exact lowercase SHA or null")
+    transition = validate_job_text(value["recommended_transition"], "recommended_transition",
+                                   max_chars=128, allow_newlines=False)
+    return ProviderVerdict(value["verdict"], value["p0"], value["p1"], value["code_changed"],
+                           sha, transition)
+
+
 @dataclasses.dataclass(frozen=True)
 class NormalizedOutput:
     status: str
@@ -1519,6 +1617,7 @@ class NormalizedOutput:
     evidence: tuple[str, ...]
     usage: str | None = None
     full_summary: str | None = None    # untruncated text when `summary` was cut
+    verdict: ProviderVerdict | None = None
 
     @property
     def report_text(self) -> str:
@@ -1586,8 +1685,16 @@ def normalize_provider_output(text: str, nonce: str | None = None) -> Normalized
                 return dataclasses.replace(normalized, usage=usage)
         if not isinstance(value, dict) or not {"status", "summary", "evidence"}.issubset(value):
             continue
-        if set(value) - {"status", "summary", "evidence", "usage", "nonce"}:
+        if set(value) - {"status", "summary", "evidence", "usage", "nonce", "verdict"}:
             continue
+        verdict = None
+        if "verdict" in value:
+            # Optional.  Present means it must be valid; the runner records it
+            # and does nothing else with it in this release.
+            try:
+                verdict = normalize_provider_verdict(value["verdict"])
+            except ValidationError:
+                continue
         if nonce is not None and value.get("nonce") != nonce:
             # Contract-shaped but not addressed to this attempt: quoted from a
             # file, a stale run, or an injection.  Keep looking.
@@ -1607,7 +1714,7 @@ def normalize_provider_output(text: str, nonce: str | None = None) -> Normalized
         full = summary.strip()
         excerpt, kept_full = bound_summary(full)
         return NormalizedOutput(status, excerpt, tuple(item.strip() for item in evidence),
-                                usage, kept_full)
+                                usage, kept_full, verdict)
     raise ValidationError("provider output failed structured validation")
 
 
@@ -2978,6 +3085,56 @@ def stable_runtime_is_isolated(config: Config) -> bool:
             return False
     return True
 
+def queue_health(config: Config) -> dict[str, Any]:
+    """Can this runner actually consume its queue right now?
+
+    "Process count = 1" says nothing about that.  A live runner whose last
+    successful poll is stale, or that cannot read page one of the queue, is
+    unhealthy however many processes exist.
+    """
+    report: dict[str, Any] = {
+        "last_successful_poll": None, "poll_age_seconds": None, "poll_fresh": None,
+        "comment_high_water": None, "queue_consumable": None,
+        "active_job": None, "active_attempt": None,
+        "pending_terminals": None, "pending_wakes": None, "pending_rejections": None,
+    }
+    # Reachability of the queue is independent of local state: a host that
+    # has never polled can still be checked for whether it COULD.
+    try:
+        GitHubClient(config).comments(1)
+        report["queue_consumable"] = True
+    except (RunnerError, ValidationError, OSError):
+        report["queue_consumable"] = False
+    if not config.state_dir.is_dir():
+        return report
+    try:
+        state = State(config.state_dir)
+    except (sqlite3.Error, OSError):
+        return report
+    try:
+        last = state.last_successful_poll()
+        report["last_successful_poll"] = last
+        if last is not None:
+            age = max(0, int(time.time()) - last)
+            report["poll_age_seconds"] = age
+            report["poll_fresh"] = age <= config.poll_seconds * 5
+        report["comment_high_water"] = state.comment_high_water()
+        active = state.active_claims()
+        if active:
+            comment_id, job_id, status = active[0]
+            report["active_job"] = {"comment_id": comment_id, "job_id": job_id, "status": status}
+            latest = state.latest_attempt(job_id)
+            if latest:
+                report["active_attempt"] = {"attempt_id": latest[0], "ordinal": latest[1],
+                                            "worker": latest[2], "stop_class": latest[5]}
+        report["pending_terminals"] = len(state.pending_terminals(100))
+        report["pending_wakes"] = len(state.pending_wakes(100))
+        report["pending_rejections"] = len(state.pending_rejections(100))
+    finally:
+        state.close()
+    return report
+
+
 def doctor(config: Config) -> dict[str, Any]:
     providers = provider_health(config)
     operational = operational_health(config)
@@ -2999,11 +3156,12 @@ def doctor(config: Config) -> dict[str, Any]:
         "runtime_manifest": runtime_manifest_health(config),
         "wake_destination": wake_destination_health(config),
         "launchagent": launchagent_health(config),
+        "queue": queue_health(config),
     }
     booleans_ok = all(value for key, value in checks.items()
                       if key not in {"providers", "operational_executables", "quality_gates",
                                      "operations", "outbound_policy", "runtime_manifest",
-                                     "wake_destination", "launchagent"})
+                                     "wake_destination", "launchagent", "queue"})
     # Provenance is only required once the runtime is actually installed; a
     # fresh host with no runtime_dir yet is not unhealthy.
     manifest_ok = (checks["runtime_manifest"]["ok"]
@@ -3015,8 +3173,14 @@ def doctor(config: Config) -> dict[str, Any]:
                        for item in operations.values())
     wake_ok = checks["wake_destination"]["usable"] is not False
     launchagent_ok = checks["launchagent"]["consistent"] is not False
+    queue = checks["queue"]
+    # A runner that has polled but not recently, or that cannot read its
+    # queue, is unhealthy.  One that has never polled (fresh install) is not
+    # penalized for it.
+    queue_ok = queue["poll_fresh"] is not False and queue["queue_consumable"] is not False
     checks["ok"] = (booleans_ok and provider_ok and operational_ok and operation_ok
-                    and manifest_ok and wake_ok and launchagent_ok and all(gates.values()))
+                    and manifest_ok and wake_ok and launchagent_ok and queue_ok
+                    and all(gates.values()))
     return checks
 
 def run_once(config: Config, dry_run: bool = False) -> str:
@@ -3227,12 +3391,15 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                               # record stays complete without being unbounded.
                               with contextlib.suppress(OSError, ValidationError, UnsafeOutputError):
                                   artifact, digest = store_artifact(
-                                      config.state_dir, job.job_id, ordinal, attempt.output)
+                                      config.state_dir, job.job_id, ordinal, attempt.output,
+                                    config.artifact_retention_days)
                                   artifact_note = (f"\nartifact={artifact.name}"
                                                    f"\nartifact_sha256={digest}"
                                                    f"\nsummary_chars={attempt.output.summary_chars}"
                                                    f"\nsummary_truncated={str(attempt.output.truncated).lower()}")
                               evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
+                              if attempt.output.verdict is not None:
+                                  evidence += "\n" + VERDICT_SCHEMA + " " + attempt.output.verdict.as_record()
                           else:
                               evidence = f"provider_error={attempt.error_category}"
                               if attempt.error_category in {"OUTPUT_VALIDATION", "OUTPUT_LIMIT"}:
@@ -3259,6 +3426,7 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                           else f"WAKE_PENDING {job.job_id}")
               if len(comments) < QUEUE_PAGE_SIZE:
                   break
+            state.note_successful_poll()
             return "NO_JOB"
         finally: state.close()
 
