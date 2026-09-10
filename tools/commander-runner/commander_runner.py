@@ -2643,6 +2643,8 @@ OPERATION_BLOCK_STOP_CLASS = {
     "local_runtime_unavailable": "ENVIRONMENT_FAILURE",
     "mysql_startup_failed": "ENVIRONMENT_FAILURE",
     "pnpm_executable_invalid": "ENVIRONMENT_FAILURE",
+    "dependency_install_failed": "ENVIRONMENT_FAILURE",
+    "prisma_generate_failed": "ENVIRONMENT_FAILURE",
     # a boundary refused to be crossed: never retried
     "docker_socket_invalid": "SAFETY_STOP",
     "isolation_boundary_rejected": "SAFETY_STOP",
