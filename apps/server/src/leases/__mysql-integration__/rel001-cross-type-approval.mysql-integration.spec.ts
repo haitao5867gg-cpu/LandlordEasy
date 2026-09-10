@@ -69,6 +69,17 @@ describeMysqlIntegration('REL-001 real MySQL: concurrent cross-type approval', (
       oldRent: 1500,
     });
 
+    // The transfer fixture does not record the deposit receipt that a real
+    // lease would have, and the settlement assertions below depend on it.
+    await fixtureClient.depositRecord.create({
+      data: {
+        leaseId: fixture.oldLeaseId,
+        type: 'RECEIVE',
+        amount: 3000,
+        operatorId: fixture.landlordId,
+      },
+    });
+
     // The fixture supplies the PENDING transfer request; add a PENDING
     // termination request on the same lease so both paths are live at once.
     const termination = await fixtureClient.leaseTerminationRequest.create({
