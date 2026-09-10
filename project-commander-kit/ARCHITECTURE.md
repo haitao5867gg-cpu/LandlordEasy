@@ -42,6 +42,8 @@ the two logins are equal.
                                     ▼
   COMMANDER ──── COMMANDER_JOB_V1 ──────────────┐
   (GitHub acct A) COMMANDER_OPERATION_V1        │
+                  COMMANDER_PLAN_V1 (PR B)      │
+                  COMMANDER_ACK_V1              │
                                                 ▼
                                     ┌──────────────────────────┐
                                     │  Queue Issue (fixed #)   │  ← the only
@@ -60,10 +62,14 @@ the two logins are equal.
    │  6  PERSIST RAW BYTES ────────────────────────► raw-output/*.log   │
    │  7  parse → artifact (full report, local) + bounded Issue excerpt  │
    │  8  queue terminal in outbox → post → optional wake                │
+   │  9  (PR B) plan edge lookup → next derived step, or plan record    │
+   │ 10  (PR B) CURRENT_USER_STATUS rewrite; USER_ACTION_REQUIRED;      │
+   │     owner notification (iMessage) from the notify outbox           │
    └────────────────────────────────────────────────────────────────────┘
                      │ terminal comment (authoritative)
                      ▼
-        Queue Issue ──────► COMMANDER reads state back from GitHub
+        Evidence Issue (or the Queue Issue when no split is configured)
+                   ──────► COMMANDER reads state back from GitHub
                      │
                      └─ optional wake comment on a PR ─► nudges Commander
                         (a hint only; carries NO authority)
@@ -128,13 +134,22 @@ Runner-internal and needs no new Issue or PR to exist first.
 | | Scope | Depends on |
 |---|---|---|
 | **PR A** (this branch) | Runner correctness and simplification: claim-wedge fix, policy-driven failover, LaunchAgent consistency, high-water cursor with lost-state guard, response nonce, tail-scoped availability classification, artifact retention, queue-consumption health, `COMMANDER_VERDICT_V1` *defined but not consumed*, transactional install, single-source kit | nothing |
-| **PR B** | `COMMANDER_PLAN_V1` deterministic follow-up chains (no LLM); Queue Issue / Evidence Issue split; `CURRENT_USER_STATUS` + unresolved `USER_ACTION_REQUIRED`; Runner-side outbound notification; wake writes stop **only after** a real plan canary passes | Commander creates the Evidence Issue (and a Wake Bus PR if wake is kept) |
+| **PR B** (this branch) | `COMMANDER_PLAN_V1` deterministic follow-up chains (no LLM; forward-only edge tables on `ok` / stop class / `verdict.*`); Queue Issue / Evidence Issue split (`evidence_issue`); `CURRENT_USER_STATUS` pinned comment + `USER_ACTION_REQUIRED_V1` + `COMMANDER_ACK_V1`; Runner-side owner notification through Messages.app (`notify_outbox`, default off); wake code and tables untouched — wake writes stop **only after** a real plan canary passes, by config | the Evidence Issue exists (LandlordEasy: #29) |
 | **PR C** | operation `version` + per-error-code retry policy; CI-side reduced-guard MySQL variant; kit finalization; migration guide executed | PR B |
 
 Migration order is fixed: **A → B → C**. The live Runner is upgraded only
 after PR A (see `MIGRATION_FROM_LANDLORDEASY.md`), and `relink-launchagent`
 must precede the first transactional upgrade on a host that still runs the
 flat layout.
+
+Roles as decided by the owner (2026-09-10): the front-door Commander
+(ChatGPT, GitHub connector) is the only creator of intent; Claude is the
+heterogeneous independent reviewer whose `COMMANDER_VERDICT_V1` is a
+required input, never final authority; the Runner is mechanical
+follow-through. Two notification layers: the Runner's own push (seconds,
+minimal payload) and, optionally, a Commander-side scheduled read of
+`CURRENT_USER_STATUS`. Nothing is designed as if a chat assistant could
+inject into an existing conversation.
 
 Standing architecture decisions recorded by the Commander (2026-09-10): only
 the front-door Commander creates intent or authorization; background

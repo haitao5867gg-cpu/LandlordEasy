@@ -88,6 +88,40 @@ Defined in `ERROR_CATEGORY_STOP_CLASS`; asserted exhaustively by
 5. **Protocol failures do not consume a second attempt.** This is deliberate and
    is the highest-value rule in the file.
 
+## Plans (PR B)
+
+A `COMMANDER_PLAN_V1` adds no retry of its own. Each step is a full job or
+operation with the same attempt budget and policies as a posted one; what
+the plan adds is a **forward-only edge table** keyed on the outcome token the
+step produced (`ok`, a stop class, or `verdict.<x>`), with `*` as the
+declared default.
+
+- `FAIL_CLOSED` (`SAFETY_STOP`, `HUMAN_APPROVAL_REQUIRED`) ignores the table.
+  The plan ends `action_required=true` and a `USER_ACTION_REQUIRED_V1` is
+  opened. The Runner will not continue on its own.
+- Everything else follows the table. Pointing `CODE_FAILURE` at a review step
+  is a legitimate design ("have the reviewer read the failure"); pointing it
+  at `stop` is the conservative default.
+- A crash mid-step closes **that step** as `FAILED` /
+  `UNCLASSIFIED_FAILURE` (the same honest recovery as a posted job) and the
+  table decides what follows. Completed steps are never re-run; the plan
+  itself is never treated as ambiguous.
+- One owner notification per plan, at the end. Steps are not notified
+  individually.
+
+## Blocked operations
+
+An operation that runs to completion but answers `status: blocked` names its
+reason in an evidence line `category=<token>`. `OPERATION_BLOCK_STOP_CLASS`
+maps those tokens onto the taxonomy (`container_*`, `docker_*`,
+`mysql_startup_failed` → `ENVIRONMENT_FAILURE`; `isolation_boundary_rejected`,
+`mutation_command_rejected`, `docker_socket_invalid` → `SAFETY_STOP`;
+`database_*`, `schema_push_failed`, `unexpected_table_name` → `CODE_FAILURE`;
+malformed inputs → `PROTOCOL_FAILURE`; anything unknown →
+`UNCLASSIFIED_FAILURE`). The first live plan canary (2026-09-10) published such
+a terminal as `stop_class=NONE`, which left the plan nothing to route on; that
+is the defect this rule closes.
+
 ## Why PROTOCOL_FAILURE is special
 
 The incident that motivated this kit:

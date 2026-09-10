@@ -104,7 +104,7 @@ which re-parses locally, writes the artifact for the recovered attempt, and
 reports `provider_calls: 0`. Records that predate nonces need the explicit
 `--allow-legacy-without-nonce` switch and report `nonce_verified: false`.
 
-## `COMMANDER_VERDICT_V1` — structured review outcome (defined, not yet consumed)
+## `COMMANDER_VERDICT_V1` — structured review outcome (consumed by plans)
 
 ```json
 {"verdict": "accept|revise|reject|blocked", "p0": 0, "p1": 2,
@@ -113,9 +113,135 @@ reports `provider_calls: 0`. Records that predate nonces need the explicit
 ```
 
 Parsed when present, refused when malformed, copied into the terminal record.
-**Nothing acts on it in this release.** PR B's plan executor will read this
-shape to choose the next step; the Runner never derives an action from natural
-language.
+A plan step that completes with a verdict produces the outcome token
+`verdict.<accept|revise|reject|blocked>`, which the plan's edge table may key
+on. The Runner never derives an action from natural language: a verdict is
+either this shape or it does not exist.
+
+## `COMMANDER_PLAN_V1` — deterministic follow-up chain (PR B)
+
+````
+COMMANDER_PLAN_V1
+```json
+{
+  "schema": "COMMANDER_PLAN_V1",
+  "plan_id": "<uuid>",
+  "repository": "owner/repo", "queue_issue": 17, "runner_id": "<runner_id>",
+  "authorization_ref": "<owner approval record>",
+  "max_steps": 4,
+  "steps": [
+    {"id": "s1", "kind": "operation", "operation_id": "rel001_mysql_suite",
+     "target": {"branch": "fix/rel001-cross-type-approval"},
+     "timeout_seconds": 900, "output_limit_bytes": 65536,
+     "expected_evidence": "suite summary", "human_approval_ref": "<ref>",
+     "on": {"ok": "s2", "*": "stop"}},
+    {"id": "s2", "kind": "job", "worker": "claude", "model": "claude-sonnet-5",
+     "profile": "repo_read", "quality_gate": "none",
+     "target": {"from_step": "s1"},
+     "prompt": "Review the diff at {resolved_sha} … return COMMANDER_VERDICT_V1",
+     "timeout_seconds": 1200, "output_limit_bytes": 262144,
+     "expected_evidence": "verdict",
+     "on": {"verdict.accept": "stop", "*": "stop"}}
+  ]
+}
+```
+````
+
+Rules, all enforced at parse time (a violation is a `REJECTED` record):
+
+- `max_steps` ≤ 10; step ids are unique `[a-z][a-z0-9_]{0,15}`.
+- Each step is a complete `COMMANDER_JOB_V1` / `COMMANDER_OPERATION_V1` minus
+  the identity fields. The Runner derives `job_id = uuid5(plan_id, step_id)`,
+  `worktree_id`, `assigned = plan:<plan_id>:<step_id>`, and validates the
+  result with exactly the posted-job validation. Every boundary (exact SHA,
+  profile, gate, nonce, allowlists) is therefore inherited, not re-implemented.
+- `target` is exactly one of `{"sha": <40 hex>}`, `{"branch": <name>}`
+  (resolved to the origin head at execution time and pinned), or
+  `{"from_step": <earlier id>}` (the SHA that step actually ran at). The
+  literal `{resolved_sha}` in a job prompt is replaced by the pinned SHA.
+- `on` keys are limited to `ok`, the eight stop classes, `verdict.<x>` and
+  `*`; `*` is mandatory. Values are a **later** step id or `stop`. Edges
+  cannot point backwards, so a plan cannot loop and runs each step at most once.
+- `SAFETY_STOP` / `HUMAN_APPROVAL_REQUIRED` (policy `FAIL_CLOSED`) ignore the
+  edge table: the plan ends with `action_required=true` and a
+  `USER_ACTION_REQUIRED_V1` record.
+- A plan is not "ambiguous" after a crash: it resumes from its current step.
+  Only the step that was mid-flight is closed as `FAILED`
+  (`UNCLASSIFIED_FAILURE`), and the edge table decides what follows.
+
+Each step posts its own terminal record; the plan posts one
+`COMMANDER_PLAN_RUNNER_V1 <STATE>` record (`job=<plan_id>`) that embeds a
+`USER_UPDATE_V1` block and is the single owner notification for the run:
+
+```
+COMMANDER_PLAN_RUNNER_V1 COMPLETED|FAILED
+job=<plan_id>
+plan=<plan_id>
+runner=<runner_id>
+authorization_ref=<ref>
+steps=s1:ok,s2:verdict.accept
+stop_class=<CLASS|NONE>
+policy=<POLICY|NONE>
+action_required=true|false
+reason=<one line>
+USER_UPDATE_V1
+plan=<plan_id>
+result=completed|stopped|action_required
+steps=…
+```
+
+## Owner-facing records on the Evidence Issue (PR B)
+
+With `evidence_issue` configured, **every** Executor record (`CLAIMED`,
+terminals, `REJECTED`, plan records, and the three below) is posted there;
+the queue Issue carries only Commander intent. Without it, everything stays
+on the queue Issue as before.
+
+`CURRENT_USER_STATUS` — one pinned comment, rewritten in place (the only
+`PATCH` the Runner performs, and only on this comment id) after every terminal
+and at least every `heartbeat_interval_seconds`. A reader needs this one
+comment to know whether the runner is alive and what is open:
+
+```
+CURRENT_USER_STATUS
+updated_at=<UTC>
+runner=<runner_id>
+last_poll=<UTC|never>
+heartbeat_interval_seconds=600
+open_action_required=[<decision uuids>]
+pending=terminals:0 wakes:0 rejections:0 notifications:0
+recent=
+- <UTC> COMPLETED <job uuid> <link>
+```
+
+`updated_at` older than about twice the heartbeat means the runner is down;
+the Runner cannot say "stale" about itself.
+
+`USER_ACTION_REQUIRED_V1` — appended once per `FAIL_CLOSED` terminal, listed
+in `open_action_required` until acknowledged. Repetition is allowed;
+omission is not.
+
+```
+USER_ACTION_REQUIRED_V1
+decision=<uuid5(job_id, "user-action")>
+job=<job uuid>            (plan=<plan uuid> when it came from a plan step)
+stop_class=<SAFETY_STOP|HUMAN_APPROVAL_REQUIRED>
+policy=FAIL_CLOSED
+runner=<runner_id>
+record=<link to the terminal>
+required=owner decision; the runner will not retry or continue on its own
+resolve_with=COMMANDER_ACK_V1
+decision=<uuid>
+```
+
+`COMMANDER_ACK_V1` — posted by the Commander **on the queue Issue** to close a
+decision. Fixed shape, nothing to interpret; it resolves the decision and does
+nothing else (any follow-up is a new job or plan):
+
+```
+COMMANDER_ACK_V1
+decision=<uuid>
+```
 
 ## Operator commands
 
@@ -124,7 +250,8 @@ language.
 | `renormalize --job <uuid> [--allow-legacy-without-nonce]` | re-parse persisted raw output; zero provider calls |
 | `rebuild-claims --confirm` | after local state loss, re-seed claims from the queue's Executor terminal records so nothing replays |
 | `relink-launchagent --confirm` | point launchd at `runtime_dir/current/…` after the first transactional install (backs up the plist) |
-| `doctor` | last poll and its freshness, comment high-water mark, queue readability, active job/attempt, outbox depths, LaunchAgent consistency, runtime provenance, token scopes |
+| `doctor` | last poll and its freshness, comment high-water mark, queue readability, active job/attempt, outbox depths (terminals, wakes, rejections, notifications), open user actions, status comment, evidence-issue reachability, notification channel, LaunchAgent consistency, runtime provenance, token scopes |
+| `notify-test --confirm` | queue one test notification and drain it through the configured channel (without `--confirm`: report the channel's health) |
 
 ## Terminal records (posted by the Executor)
 
@@ -179,3 +306,10 @@ is only a nudge to go look.
    history refuses to serve until `rebuild-claims` runs.
 7. Paid attempts are charged on dispatch, per reset window, whether or not
    they succeed or report a price.
+8. A plan transition is a table lookup on a token the Runner itself produced.
+   No natural language, no condition expression, no LLM is ever consulted.
+9. `FAIL_CLOSED` always ends a plan with an open `USER_ACTION_REQUIRED_V1`,
+   whatever the edge table says.
+10. The owner notification never carries evidence, summaries or secrets:
+    state, short id, stop class, link. The recipient lives only in the
+    0600 config and is never read from a comment.

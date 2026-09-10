@@ -55,5 +55,9 @@
   "paid_overflow_max_cost_usd": 5.0,
   "paid_overflow_max_attempts_per_window": 10,
   "artifact_retention_days": 30,
-  "wake_destination_kind": "legacy"
+  "wake_destination_kind": "legacy",
+  "evidence_issue": null,
+  "notify_channel": "none",
+  "notify_recipient": null,
+  "notify_enabled": false
 }

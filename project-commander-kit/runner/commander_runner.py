@@ -176,8 +176,56 @@ OPERATION_COMMENT_RE = re.compile(
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 TERMINAL_RECORD_RE = re.compile(
-    r"\ACOMMANDER_(?:OPERATION_)?RUNNER_V1 (COMPLETED|FAILED|TIMED_OUT|REJECTED)\n"
+    r"\ACOMMANDER_(?:OPERATION_|PLAN_)?RUNNER_V1 (COMPLETED|FAILED|TIMED_OUT|REJECTED)\n"
     r"job=([0-9a-f-]{36})\n")
+# --- PR B: deterministic plans -------------------------------------------
+PLAN_SCHEMA = "COMMANDER_PLAN_V1"
+PLAN_RUNNER_SCHEMA = "COMMANDER_PLAN_RUNNER_V1"
+PLAN_COMMENT_RE = re.compile(
+    r"\A\s*COMMANDER_PLAN_V1\s*\n```json\s*\n(\{.*\})\s*\n```\s*\Z", re.DOTALL)
+PLAN_STEP_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
+PLAN_MAX_STEPS = 10
+PLAN_VERDICTS = ("accept", "revise", "reject", "blocked")
+# The complete vocabulary a plan edge may key on.  Nothing here is free text.
+PLAN_EDGE_KEYS = frozenset({"ok", "*"} | set(STOP_CLASS_POLICY)
+                           | {f"verdict.{v}" for v in PLAN_VERDICTS})
+# Claim keys: a queue comment id, or a plan-derived step key.
+CLAIM_ID_RE = re.compile(r"^(?:[1-9][0-9]*|plan:[0-9a-f-]{36}:[a-z][a-z0-9_]{0,15})$")
+RESOLVED_SHA_PLACEHOLDER = "{resolved_sha}"
+# --- PR B: user-facing records (Evidence Issue) --------------------------
+USER_STATUS_SCHEMA = "CURRENT_USER_STATUS"
+USER_ACTION_SCHEMA = "USER_ACTION_REQUIRED_V1"
+USER_UPDATE_SCHEMA = "USER_UPDATE_V1"
+ACK_SCHEMA = "COMMANDER_ACK_V1"
+# The owner (through the front door) closes an open USER_ACTION_REQUIRED by
+# posting exactly this on the QUEUE issue.  Fixed shape, no free text that
+# the runner would have to interpret.
+ACK_RE = re.compile(r"\A\s*COMMANDER_ACK_V1\s*\ndecision=([0-9a-f-]{36})\s*\Z")
+# How often CURRENT_USER_STATUS is rewritten even when nothing terminal
+# happened, so a reader can tell "alive and idle" from "dead".
+STATUS_HEARTBEAT_SECONDS = 600
+STATUS_RECENT_LIMIT = 5
+NOTIFY_CHANNELS = frozenset({"none", "imessage"})
+NOTIFY_MAX_ATTEMPTS = 5
+NOTIFY_MAX_MESSAGE_CHARS = 400
+# A phone number (with optional +country) or an Apple ID e-mail.  Nothing
+# else is a valid iMessage handle, and nothing else is accepted.
+NOTIFY_RECIPIENT_RE = re.compile(r"^(?:\+?[0-9]{6,20}|[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,128}\.[A-Za-z]{2,24})$")
+# The ONLY AppleScript this program ever runs.  Recipient and text arrive
+# as argv, never by string interpolation into the script.
+IMESSAGE_SCRIPT = (
+    "on run argv",
+    "set theRecipient to item 1 of argv",
+    "set theMessage to item 2 of argv",
+    "tell application \"Messages\"",
+    "set theService to 1st account whose service type = iMessage",
+    "set theBuddy to participant theRecipient of theService",
+    "send theMessage to theBuddy",
+    "end tell",
+    "end run",
+)
+REQUIRED_OPERATIONAL_EXECUTABLES = frozenset({"gh", "git", "python"})
+OPTIONAL_OPERATIONAL_EXECUTABLES = frozenset({"osascript"})
 MAX_PAGES_PER_TICK = 50
 WORKTREE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$")
@@ -295,6 +343,20 @@ class Config:
     # inside the trust boundary (see SECURITY_MODEL.md: FileVault, and keep
     # state_dir out of backup sync).
     artifact_retention_days: int = 30
+    # PR B.  Where executor records (CLAIMED, terminals, REJECTED, USER_*)
+    # are written.  None keeps the historical single-issue layout; set, the
+    # queue issue carries only Commander intent and stays small to scan.
+    evidence_issue: int | None = None
+    # Owner-side push notification.  Default off; the recipient lives only
+    # in the 0600 local config and is never read from a comment.
+    notify_channel: str = "none"
+    notify_recipient: str | None = None
+    notify_enabled: bool = False
+
+    @property
+    def terminal_issue(self) -> int:
+        """The issue executor records go to: the evidence issue, else the queue."""
+        return self.evidence_issue if self.evidence_issue is not None else self.queue_issue
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -315,6 +377,7 @@ class Config:
             "paid_overflow_max_attempts", "paid_overflow_max_cost_usd",
             "wake_destination_kind", "artifact_retention_days",
             "paid_overflow_max_attempts_per_window",
+            "evidence_issue", "notify_channel", "notify_recipient", "notify_enabled",
         }
         required = expected - {
             "delivery_path_allowlists", "enabled_operations", "operation_definitions",
@@ -322,6 +385,7 @@ class Config:
             "paid_overflow_authorized", "paid_overflow_max_attempts",
             "paid_overflow_max_cost_usd", "wake_destination_kind",
             "artifact_retention_days", "paid_overflow_max_attempts_per_window",
+            "evidence_issue", "notify_channel", "notify_recipient", "notify_enabled",
         }
         unknown = set(raw) - expected
         missing = required - set(raw)
@@ -337,6 +401,26 @@ class Config:
                      or wake_pull_request > 1_000_000_000
                      or wake_pull_request == raw["queue_issue"])):
             raise ValidationError("wake_pull_request must be a distinct positive integer or null")
+        evidence_issue = raw.get("evidence_issue")
+        if (evidence_issue is not None
+                and (isinstance(evidence_issue, bool) or not isinstance(evidence_issue, int)
+                     or evidence_issue < 1 or evidence_issue > 1_000_000_000
+                     or evidence_issue == raw["queue_issue"]
+                     or evidence_issue == wake_pull_request)):
+            raise ValidationError("evidence_issue must be a distinct positive integer or null")
+        notify_channel = raw.get("notify_channel", "none")
+        if notify_channel not in NOTIFY_CHANNELS:
+            raise ValidationError("notify_channel must be one of none, imessage")
+        notify_recipient = raw.get("notify_recipient")
+        if notify_recipient is not None and (
+                not isinstance(notify_recipient, str) or len(notify_recipient) > 128
+                or not NOTIFY_RECIPIENT_RE.fullmatch(notify_recipient)):
+            raise ValidationError("notify_recipient must be a phone number or Apple ID e-mail")
+        notify_enabled = raw.get("notify_enabled", False)
+        if not isinstance(notify_enabled, bool):
+            raise ValidationError("notify_enabled must be a boolean")
+        if notify_enabled and (notify_channel == "none" or notify_recipient is None):
+            raise ValidationError("notify_enabled requires notify_channel and notify_recipient")
         for field in ("repository", "runner_id", "origin_url"):
             if not isinstance(raw[field], str) or not raw[field].strip():
                 raise ValidationError(f"{field} must be a non-empty string")
@@ -376,8 +460,12 @@ class Config:
                 or not 0 < float(paid_cost) <= 100):
             raise ValidationError("paid_overflow_max_cost_usd must be a number in (0, 100]")
         if (not isinstance(raw["operational_executables"], dict)
-                or set(raw["operational_executables"]) != {"gh", "git", "python"}):
+                or not REQUIRED_OPERATIONAL_EXECUTABLES <= set(raw["operational_executables"])
+                or not set(raw["operational_executables"])
+                <= REQUIRED_OPERATIONAL_EXECUTABLES | OPTIONAL_OPERATIONAL_EXECUTABLES):
             raise ValidationError("operational_executables must contain gh, git, and python")
+        if notify_channel == "imessage" and "osascript" not in raw["operational_executables"]:
+            raise ValidationError("notify_channel imessage requires operational_executables.osascript")
         operational = {str(k): str(absolute_path(v)) for k, v in raw["operational_executables"].items()}
         runtime_dir = absolute_path(raw["runtime_dir"])
         operation_definitions = validate_operation_definitions(
@@ -421,6 +509,8 @@ class Config:
             paid_overflow_max_attempts_per_window=bounded_int(
                 raw.get("paid_overflow_max_attempts_per_window", 10), 1, 1000,
                 "paid_overflow_max_attempts_per_window"),
+            evidence_issue=evidence_issue, notify_channel=notify_channel,
+            notify_recipient=notify_recipient, notify_enabled=notify_enabled,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -1081,6 +1171,24 @@ class State:
           terminal_issue INTEGER NOT NULL, runner_id TEXT NOT NULL,
           wake_pull_request INTEGER, terminal_comment_id TEXT,
           created_at INTEGER NOT NULL, completed_at INTEGER);
+        CREATE TABLE IF NOT EXISTS notify_outbox (
+          key TEXT PRIMARY KEY, kind TEXT NOT NULL, message TEXT NOT NULL,
+          created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+          delivered_at INTEGER, outcome TEXT);
+        CREATE TABLE IF NOT EXISTS user_actions (
+          decision_id TEXT PRIMARY KEY, job_id TEXT, plan_id TEXT,
+          stop_class TEXT NOT NULL, body TEXT NOT NULL, record_comment_id TEXT,
+          created_at INTEGER NOT NULL, posted_comment_id TEXT,
+          resolved_at INTEGER, resolved_by TEXT);
+        CREATE TABLE IF NOT EXISTS plans (
+          plan_id TEXT PRIMARY KEY, comment_id TEXT UNIQUE NOT NULL, body TEXT NOT NULL,
+          status TEXT NOT NULL, current_step TEXT, outcome TEXT,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS plan_steps (
+          plan_id TEXT NOT NULL, step_id TEXT NOT NULL, job_id TEXT UNIQUE NOT NULL,
+          status TEXT NOT NULL, outcome TEXT, terminal_comment_id TEXT,
+          resolved_sha TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          PRIMARY KEY(plan_id, step_id));
         """)
         self._migrate_high_water()
         claim_columns = {row[1] for row in self.db.execute("PRAGMA table_info(claims)")}
@@ -1249,7 +1357,7 @@ class State:
         rows = self.db.execute("SELECT status, count(*) FROM claims GROUP BY status").fetchall()
         lease = self.db.execute("SELECT runner_id, expires_at FROM lease WHERE singleton=1").fetchone()
         return {"jobs": dict(rows), "lease": {"active": bool(lease and lease[1] > int(time.time()))} if lease else None,
-                "queue_page": self.queue_page()}
+                "queue_page": self.queue_page(), "plans": self.plan_summary()}
     def _migrate_high_water(self) -> None:
         """Seed the comment high-water mark on first run after upgrade.
 
@@ -1329,7 +1437,7 @@ class State:
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(page),))
     def queue_terminal(self, comment_id: str, job_id: str, terminal_body: str,
                        internal_state: str, terminal_state: str, config: Config) -> None:
-        if (not re.fullmatch(r"[1-9][0-9]*", comment_id) or not valid_uuid(job_id)
+        if (not CLAIM_ID_RE.fullmatch(comment_id) or not valid_uuid(job_id)
                 or internal_state not in {"succeeded", "failed", "blocked"}
                 or terminal_state not in {"COMPLETED", "FAILED", "TIMED_OUT", "REJECTED"}
                 or not isinstance(terminal_body, str)):
@@ -1350,7 +1458,7 @@ class State:
                 (job_id,),
             ).fetchone()
             identity = (comment_id, terminal_body, internal_state, terminal_state,
-                        config.repository, config.queue_issue, config.runner_id,
+                        config.repository, config.terminal_issue, config.runner_id,
                         config.wake_pull_request)
             if existing is not None and existing != identity:
                 raise ValidationError("terminal outbox job identity mismatch")
@@ -1358,7 +1466,7 @@ class State:
                 self.db.execute(
                     "INSERT INTO terminal_outbox VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)",
                     (job_id, comment_id, terminal_body, internal_state, terminal_state,
-                     config.repository, config.queue_issue, config.runner_id,
+                     config.repository, config.terminal_issue, config.runner_id,
                      config.wake_pull_request, now),
                 )
             self.db.execute("COMMIT")
@@ -1406,10 +1514,222 @@ class State:
                 "UPDATE terminal_outbox SET terminal_comment_id=?,completed_at=? WHERE job_id=?",
                 (terminal_comment_id, now, job_id),
             )
+            body_row = self.db.execute(
+                "SELECT terminal_body FROM terminal_outbox WHERE job_id=?", (job_id,)).fetchone()
+            self._after_terminal_tx(job_id, terminal_state, body_row[0] if body_row else "",
+                                    repository, terminal_issue, terminal_comment_id, runner_id, now)
             self.db.execute("COMMIT")
         except Exception:
             with contextlib.suppress(sqlite3.Error): self.db.execute("ROLLBACK")
             raise
+
+    # ---- PR B: plans
+    def claim_plan(self, comment_id: str, plan_id: str, content_hash_value: str,
+                   body: str, first_step: str) -> bool:
+        """Claim the plan comment and open the plan row in ONE transaction.
+
+        The plan claim carries no recovery body on purpose: a restart resumes
+        the plan from its current step instead of closing it as ambiguous.
+        """
+        now = int(time.time())
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.db.execute("SELECT content_hash FROM claims WHERE comment_id=?",
+                                       (comment_id,)).fetchone()
+            if existing is not None:
+                self.db.execute("COMMIT")
+                if existing[0] != content_hash_value:
+                    raise ValidationError("claimed comment was edited")
+                return False
+            if self.db.execute("SELECT comment_id FROM claims WHERE job_id=?", (plan_id,)).fetchone():
+                self.db.execute("COMMIT")
+                raise ValidationError("duplicate plan ID")
+            self.db.execute(
+                "INSERT INTO claims(comment_id,job_id,content_hash,status,claimed_at,updated_at,recovery_body) "
+                "VALUES (?, ?, ?, 'running', ?, ?, NULL)",
+                (comment_id, plan_id, content_hash_value, now, now))
+            for status in ("queued", "claimed", "running"):
+                self.db.execute("INSERT INTO history(comment_id,status,created_at) VALUES (?, ?, ?)",
+                                (comment_id, status, now))
+            self.db.execute(
+                "INSERT INTO plans(plan_id,comment_id,body,status,current_step,created_at,updated_at) "
+                "VALUES (?, ?, ?, 'running', ?, ?, ?)",
+                (plan_id, comment_id, body, first_step, now, now))
+            self._set_metadata_tx("status_dirty", "1")
+            self.db.execute("COMMIT")
+            return True
+        except Exception:
+            with contextlib.suppress(sqlite3.Error): self.db.execute("ROLLBACK")
+            raise
+
+    def running_plan(self) -> tuple[str, str, str, str] | None:
+        """(plan_id, comment_id, body, current_step) of the oldest running plan."""
+        row = self.db.execute(
+            "SELECT plan_id, comment_id, body, current_step FROM plans WHERE status='running' "
+            "ORDER BY created_at, plan_id LIMIT 1").fetchone()
+        return tuple(row) if row else None
+
+    def running_plan_ids(self) -> frozenset[str]:
+        rows = self.db.execute("SELECT plan_id FROM plans WHERE status='running'").fetchall()
+        return frozenset(str(row[0]) for row in rows)
+
+    def plan_step(self, plan_id: str, step_id: str) -> tuple[str, str, str | None, str | None] | None:
+        """(job_id, status, outcome, resolved_sha) or None if the step never started."""
+        row = self.db.execute(
+            "SELECT job_id, status, outcome, resolved_sha FROM plan_steps WHERE plan_id=? AND step_id=?",
+            (plan_id, step_id)).fetchone()
+        return tuple(row) if row else None
+
+    def start_plan_step(self, plan_id: str, step_id: str, job_id: str, resolved_sha: str) -> None:
+        now = int(time.time())
+        self.db.execute(
+            "INSERT INTO plan_steps(plan_id,step_id,job_id,status,resolved_sha,created_at,updated_at) "
+            "VALUES (?, ?, ?, 'running', ?, ?, ?)", (plan_id, step_id, job_id, resolved_sha, now, now))
+        self.db.execute("UPDATE plans SET current_step=?, updated_at=? WHERE plan_id=?",
+                        (step_id, now, plan_id))
+
+    def set_plan_current_step(self, plan_id: str, step_id: str) -> None:
+        self.db.execute("UPDATE plans SET current_step=?, updated_at=? WHERE plan_id=? AND status='running'",
+                        (step_id, int(time.time()), plan_id))
+
+    def finish_plan(self, plan_id: str, status: str, outcome: str) -> None:
+        if status not in {"completed", "stopped", "action_required"}:
+            raise ValidationError("invalid plan status")
+        cursor = self.db.execute(
+            "UPDATE plans SET status=?, outcome=?, updated_at=? WHERE plan_id=? AND status='running'",
+            (status, outcome, int(time.time()), plan_id))
+        if cursor.rowcount != 1:
+            raise ValidationError("plan is not running")
+
+    def plan_step_summaries(self, plan_id: str) -> str:
+        rows = self.db.execute(
+            "SELECT step_id, outcome FROM plan_steps WHERE plan_id=? ORDER BY created_at, step_id",
+            (plan_id,)).fetchall()
+        return ",".join(f"{step}:{outcome or 'running'}" for step, outcome in rows)
+
+    def plan_summary(self) -> dict[str, int]:
+        rows = self.db.execute("SELECT status, count(*) FROM plans GROUP BY status").fetchall()
+        return {str(status): int(count) for status, count in rows}
+
+    # ---- PR B: user-facing follow-through, all inside the terminal transaction
+    def _after_terminal_tx(self, job_id: str, terminal_state: str, terminal_body: str,
+                           repository: str, terminal_issue: int, terminal_comment_id: str,
+                           runner_id: str, now: int) -> None:
+        """Queue owner notification / action-required rows for a completed terminal.
+
+        Runs inside `complete_terminal`'s transaction so a crash cannot leave a
+        terminal on GitHub with no owner-facing follow-through pending.  Steps
+        of a plan are summarized once by the plan, not once per step.
+        """
+        stop_class = terminal_stop_class(terminal_body)
+        policy = terminal_policy(terminal_body)
+        link = comment_link(repository, terminal_issue, terminal_comment_id)
+        step = self.db.execute(
+            "SELECT plan_id, step_id FROM plan_steps WHERE job_id=?", (job_id,)).fetchone()
+        if step is not None:
+            self.db.execute(
+                "UPDATE plan_steps SET status='terminal', outcome=?, terminal_comment_id=?, "
+                "updated_at=? WHERE job_id=?",
+                (step_outcome(terminal_state, stop_class, terminal_body), terminal_comment_id,
+                 now, job_id))
+        is_plan = self.db.execute("SELECT 1 FROM plans WHERE plan_id=?", (job_id,)).fetchone()
+        if policy == "FAIL_CLOSED" and is_plan is not None:
+            # The step that stopped the plan already opened the decision; the
+            # plan terminal is the single owner notification for the whole run.
+            self._enqueue_notify_tx(
+                f"plan:{job_id}", "plan",
+                notify_message("ACTION REQUIRED plan", job_id, stop_class, link), now)
+        elif policy == "FAIL_CLOSED":
+            decision_id = decision_id_for(job_id)
+            body = user_action_body(decision_id, job_id, step[0] if step else None,
+                                    stop_class or "UNCLASSIFIED_FAILURE", runner_id, link)
+            self.db.execute(
+                "INSERT OR IGNORE INTO user_actions(decision_id,job_id,plan_id,stop_class,body,"
+                "record_comment_id,created_at) VALUES (?,?,?,?,?,?,?)",
+                (decision_id, job_id, step[0] if step else None,
+                 stop_class or "UNCLASSIFIED_FAILURE", body, terminal_comment_id, now))
+            self._enqueue_notify_tx(
+                f"action:{decision_id}", "action",
+                notify_message("ACTION REQUIRED", job_id, stop_class, link), now)
+        elif step is None:
+            self._enqueue_notify_tx(
+                f"job:{job_id}", "job", notify_message(terminal_state, job_id, stop_class, link), now)
+        self._set_metadata_tx("status_dirty", "1")
+
+    def _enqueue_notify_tx(self, key: str, kind: str, message: str, now: int) -> None:
+        self.db.execute(
+            "INSERT OR IGNORE INTO notify_outbox(key,kind,message,created_at) VALUES (?,?,?,?)",
+            (key, kind, message, now))
+
+    def _set_metadata_tx(self, key: str, value: str) -> None:
+        self.db.execute("INSERT INTO metadata(key,value) VALUES (?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def metadata_value(self, key: str) -> str | None:
+        row = self.db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+        return str(row[0]) if row else None
+
+    def set_metadata(self, key: str, value: str) -> None:
+        self._set_metadata_tx(key, value)
+
+    def pending_notifications(self, limit: int = 20) -> tuple[tuple[str, str, str, int], ...]:
+        rows = self.db.execute(
+            "SELECT key,kind,message,attempts FROM notify_outbox WHERE delivered_at IS NULL "
+            "ORDER BY created_at,key LIMIT ?", (limit,)).fetchall()
+        return tuple(tuple(row) for row in rows)
+
+    def settle_notification(self, key: str, outcome: str) -> None:
+        """Close a notification row: sent, disabled, or gave_up."""
+        if outcome not in {"sent", "disabled", "gave_up"}:
+            raise ValidationError("invalid notification outcome")
+        self.db.execute(
+            "UPDATE notify_outbox SET delivered_at=?, outcome=? "
+            "WHERE key=? AND delivered_at IS NULL", (int(time.time()), outcome, key))
+
+    def bump_notification_attempt(self, key: str) -> int:
+        self.db.execute("UPDATE notify_outbox SET attempts=attempts+1 WHERE key=? "
+                        "AND delivered_at IS NULL", (key,))
+        row = self.db.execute("SELECT attempts FROM notify_outbox WHERE key=?", (key,)).fetchone()
+        return int(row[0]) if row else 0
+
+    def enqueue_notification(self, key: str, kind: str, message: str) -> None:
+        """Public entry for non-terminal notifications (plans, tests)."""
+        if not re.fullmatch(r"(job|plan|action|test):[A-Za-z0-9_.-]{1,64}", key):
+            raise ValidationError("invalid notification key")
+        self._enqueue_notify_tx(key, kind, ensure_safe_post(message)[:NOTIFY_MAX_MESSAGE_CHARS],
+                                int(time.time()))
+        self._set_metadata_tx("status_dirty", "1")
+
+    def pending_user_actions(self, limit: int = 20) -> tuple[tuple[str, str], ...]:
+        rows = self.db.execute(
+            "SELECT decision_id, body FROM user_actions WHERE posted_comment_id IS NULL "
+            "ORDER BY created_at LIMIT ?", (limit,)).fetchall()
+        return tuple(tuple(row) for row in rows)
+
+    def mark_user_action_posted(self, decision_id: str, comment_id: str) -> None:
+        self.db.execute("UPDATE user_actions SET posted_comment_id=? WHERE decision_id=? "
+                        "AND posted_comment_id IS NULL", (comment_id, decision_id))
+
+    def open_user_actions(self) -> tuple[tuple[str, str | None, str | None, str, int], ...]:
+        rows = self.db.execute(
+            "SELECT decision_id, job_id, plan_id, stop_class, created_at FROM user_actions "
+            "WHERE resolved_at IS NULL ORDER BY created_at").fetchall()
+        return tuple(tuple(row) for row in rows)
+
+    def resolve_user_action(self, decision_id: str, resolved_by: str) -> bool:
+        cursor = self.db.execute(
+            "UPDATE user_actions SET resolved_at=?, resolved_by=? WHERE decision_id=? "
+            "AND resolved_at IS NULL", (int(time.time()), resolved_by, decision_id))
+        if cursor.rowcount:
+            self._set_metadata_tx("status_dirty", "1")
+        return bool(cursor.rowcount)
+
+    def recent_terminals(self, limit: int = STATUS_RECENT_LIMIT) -> tuple[tuple[Any, ...], ...]:
+        rows = self.db.execute(
+            "SELECT job_id, terminal_state, repository, terminal_issue, terminal_comment_id, "
+            "completed_at FROM terminal_outbox WHERE completed_at IS NOT NULL "
+            "ORDER BY completed_at DESC, job_id LIMIT ?", (limit,)).fetchall()
+        return tuple(tuple(row) for row in rows)
 
     def _enqueue_wake_tx(self, job_id: str, terminal_comment_id: str, terminal_state: str,
                          repository: str, terminal_issue: int, runner_id: str,
@@ -2195,14 +2515,17 @@ def token_scope_health(config: Config) -> dict[str, Any]:
 
 def operational_health(config: Config) -> dict[str, dict[str, bool]]:
     health: dict[str, dict[str, bool]] = {}
-    expected = {"gh": "gh version", "git": "git version", "python": "python"}
+    expected = {"gh": "gh version", "git": "git version", "python": "python", "osascript": "1"}
+    # osascript has no --version; evaluating a constant proves the interpreter works.
+    probe_args = {"osascript": ["-e", "return 1"]}
     for name, executable in config.operational_executables.items():
         path = Path(executable)
         available = path.is_file() and os.access(path, os.X_OK)
         interface_ok = False
         if available:
             try:
-                result = execute([str(path), "--version"], timeout=10, cap=8192, env=safe_environment())
+                result = execute([str(path), *probe_args.get(name, ["--version"])], timeout=10,
+                                 cap=8192, env=safe_environment())
                 interface_ok = not (result.returncode or result.timed_out or result.overflow) and expected[name] in result.output.lower()
             except OSError:
                 interface_ok = False
@@ -2264,6 +2587,52 @@ def failover_allowed_after(attempt: ProviderAttempt, job: Job, config: Config, w
     if job.profile == "repo_read":
         return True
     return worktree_is_clean(config, worktree)
+
+# An operation that ran to completion but reports status "blocked" names why in
+# an evidence line `category=<token>`.  Those tokens are the operation's own
+# vocabulary (rehearsal_operations.py); this maps them onto the stop taxonomy so
+# a blocked operation is never published as stop_class=NONE and a plan can route
+# on it.  Unknown tokens are UNCLASSIFIED_FAILURE, honestly.
+OPERATION_BLOCK_STOP_CLASS = {
+    # the host could not provide the thing the operation needs
+    "container_identity_mismatch": "ENVIRONMENT_FAILURE",
+    "container_health_mismatch": "ENVIRONMENT_FAILURE",
+    "container_image_mismatch": "ENVIRONMENT_FAILURE",
+    "container_binding_mismatch": "ENVIRONMENT_FAILURE",
+    "container_storage_mismatch": "ENVIRONMENT_FAILURE",
+    "docker_command_timeout": "ENVIRONMENT_FAILURE",
+    "docker_output_overflow": "ENVIRONMENT_FAILURE",
+    "docker_executable_invalid": "ENVIRONMENT_FAILURE",
+    "local_runtime_unavailable": "ENVIRONMENT_FAILURE",
+    "mysql_startup_failed": "ENVIRONMENT_FAILURE",
+    "pnpm_executable_invalid": "ENVIRONMENT_FAILURE",
+    # a boundary refused to be crossed: never retried
+    "docker_socket_invalid": "SAFETY_STOP",
+    "isolation_boundary_rejected": "SAFETY_STOP",
+    "mutation_command_rejected": "SAFETY_STOP",
+    # the thing under test produced the wrong answer
+    "database_evidence_mismatch": "CODE_FAILURE",
+    "database_name_mismatch": "CODE_FAILURE",
+    "database_not_empty_after": "CODE_FAILURE",
+    "database_not_empty_before": "CODE_FAILURE",
+    "database_table_count_mismatch": "CODE_FAILURE",
+    "database_version_mismatch": "CODE_FAILURE",
+    "schema_push_failed": "CODE_FAILURE",
+    "unexpected_table_name": "CODE_FAILURE",
+    # we asked for something malformed
+    "candidate_sha_invalid": "PROTOCOL_FAILURE",
+    "invalid_container_metadata": "PROTOCOL_FAILURE",
+}
+
+def operation_block_stop_class(output: "NormalizedOutput | None") -> str | None:
+    """Stop class of a blocked operation output, from its `category=` evidence line."""
+    if output is None or output.status != "blocked":
+        return None
+    for item in output.evidence:
+        match = re.fullmatch(r"category=([a-z_]+)", item.strip())
+        if match:
+            return OPERATION_BLOCK_STOP_CLASS.get(match.group(1), "UNCLASSIFIED_FAILURE")
+    return "UNCLASSIFIED_FAILURE"
 
 def stop_class_for(error_category: str | None) -> str | None:
     """Map a provider error category onto the coarse stop taxonomy."""
@@ -2608,35 +2977,44 @@ class GitHubClient:
     """The sole GitHub interface. Every call is an argv list to gh api."""
     def __init__(self, config: Config): self.config = config
     def _api(self, method: str, endpoint: str, fields: Mapping[str, str] | None = None,
-             cap: int = MAX_OUTPUT_BYTES) -> Any:
-        expected = f"repos/{self.config.repository}/issues/{self.config.queue_issue}"
-        comments = f"{expected}/comments"
-        wake_comments = (f"repos/{self.config.repository}/issues/"
-                         f"{self.config.wake_pull_request}/comments"
+             cap: int = MAX_OUTPUT_BYTES, *, patch_comment: str | None = None) -> Any:
+        """The complete allowlist of what this program asks GitHub for.
+
+        GET: the queue issue and evidence issue (and their comment listings),
+        one comment by id (bound to an issue by the caller), the wake PR state.
+        POST: comments on the queue issue, the evidence issue, the wake PR.
+        PATCH: exactly one comment -- the pinned CURRENT_USER_STATUS -- and only
+        when the caller names it.  Nothing else, no other method.
+        """
+        repo = self.config.repository
+        queue = f"repos/{repo}/issues/{self.config.queue_issue}"
+        evidence = (f"repos/{repo}/issues/{self.config.evidence_issue}"
+                    if self.config.evidence_issue is not None else None)
+        wake_comments = (f"repos/{repo}/issues/{self.config.wake_pull_request}/comments"
                          if self.config.wake_pull_request is not None else None)
-        single_comment = re.fullmatch(
-            re.escape(f"repos/{self.config.repository}/issues/comments/") + r"[1-9][0-9]*", endpoint)
-        # The wake destination's state.  Listed here so the allowlist is the
-        # complete truth about what this client reads; it used to be fetched
-        # around this method, which made "_api is the boundary" a fiction.
-        wake_pull = (f"repos/{self.config.repository}/pulls/{self.config.wake_pull_request}"
+        wake_pull = (f"repos/{repo}/pulls/{self.config.wake_pull_request}"
                      if self.config.wake_pull_request is not None else None)
-        fixed_endpoints = {expected, comments}
-        if wake_comments is not None:
-            fixed_endpoints.add(wake_comments)
-        listing = re.fullmatch(
-            re.escape(comments) + rf"\?per_page={QUEUE_PAGE_SIZE}&page=[1-9][0-9]*"
-            r"(?:&since=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)?", endpoint)
-        if wake_pull is not None and endpoint == wake_pull and method == "GET":
-            pass
-        elif endpoint not in fixed_endpoints and not listing and not (single_comment and method == "GET"):
+        issues = {queue} | ({evidence} if evidence else set())
+        listings = {f"{issue}/comments" for issue in issues}
+        listing_query = (rf"\?per_page={QUEUE_PAGE_SIZE}&page=[1-9][0-9]*"
+                         r"(?:&since=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)?")
+        single_comment = re.fullmatch(
+            re.escape(f"repos/{repo}/issues/comments/") + r"[1-9][0-9]*", endpoint)
+        known = (endpoint in issues or endpoint in listings or bool(single_comment)
+                 or endpoint == wake_comments or endpoint == wake_pull
+                 or any(re.fullmatch(re.escape(base) + listing_query, endpoint) for base in listings))
+        if not known:
             raise ValidationError("GitHub endpoint outside queue issue")
-        allowed_posts = {comments}
-        if wake_comments is not None:
-            allowed_posts.add(wake_comments)
-        if (method not in {"GET", "POST"}
-                or (method == "POST" and endpoint not in allowed_posts)
-                or (method == "GET" and endpoint == wake_comments)):
+        if method == "GET":
+            allowed = endpoint != wake_comments
+        elif method == "POST":
+            allowed = endpoint in listings or endpoint == wake_comments
+        elif method == "PATCH":
+            allowed = (patch_comment is not None and bool(re.fullmatch(r"[1-9][0-9]*", patch_comment))
+                       and endpoint == f"repos/{repo}/issues/comments/{patch_comment}")
+        else:
+            allowed = False
+        if not allowed:
             raise ValidationError("GitHub operation outside queue comment boundary")
         argv = [self.config.operational_executables["gh"], "api", "--method", method, endpoint]
         for key, value in (fields or {}).items(): argv += ["-f", f"{key}={value}"]
@@ -2652,18 +3030,25 @@ class GitHubClient:
         except (json.JSONDecodeError, AttributeError) as exc: raise RunnerError("invalid GitHub login response") from exc
         if not github_login_matches(login, self.config.executor_login):
             raise RunnerError("unexpected executor GitHub login")
-    def comments(self, page: int = 1, since: str | None = None) -> list[dict[str, Any]]:
+    def _bound_issue(self, issue: int | None) -> int:
+        if issue is None:
+            return self.config.queue_issue
+        if issue not in {self.config.queue_issue, self.config.evidence_issue}:
+            raise ValidationError("issue is neither the queue nor the evidence issue")
+        return issue
+    def comments(self, page: int = 1, since: str | None = None,
+                 issue: int | None = None) -> list[dict[str, Any]]:
         if not isinstance(page, int) or page < 1 or page > 1_000_000:
             raise ValidationError("queue page is outside the bounded cursor range")
         if since is not None and not ISO_TIMESTAMP_RE.fullmatch(since):
             raise ValidationError("since must be an exact UTC ISO-8601 timestamp")
-        endpoint = (f"repos/{self.config.repository}/issues/{self.config.queue_issue}/comments"
+        endpoint = (f"repos/{self.config.repository}/issues/{self._bound_issue(issue)}/comments"
                     f"?per_page={QUEUE_PAGE_SIZE}&page={page}"
                     + (f"&since={since}" if since else ""))
         value = self._api("GET", endpoint, cap=MAX_QUEUE_PAGE_BYTES)
         if not isinstance(value, list): return []
         return [comment for comment in value if isinstance(comment, dict)]
-    def comment(self, comment_id: str, page: int = 0) -> dict[str, Any]:
+    def comment(self, comment_id: str, page: int = 0, issue: int | None = None) -> dict[str, Any]:
         """Fetch one comment by id -- O(1), exact, and bound to the queue issue.
 
         The page-scan this replaced was O(pages) on every claim re-check and
@@ -2677,7 +3062,7 @@ class GitHubClient:
         if not isinstance(value, dict):
             raise RunnerError("claimed comment no longer exists on the queue issue")
         issue_url = str(value.get("issue_url", ""))
-        if not issue_url.endswith(f"/repos/{self.config.repository}/issues/{self.config.queue_issue}"):
+        if not issue_url.endswith(f"/repos/{self.config.repository}/issues/{self._bound_issue(issue)}"):
             # The endpoint is repository-wide; a comment from any other issue
             # must be refused as firmly as a foreign repository would be.
             raise RunnerError("comment does not belong to the queue issue")
@@ -2695,7 +3080,16 @@ class GitHubClient:
             raise RunnerError("GitHub comment response has no valid ID")
         return str(comment_id)
     def post(self, body: str) -> str:
+        """Executor records go to the evidence issue when one is configured."""
+        return self._post_comment(self.config.terminal_issue, body)
+    def post_queue(self, body: str) -> str:
         return self._post_comment(self.config.queue_issue, body)
+    def patch_comment(self, comment_id: str, body: str) -> None:
+        """Rewrite one comment in place; `_api` admits only the named id."""
+        if not re.fullmatch(r"[1-9][0-9]*", comment_id):
+            raise ValidationError("invalid GitHub comment ID")
+        self._api("PATCH", f"repos/{self.config.repository}/issues/comments/{comment_id}",
+                  {"body": ensure_safe_post(body)}, patch_comment=comment_id)
     def post_wake(self, body: str) -> str:
         if self.config.wake_pull_request is None:
             raise ValidationError("wake bridge is disabled")
@@ -2721,7 +3115,7 @@ class RejectedEnvelope:
     schema: str
 
 FUTURE_SCHEMA_RE = re.compile(
-    r"\A\s*COMMANDER_(JOB|OPERATION)_V(\d+)\s*\n```json\s*\n(\{.*\})\s*\n```\s*\Z", re.DOTALL)
+    r"\A\s*COMMANDER_(JOB|OPERATION|PLAN)_V(\d+)\s*\n```json\s*\n(\{.*\})\s*\n```\s*\Z", re.DOTALL)
 
 
 def envelope_for_rejection(body: str, config: Config) -> RejectedEnvelope | None:
@@ -2736,7 +3130,8 @@ def envelope_for_rejection(body: str, config: Config) -> RejectedEnvelope | None
     disabled profile — is a REJECTED terminal, not silence.  Silence was the
     defect: the Commander could not tell "not seen yet" from "refused".
     """
-    patterns = [(COMMENT_RE, SCHEMA), (OPERATION_COMMENT_RE, OPERATION_SCHEMA)]
+    patterns = [(COMMENT_RE, SCHEMA), (OPERATION_COMMENT_RE, OPERATION_SCHEMA),
+                (PLAN_COMMENT_RE, PLAN_SCHEMA)]
     future = FUTURE_SCHEMA_RE.fullmatch(body)
     if future and future.group(2) != "1":
         # A V2+ message addressed to a V1 runner.  Skipping it silently would
@@ -2753,7 +3148,7 @@ def envelope_for_rejection(body: str, config: Config) -> RejectedEnvelope | None
             return None
         if not isinstance(data, dict):
             return None
-        job_id = data.get("job_id")
+        job_id = data.get("plan_id" if schema.startswith("COMMANDER_PLAN_") else "job_id")
         if (not isinstance(job_id, str) or not valid_uuid(job_id)
                 or data.get("runner_id") != config.runner_id
                 or data.get("repository") != config.repository
@@ -2761,6 +3156,76 @@ def envelope_for_rejection(body: str, config: Config) -> RejectedEnvelope | None
             return None
         return RejectedEnvelope(job_id=job_id, runner_id=config.runner_id, schema=schema)
     return None
+
+def comment_link(repository: str, issue: int, comment_id: str | None) -> str:
+    base = f"https://github.com/{repository}/issues/{issue}"
+    return f"{base}#issuecomment-{comment_id}" if comment_id else base
+
+def terminal_stop_class(terminal_body: str) -> str | None:
+    match = re.search(r"stop_class=([A-Z_]+)", terminal_body or "")
+    value = match.group(1) if match else None
+    return value if value in STOP_CLASS_POLICY else None
+
+def terminal_policy(terminal_body: str) -> str | None:
+    stop_class = terminal_stop_class(terminal_body)
+    return STOP_CLASS_POLICY.get(stop_class) if stop_class else None
+
+def terminal_verdict(terminal_body: str) -> str | None:
+    match = re.search(re.escape(VERDICT_SCHEMA) + r" verdict=([a-z_]+);", terminal_body or "")
+    return match.group(1) if match else None
+
+def step_outcome(terminal_state: str, stop_class: str | None, terminal_body: str) -> str:
+    """The single token a plan edge table is matched against.
+
+    `ok` for a clean COMPLETED, `verdict.<x>` when the completed step carried a
+    structured verdict, otherwise the stop class.  Never natural language.
+    """
+    if terminal_state == "COMPLETED":
+        verdict = terminal_verdict(terminal_body)
+        return f"verdict.{verdict}" if verdict else "ok"
+    return stop_class or "UNCLASSIFIED_FAILURE"
+
+def decision_id_for(job_id: str) -> str:
+    return str(uuid.uuid5(uuid.UUID(job_id), "user-action"))
+
+def notify_message(state: str, subject_id: str, stop_class: str | None, link: str) -> str:
+    """Minimal owner notification: state, short id, class, link.  No evidence."""
+    text = f"[Commander] {state} {subject_id[:8]}"
+    if stop_class:
+        text += f" ({stop_class})"
+    return (text + f" {link}")[:NOTIFY_MAX_MESSAGE_CHARS]
+
+def user_action_body(decision_id: str, job_id: str | None, plan_id: str | None,
+                     stop_class: str, runner_id: str, link: str) -> str:
+    lines = [USER_ACTION_SCHEMA, f"decision={decision_id}"]
+    if job_id:
+        lines.append(f"job={job_id}")
+    if plan_id:
+        lines.append(f"plan={plan_id}")
+    lines += [f"stop_class={stop_class}", f"policy={STOP_CLASS_POLICY.get(stop_class, 'FAIL_CLOSED')}",
+              f"runner={runner_id}", f"record={link}",
+              "required=owner decision; the runner will not retry or continue on its own",
+              f"resolve_with={ACK_SCHEMA}\ndecision={decision_id}"]
+    return "\n".join(lines)
+
+def user_status_body(state_db: "State", config: Config, now: int) -> str:
+    stamp = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    last = state_db.last_successful_poll()
+    last_iso = (dt.datetime.fromtimestamp(last, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if last else "never")
+    open_actions = state_db.open_user_actions()
+    lines = [USER_STATUS_SCHEMA, f"updated_at={stamp}", f"runner={config.runner_id}",
+             f"last_poll={last_iso}", f"heartbeat_interval_seconds={STATUS_HEARTBEAT_SECONDS}",
+             "open_action_required=[" + ",".join(row[0] for row in open_actions) + "]",
+             (f"pending=terminals:{len(state_db.pending_terminals(100))} "
+              f"wakes:{len(state_db.pending_wakes(100))} "
+              f"rejections:{len(state_db.pending_rejections(100))} "
+              f"notifications:{len(state_db.pending_notifications(100))}"),
+             "recent="]
+    for job_id, terminal_state, repository, issue, comment_id, completed_at in state_db.recent_terminals():
+        when = dt.datetime.fromtimestamp(completed_at, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines.append(f"- {when} {terminal_state} {job_id} {comment_link(repository, issue, comment_id)}")
+    return "\n".join(lines)
 
 def orphan_lifecycle(job_id: str, runner_id: str, state: str, reason: str) -> str:
     """Terminal body for a claim we can no longer reconstruct into a Job.
@@ -2800,7 +3265,8 @@ def drain_wake_outbox(client: GitHubClient, state_db: State,
         return True
     for (job_id, terminal_comment_id, terminal_state, repository, terminal_issue,
          runner_id, wake_pull_request) in pending:
-        if (repository != active_config.repository or terminal_issue != active_config.queue_issue
+        if (repository != active_config.repository
+                or not terminal_issue_is_ours(terminal_issue, active_config)
                 or runner_id != active_config.runner_id
                 or wake_pull_request != active_config.wake_pull_request):
             raise RunnerError("pending wake identity differs from active configuration")
@@ -2835,14 +3301,19 @@ def commander_job_identity(comment: Mapping[str, Any], config: Config) -> str | 
     return envelope.job_id if envelope else None
 
 
+def record_issues(config: Config) -> tuple[int | None, ...]:
+    """Issues that may hold executor terminal records: queue, plus evidence if split."""
+    return (None,) + ((config.evidence_issue,) if config.evidence_issue is not None else ())
+
 def queue_has_terminal_history(client: GitHubClient, config: Config,
                                max_pages: int = MAX_PAGES_PER_TICK) -> bool:
-    for page in range(1, max_pages + 1):
-        comments = client.comments(page)
-        if any(executor_terminal(comment, config) for comment in comments):
-            return True
-        if len(comments) < QUEUE_PAGE_SIZE:
-            return False
+    for issue in record_issues(config):
+        for page in range(1, max_pages + 1):
+            comments = client.comments(page) if issue is None else client.comments(page, None, issue)
+            if any(executor_terminal(comment, config) for comment in comments):
+                return True
+            if len(comments) < QUEUE_PAGE_SIZE:
+                break
     return False
 
 
@@ -2860,16 +3331,18 @@ def rebuild_claims_from_history(client: GitHubClient, state_db: State, config: C
     terminals: dict[str, str] = {}               # job_id -> terminal state
     newest = 0
     newest_updated: str | None = None
-    for page in range(1, max_pages + 1):
-        comments = client.comments(page)
+    for issue in record_issues(config):
+      for page in range(1, max_pages + 1):
+        comments = client.comments(page) if issue is None else client.comments(page, None, issue)
         for comment in comments:
             comment_id = str(comment.get("id", ""))
             if not re.fullmatch(r"[1-9][0-9]*", comment_id):
                 continue
-            if int(comment_id) > newest:
+            # The high-water mark is a QUEUE cursor; evidence comments never move it.
+            if issue is None and int(comment_id) > newest:
                 newest, newest_updated = int(comment_id), comment.get("updated_at")
             job_id = commander_job_identity(comment, config)
-            if job_id and job_id not in jobs:
+            if issue is None and job_id and job_id not in jobs:
                 jobs[job_id] = (comment_id, comment_hash(comment["body"]))
             terminal = executor_terminal(comment, config)
             if terminal:
@@ -2901,22 +3374,140 @@ def drain_rejection_outbox(client: GitHubClient, state_db: State) -> bool:
     return True
 
 
+def terminal_issue_is_ours(terminal_issue: int, config: Config) -> bool:
+    """A pending record may name the queue issue (pre-split) or the evidence issue."""
+    return terminal_issue in {config.queue_issue, config.evidence_issue}
+
 def drain_terminal_outbox(client: GitHubClient, state_db: State, config: Config) -> bool:
     for (job_id, _comment_id, terminal_body, _internal_state, _terminal_state,
          repository, terminal_issue, runner_id, wake_pull_request) in state_db.pending_terminals():
-        if (repository != config.repository or terminal_issue != config.queue_issue
+        if (repository != config.repository or not terminal_issue_is_ours(terminal_issue, config)
                 or runner_id != config.runner_id or wake_pull_request != config.wake_pull_request):
             raise RunnerError("pending terminal identity differs from active configuration")
+        # The row says where the record must go.  A record queued before the
+        # evidence issue was configured still lands on the queue issue.
+        poster = client.post
+        if terminal_issue != config.terminal_issue:
+            poster = getattr(client, "post_queue", None)
+            if poster is None:
+                raise RunnerError("pending terminal names an issue this client cannot post to")
         try:
-            terminal_comment_id = client.post(terminal_body)
+            terminal_comment_id = poster(terminal_body)
         except RunnerError:
             return False
         state_db.complete_terminal(job_id, terminal_comment_id)
-    return drain_wake_outbox(client, state_db, config)
+    if not drain_wake_outbox(client, state_db, config):
+        return False
+    return drain_user_actions(client, state_db)
+
+def drain_user_actions(client: GitHubClient, state_db: State) -> bool:
+    """Post USER_ACTION_REQUIRED_V1 records; at-least-once, never silently dropped."""
+    for decision_id, body in state_db.pending_user_actions():
+        try:
+            posted = client.post(body)
+        except RunnerError:
+            return False
+        state_db.mark_user_action_posted(decision_id, posted)
+    return True
+
+def send_imessage(config: Config, message: str) -> None:
+    """Send one iMessage through Messages.app with the fixed shipped script.
+
+    The recipient comes from the 0600 config and the text is a bounded,
+    evidence-free line; both travel as argv, never inside the script.
+    """
+    osascript = config.operational_executables.get("osascript")
+    if not osascript or config.notify_recipient is None:
+        raise RunnerError("iMessage channel is not configured")
+    if not NOTIFY_RECIPIENT_RE.fullmatch(config.notify_recipient):
+        raise ValidationError("notify_recipient is not a valid iMessage handle")
+    text = ensure_safe_post(message)[:NOTIFY_MAX_MESSAGE_CHARS]
+    if not text or text.startswith("-"):
+        raise ValidationError("notification text is empty or option-shaped")
+    argv = [osascript]
+    for line in IMESSAGE_SCRIPT:
+        argv += ["-e", line]
+    argv += [config.notify_recipient, text]
+    result = execute(argv, timeout=30, cap=8192, env=safe_environment())
+    if result.returncode or result.timed_out or result.overflow:
+        raise RunnerError("iMessage send failed: " + redact(last_words(result.output), 300))
+
+def drain_notify_outbox(state_db: State, config: Config) -> bool:
+    """Deliver owner notifications; bounded retries, disabled channel drains as `disabled`."""
+    pending = state_db.pending_notifications()
+    if not pending:
+        return True
+    if not config.notify_enabled:
+        for key, _kind, _message, _attempts in pending:
+            state_db.settle_notification(key, "disabled")
+        return True
+    delivered_all = True
+    for key, _kind, message, _attempts in pending:
+        attempts = state_db.bump_notification_attempt(key)  # charged on dispatch, not success
+        try:
+            if config.notify_channel == "imessage":
+                send_imessage(config, message)
+            else:
+                raise RunnerError("unsupported notify_channel")
+        except (RunnerError, ValidationError, OSError) as exc:
+            print(f"runner warning: notification {key} not delivered: {exc}", file=sys.stderr)
+            if attempts >= NOTIFY_MAX_ATTEMPTS:
+                state_db.settle_notification(key, "gave_up")
+            delivered_all = False
+            continue
+        state_db.settle_notification(key, "sent")
+    return delivered_all
+
+def refresh_user_status(client: GitHubClient, state_db: State, config: Config,
+                        force: bool = False) -> bool:
+    """Rewrite the pinned CURRENT_USER_STATUS comment on the evidence issue.
+
+    No read model: the same comment is PATCHed in place after every terminal
+    and at least every STATUS_HEARTBEAT_SECONDS, so a reader needs exactly
+    one comment to know whether the runner is alive and what is open.
+    """
+    if config.evidence_issue is None:
+        return False
+    now = int(time.time())
+    last = state_db.metadata_value("status_refreshed_at")
+    dirty = state_db.metadata_value("status_dirty") == "1"
+    try:
+        stale = last is None or now - int(last) >= STATUS_HEARTBEAT_SECONDS
+    except ValueError:
+        stale = True
+    if not (force or dirty or stale):
+        return False
+    body = user_status_body(state_db, config, now)
+    comment_id = state_db.metadata_value("status_comment_id")
+    try:
+        if comment_id is not None:
+            try:
+                client.patch_comment(comment_id, body)
+            except RunnerError as patch_error:
+                # PATCH failed: only re-create when the comment is truly gone,
+                # otherwise a flaky network would spawn duplicate status comments.
+                try:
+                    client.comment(comment_id, issue=config.evidence_issue)
+                except RunnerError:
+                    comment_id = None
+                else:
+                    raise patch_error
+        if comment_id is None:
+            comment_id = client.post(body)
+            state_db.set_metadata("status_comment_id", comment_id)
+    except (RunnerError, ValidationError, UnsafeOutputError) as exc:
+        print(f"runner warning: CURRENT_USER_STATUS not refreshed: {exc}", file=sys.stderr)
+        return False
+    state_db.set_metadata("status_refreshed_at", str(now))
+    state_db.set_metadata("status_dirty", "0")
+    return True
 
 def recover_incomplete_jobs(client: GitHubClient, state_db: State, config: Config) -> int:
     rows = state_db.incomplete_claims()
+    running_plans = state_db.running_plan_ids()
     for comment_id, job_id, persisted_hash, recovery_body in rows:
+        if job_id in running_plans:
+            continue  # plans resume from their current step; they are not ambiguous
         pending = any(record[0] == job_id for record in state_db.pending_terminals(100))
         if pending:
             continue
@@ -3002,6 +3593,20 @@ def launchagent_script(path: Path) -> Path | None:
     except (OSError, ValueError, TypeError):
         return None
 
+def launchagent_entrypoint(config: Config) -> Path:
+    """What the LaunchAgent SHOULD run.
+
+    On a versioned layout this is the `current` symlink itself, not its
+    resolution: pointing launchd at a concrete version directory silently
+    re-creates the flat-layout trap on the very next upgrade (the pointer
+    moves, launchd does not).  On a flat layout it is the flat file.
+    """
+    current = config.runtime_dir / "current"
+    if current.is_symlink():
+        return current / "commander_runner.py"
+    return config.runtime_dir / "commander_runner.py"
+
+
 def launchagent_health(config: Config) -> dict[str, Any]:
     """Does launchd run the runtime `doctor` is inspecting?
 
@@ -3032,7 +3637,10 @@ def launchagent_health(config: Config) -> dict[str, Any]:
         report["consistent"] = None
         return report
     expected = (runtime_root(config) / "commander_runner.py").resolve(strict=False)
+    # Consistent if launchd runs the active bytes -- whether it names the
+    # `current` symlink (preferred) or the version directory it resolves to.
     report["consistent"] = resolved == expected
+    report["follows_pointer"] = script == launchagent_entrypoint(config)
     return report
 
 def launchagent_path() -> Path:
@@ -3267,6 +3875,8 @@ def queue_health(config: Config) -> dict[str, Any]:
         "comment_high_water": None, "queue_consumable": None,
         "active_job": None, "active_attempt": None,
         "pending_terminals": None, "pending_wakes": None, "pending_rejections": None,
+        "pending_notifications": None, "open_user_actions": None,
+        "status_comment_id": None, "status_refreshed_at": None,
     }
     # Reachability of the queue is independent of local state: a host that
     # has never polled can still be checked for whether it COULD.
@@ -3300,8 +3910,42 @@ def queue_health(config: Config) -> dict[str, Any]:
         report["pending_terminals"] = len(state.pending_terminals(100))
         report["pending_wakes"] = len(state.pending_wakes(100))
         report["pending_rejections"] = len(state.pending_rejections(100))
+        report["pending_notifications"] = len(state.pending_notifications(100))
+        report["open_user_actions"] = len(state.open_user_actions())
+        report["status_comment_id"] = state.metadata_value("status_comment_id")
+        refreshed = state.metadata_value("status_refreshed_at")
+        report["status_refreshed_at"] = int(refreshed) if refreshed and refreshed.isdigit() else None
     finally:
         state.close()
+    return report
+
+def evidence_health(config: Config) -> dict[str, Any]:
+    """Is the evidence issue configured, reachable, and open?"""
+    report: dict[str, Any] = {"issue": config.evidence_issue, "state": None, "usable": None}
+    if config.evidence_issue is None:
+        report["usable"] = True  # single-issue layout; nothing extra to reach
+        return report
+    try:
+        value = GitHubClient(config)._api(
+            "GET", f"repos/{config.repository}/issues/{config.evidence_issue}")
+    except (OSError, RunnerError, ValidationError):
+        return report
+    if not isinstance(value, dict):
+        return report
+    report["state"] = value.get("state")
+    report["usable"] = value.get("state") == "open" and "pull_request" not in value
+    return report
+
+def notify_health(config: Config) -> dict[str, Any]:
+    report: dict[str, Any] = {"channel": config.notify_channel, "enabled": config.notify_enabled,
+                              "recipient_configured": config.notify_recipient is not None,
+                              "osascript": None, "usable": None}
+    if not config.notify_enabled:
+        report["usable"] = True
+        return report
+    osascript = config.operational_executables.get("osascript")
+    report["osascript"] = bool(osascript and Path(osascript).is_file())
+    report["usable"] = bool(report["osascript"] and config.notify_recipient)
     return report
 
 
@@ -3328,11 +3972,14 @@ def doctor(config: Config) -> dict[str, Any]:
         "launchagent": launchagent_health(config),
         "queue": queue_health(config),
         "token_scopes": token_scope_health(config),
+        "evidence": evidence_health(config),
+        "notify": notify_health(config),
     }
     booleans_ok = all(value for key, value in checks.items()
                       if key not in {"providers", "operational_executables", "quality_gates",
                                      "operations", "outbound_policy", "runtime_manifest",
-                                     "wake_destination", "launchagent", "queue", "token_scopes"})
+                                     "wake_destination", "launchagent", "queue", "token_scopes",
+                                     "evidence", "notify"})
     # Provenance is only required once the runtime is actually installed; a
     # fresh host with no runtime_dir yet is not unhealthy.
     manifest_ok = (checks["runtime_manifest"]["ok"]
@@ -3349,10 +3996,434 @@ def doctor(config: Config) -> dict[str, Any]:
     # queue, is unhealthy.  One that has never polled (fresh install) is not
     # penalized for it.
     queue_ok = queue["poll_fresh"] is not False and queue["queue_consumable"] is not False
+    evidence_ok = checks["evidence"]["usable"] is not False
+    notify_ok = checks["notify"]["usable"] is not False
     checks["ok"] = (booleans_ok and provider_ok and operational_ok and operation_ok
                     and manifest_ok and wake_ok and launchagent_ok and queue_ok
-                    and all(gates.values()))
+                    and evidence_ok and notify_ok and all(gates.values()))
     return checks
+
+
+@dataclasses.dataclass(frozen=True)
+class PlanStep:
+    step_id: str
+    kind: str                      # "job" | "operation"
+    target: Mapping[str, str]      # exactly one of sha / branch / from_step
+    on: Mapping[str, str]          # edge table: outcome token -> step id | "stop"
+    fields: Mapping[str, Any]      # the job/operation fields, validated by derivation
+
+@dataclasses.dataclass(frozen=True)
+class Plan:
+    """A bounded, declarative, forward-only state machine posted by the front door.
+
+    The runner never decides anything about a plan: every transition is a table
+    lookup on a token the runner itself produced (`ok`, a stop class, or a
+    structured verdict).  Edges may only point forward, so a plan cannot loop,
+    and every derived step is a full COMMANDER_JOB_V1 / COMMANDER_OPERATION_V1
+    that goes through the same validation and execution path as a posted one.
+    """
+    plan_id: str
+    repository: str
+    queue_issue: int
+    runner_id: str
+    authorization_ref: str
+    max_steps: int
+    steps: tuple[PlanStep, ...]
+
+    def step(self, step_id: str) -> PlanStep:
+        for step in self.steps:
+            if step.step_id == step_id:
+                return step
+        raise ValidationError("plan step is not declared")
+
+    def index(self, step_id: str) -> int:
+        return [step.step_id for step in self.steps].index(step_id)
+
+    @classmethod
+    def from_comment(cls, text: str, config: Config) -> "Plan":
+        match = PLAN_COMMENT_RE.fullmatch(text)
+        if not match:
+            raise ValidationError("comment is not exactly one COMMANDER_PLAN_V1 fenced JSON object")
+        try:
+            data = strict_json_loads(match.group(1))
+        except json.JSONDecodeError as exc:
+            raise ValidationError("plan JSON is invalid") from exc
+        required = {"schema", "plan_id", "repository", "queue_issue", "runner_id",
+                    "authorization_ref", "max_steps", "steps"}
+        if not isinstance(data, dict) or set(data) != required:
+            raise ValidationError("plan has unknown or missing fields")
+        if data["schema"] != PLAN_SCHEMA:
+            raise ValidationError("unsupported plan schema")
+        if data["repository"] != config.repository or data["queue_issue"] != config.queue_issue:
+            raise ValidationError("plan repository or queue issue mismatch")
+        if data["runner_id"] != config.runner_id:
+            raise ValidationError("plan targets a different runner")
+        if not isinstance(data["plan_id"], str) or not valid_uuid(data["plan_id"]):
+            raise ValidationError("plan_id must be a UUID")
+        authorization = validate_job_text(data["authorization_ref"], "authorization_ref",
+                                          max_chars=512, allow_newlines=False)
+        max_steps = bounded_int(data["max_steps"], 1, PLAN_MAX_STEPS, "max_steps")
+        raw_steps = data["steps"]
+        if not isinstance(raw_steps, list) or not 1 <= len(raw_steps) <= max_steps:
+            raise ValidationError("steps must be a non-empty list within max_steps")
+        ids: list[str] = []
+        for raw in raw_steps:
+            if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) \
+                    or not PLAN_STEP_ID_RE.fullmatch(raw["id"]) or raw["id"] in ids:
+                raise ValidationError("every step needs a unique lowercase id")
+            ids.append(raw["id"])
+        steps: list[PlanStep] = []
+        for position, raw in enumerate(raw_steps):
+            kind = raw.get("kind")
+            base = {"id", "kind", "on", "target"}
+            if kind == "job":
+                required_fields = base | {"worker", "model", "profile", "prompt", "quality_gate",
+                                          "timeout_seconds", "output_limit_bytes", "expected_evidence"}
+                allowed = required_fields | {"human_approval_ref"}
+            elif kind == "operation":
+                required_fields = base | {"operation_id", "timeout_seconds", "output_limit_bytes",
+                                          "expected_evidence", "human_approval_ref"}
+                allowed = required_fields
+            else:
+                raise ValidationError("step kind must be job or operation")
+            if not required_fields <= set(raw) <= allowed:
+                raise ValidationError(f"step {raw['id']} has unknown or missing fields")
+            target = raw["target"]
+            if (not isinstance(target, dict) or len(target) != 1
+                    or not set(target) <= {"sha", "branch", "from_step"}
+                    or not all(isinstance(v, str) for v in target.values())):
+                raise ValidationError(f"step {raw['id']} target must be one of sha, branch, from_step")
+            if "sha" in target and not SHA_RE.fullmatch(target["sha"]):
+                raise ValidationError(f"step {raw['id']} target sha must be an exact lowercase SHA")
+            if "branch" in target and (len(target["branch"]) > 200
+                                       or not OPERATION_BRANCH_RE.fullmatch(target["branch"])):
+                raise ValidationError(f"step {raw['id']} target branch is invalid")
+            if "from_step" in target and target["from_step"] not in ids[:position]:
+                raise ValidationError(f"step {raw['id']} from_step must name an earlier step")
+            on = raw["on"]
+            if (not isinstance(on, dict) or "*" not in on or not set(on) <= PLAN_EDGE_KEYS
+                    or not all(isinstance(v, str) for v in on.values())):
+                raise ValidationError(f"step {raw['id']} edge table must be keyed on known outcomes and include *")
+            for destination in on.values():
+                if destination != "stop" and destination not in ids[position + 1:]:
+                    raise ValidationError(f"step {raw['id']} edges may only point to a later step or stop")
+            fields = {k: v for k, v in raw.items() if k not in base}
+            step = PlanStep(raw["id"], kind, dict(target), dict(on), fields)
+            # Derive once with a placeholder SHA so a malformed step is REJECTED
+            # at parse time rather than discovered mid-plan.
+            derive_step_job(data["plan_id"], config.repository, config.queue_issue,
+                            config.runner_id, step, config,
+                            target["sha"] if "sha" in target else "0" * 40)
+            steps.append(step)
+        return cls(plan_id=data["plan_id"], repository=data["repository"],
+                   queue_issue=data["queue_issue"], runner_id=data["runner_id"],
+                   authorization_ref=authorization, max_steps=max_steps, steps=tuple(steps))
+
+def step_job_id(plan_id: str, step_id: str) -> str:
+    return str(uuid.uuid5(uuid.UUID(plan_id), step_id))
+
+def step_claim_id(plan_id: str, step_id: str) -> str:
+    return f"plan:{plan_id}:{step_id}"
+
+def derive_step_job(plan_id: str, repository: str, queue_issue: int, runner_id: str,
+                    step: PlanStep, config: Config, sha: str) -> tuple[Job | OperationJob, str]:
+    """Build the exact COMMANDER_JOB_V1 / COMMANDER_OPERATION_V1 a step stands for.
+
+    Returned with the synthetic comment body so the claim digest is the digest
+    of what actually ran.  All validation is the posted-job validation.
+    """
+    job_id = step_job_id(plan_id, step_id=step.step_id)
+    data: dict[str, Any] = {
+        "job_id": job_id, "repository": repository, "queue_issue": queue_issue,
+        "target_sha": sha, "worktree_id": derive_worktree_id(job_id), "runner_id": runner_id,
+    }
+    data.update(step.fields)
+    if step.kind == "job":
+        data["schema"] = SCHEMA
+        data["assigned"] = f"plan:{plan_id}:{step.step_id}"
+        prompt = step.fields.get("prompt")
+        if isinstance(prompt, str):
+            data["prompt"] = prompt.replace(RESOLVED_SHA_PLACEHOLDER, sha)
+        body = "COMMANDER_JOB_V1\n```json\n" + json.dumps(data, sort_keys=True) + "\n```"
+        return Job.from_comment(body, config), body
+    data["schema"] = OPERATION_SCHEMA
+    body = "COMMANDER_OPERATION_V1\n```json\n" + json.dumps(data, sort_keys=True) + "\n```"
+    return OperationJob.from_comment(body, config), body
+
+def resolve_branch_head(config: Config, branch: str) -> str:
+    """Current head of an origin branch, fetched fresh; the SHA is what gets pinned."""
+    if len(branch) > 200 or not OPERATION_BRANCH_RE.fullmatch(branch):
+        raise ValidationError("invalid branch name")
+    git = config.operational_executables["git"]
+    git_checked(["fetch", "--no-tags", "origin", f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                config.canonical_repo, executable=git, timeout=120)
+    head = git_checked(["rev-parse", "--verify", "--end-of-options",
+                        f"refs/remotes/origin/{branch}^{{commit}}"],
+                       config.canonical_repo, executable=git)
+    if not SHA_RE.fullmatch(head):
+        raise RunnerError("branch head is not a commit SHA")
+    return head
+
+def resolve_step_target(config: Config, state: State, plan: Plan, step: PlanStep) -> str:
+    if "sha" in step.target:
+        return step.target["sha"]
+    if "branch" in step.target:
+        return resolve_branch_head(config, step.target["branch"])
+    previous = state.plan_step(plan.plan_id, step.target["from_step"])
+    if previous is None or not previous[3] or not SHA_RE.fullmatch(previous[3]):
+        raise ValidationError("from_step target has no resolved SHA")
+    return previous[3]
+
+def plan_lifecycle(plan: Plan, terminal_state: str, stop_class: str | None, reason: str,
+                   steps: str, action_required: bool, result: str) -> str:
+    detail = ensure_safe_post(reason) if reason else ""
+    return (f"{PLAN_RUNNER_SCHEMA} {terminal_state}\njob={plan.plan_id}\nplan={plan.plan_id}\n"
+            f"runner={plan.runner_id}\nauthorization_ref={plan.authorization_ref}\n"
+            f"steps={steps or 'none'}\nstop_class={stop_class or 'NONE'}\n"
+            f"policy={STOP_CLASS_POLICY.get(stop_class or '', 'NONE')}\n"
+            f"action_required={str(action_required).lower()}\nreason={detail}\n"
+            f"{USER_UPDATE_SCHEMA}\nplan={plan.plan_id}\nresult={result}\nsteps={steps or 'none'}")
+
+def plan_claimed_marker(plan: Plan) -> str:
+    return (f"{PLAN_RUNNER_SCHEMA} CLAIMED\njob={plan.plan_id}\nplan={plan.plan_id}\n"
+            f"runner={plan.runner_id}\nsteps={','.join(s.step_id for s in plan.steps)}")
+
+def finish_plan(client: GitHubClient, state: State, config: Config, plan: Plan, comment_id: str,
+                terminal_state: str, stop_class: str | None, reason: str,
+                action_required: bool = False) -> str:
+    result = ("action_required" if action_required
+              else "completed" if terminal_state == "COMPLETED" else "stopped")
+    steps = state.plan_step_summaries(plan.plan_id)
+    body = plan_lifecycle(plan, terminal_state, stop_class, reason, steps, action_required, result)
+    state.finish_plan(plan.plan_id, result, steps)
+    state.queue_terminal(comment_id, plan.plan_id, body,
+                         "succeeded" if terminal_state == "COMPLETED" else "blocked",
+                         terminal_state, config)
+    delivered = drain_terminal_outbox(client, state, config)
+    return f"PLAN_{terminal_state} {plan.plan_id}" if delivered else f"WAKE_PENDING {plan.plan_id}"
+
+def advance_plans(client: GitHubClient, state: State, config: Config) -> str | None:
+    """Follow the oldest running plan by table lookup until it executes, waits or ends.
+
+    Deterministic: the token a step produced (`ok`, a stop class, `verdict.x`)
+    is looked up in that step's edge table; `*` is the declared default.  A
+    FAIL_CLOSED class ignores the table and ends the plan with an owner
+    decision required.  Returns None when no plan is running.
+    """
+    row = state.running_plan()
+    if row is None:
+        return None
+    plan_id, comment_id, body, current = row
+    try:
+        plan = Plan.from_comment(body, config)
+    except ValidationError as exc:
+        return finish_plan(client, state, config, _shell_plan(plan_id, config), comment_id,
+                           "FAILED", "PROTOCOL_FAILURE", f"plan no longer parses: {exc}")
+    for _ in range(PLAN_MAX_STEPS + 1):
+        step = plan.step(current)
+        record = state.plan_step(plan_id, current)
+        if record is None:
+            try:
+                sha = resolve_step_target(config, state, plan, step)
+                job, synthetic = derive_step_job(plan_id, plan.repository, plan.queue_issue,
+                                                 plan.runner_id, step, config, sha)
+            except ValidationError as exc:
+                return finish_plan(client, state, config, plan, comment_id, "FAILED",
+                                   "PROTOCOL_FAILURE", f"step {current}: {exc}")
+            except RunnerError as exc:
+                return finish_plan(client, state, config, plan, comment_id, "FAILED",
+                                   "ENVIRONMENT_FAILURE", f"step {current}: {exc}")
+            claim_id = step_claim_id(plan_id, current)
+            recovery = lifecycle(job, "FAILED",
+                                 "runner stop condition: ambiguous execution recovered after restart")
+            try:
+                state.claim(claim_id, job.job_id, comment_hash(synthetic), recovery)
+            except ValidationError as exc:
+                return finish_plan(client, state, config, plan, comment_id, "FAILED",
+                                   "PROTOCOL_FAILURE", f"step {current} cannot be claimed: {exc}")
+            state.start_plan_step(plan_id, current, job.job_id, sha)
+            outcome = run_job_to_terminal(client, state, config, job, claim_id)
+            if outcome.startswith("WAKE_PENDING"):
+                return f"PLAN_WAITING {plan_id}"
+            continue  # the terminal landed; evaluate the edge in this same tick
+        _job_id, status, token, _sha = record
+        if status != "terminal" or not token:
+            return f"PLAN_WAITING {plan_id}"
+        stop_class = token if token in STOP_CLASS_POLICY else None
+        if stop_class and STOP_CLASS_POLICY[stop_class] == "FAIL_CLOSED":
+            return finish_plan(client, state, config, plan, comment_id, "FAILED", stop_class,
+                               f"step {current} stopped with {token}; owner decision required",
+                               action_required=True)
+        destination = step.on.get(token, step.on["*"])
+        if destination == "stop":
+            completed = token == "ok" or token.startswith("verdict.")
+            return finish_plan(client, state, config, plan, comment_id,
+                               "COMPLETED" if completed else "FAILED", stop_class,
+                               f"stopped after {current}={token}")
+        if plan.index(destination) <= plan.index(current):
+            return finish_plan(client, state, config, plan, comment_id, "FAILED",
+                               "PROTOCOL_FAILURE", "plan edge points backwards")
+        state.set_plan_current_step(plan_id, destination)
+        current = destination
+    return finish_plan(client, state, config, plan, comment_id, "FAILED", "PROTOCOL_FAILURE",
+                       "plan exceeded its step budget")
+
+def _shell_plan(plan_id: str, config: Config) -> Plan:
+    """A minimal Plan identity for closing a plan whose stored body no longer parses."""
+    return Plan(plan_id=plan_id, repository=config.repository, queue_issue=config.queue_issue,
+                runner_id=config.runner_id, authorization_ref="unknown", max_steps=1, steps=())
+
+def start_plan(client: GitHubClient, state: State, config: Config, plan: Plan,
+               comment_id: str, updated_at: Any, body: str) -> str:
+    try:
+        claimed = state.claim_plan(comment_id, plan.plan_id, comment_hash(body), body,
+                                   plan.steps[0].step_id)
+    except ValidationError as claim_error:
+        envelope = RejectedEnvelope(plan.plan_id, config.runner_id, PLAN_SCHEMA)
+        state.record_rejected_comment(comment_id, plan.plan_id, str(claim_error),
+                                      rejection_lifecycle(envelope, f"cannot claim: {claim_error}"))
+        state.advance_high_water(comment_id, updated_at)
+        drain_rejection_outbox(client, state)
+        return f"REJECTED {plan.plan_id}"
+    state.advance_high_water(comment_id, updated_at)
+    if not claimed:
+        return "NO_JOB"
+    try:
+        client.post(plan_claimed_marker(plan))
+    except (RunnerError, UnsafeOutputError) as exc:
+        print(f"runner warning: CLAIMED marker not posted for plan {plan.plan_id}: {exc}",
+              file=sys.stderr)
+    return advance_plans(client, state, config) or f"PLAN_WAITING {plan.plan_id}"
+
+def run_job_to_terminal(client: GitHubClient, state: State, config: Config,
+                        job: Job | OperationJob, comment_id: str) -> str:
+    """Execute one claimed job or operation through to its durable terminal record.
+
+    `comment_id` is the claim key: a queue comment id for Commander-posted
+    jobs, or `plan:<plan_id>:<step_id>` for a step the plan executor derived.
+    Every safety boundary (exact SHA, worktree isolation, profile, nonce,
+    quality gate, evidence bounds) lives in here and is therefore identical
+    for both.
+    """
+    try:
+        worktree = prepare_worktree(config, job)
+        state.set_status(comment_id, "running")
+        if isinstance(job, OperationJob):
+            operation_attempt = execute_operation(job, config, worktree)
+            result = operation_attempt.result
+            if result:
+                # Persistence failure downgrades the outcome: an
+                # operation whose evidence we could not store must
+                # never be published as COMPLETED.
+                try:
+                    store_raw_output(config.state_dir, job.job_id, result.output)
+                except (OSError, ValidationError):
+                    operation_attempt = dataclasses.replace(
+                        operation_attempt, output=None,
+                        error_category="PERSISTENCE")
+            # A blocked operation has no error_category (it ran fine) but does
+            # have a reason; publish that reason's stop class, not NONE.
+            operation_stop_class = (stop_class_for(operation_attempt.error_category)
+                                    or operation_block_stop_class(operation_attempt.output))
+            operation_policy = (STOP_CLASS_POLICY.get(operation_stop_class)
+                                if operation_stop_class else None)
+            state.record_attempt(
+                job.job_id, 1, None, None, operation_attempt.error_category,
+                operation_stop_class)
+            if operation_attempt.error_category == "TIMEOUT":
+                state_name, internal_state = "TIMED_OUT", "blocked"
+            elif operation_attempt.error_category:
+                state_name, internal_state = "FAILED", "blocked"
+            elif operation_attempt.output and operation_attempt.output.status == "blocked":
+                state_name, internal_state = "FAILED", "blocked"
+            else:
+                state_name, internal_state = "COMPLETED", "succeeded"
+            if operation_attempt.output:
+                evidence = (operation_attempt.output.summary + "\n"
+                            + "\n".join(operation_attempt.output.evidence))
+            else:
+                evidence = f"operation_error={operation_attempt.error_category}"
+            duration = result.duration_seconds if result else 0.0
+            exit_code = result.returncode if result else -1
+            detail = (f"operation={job.operation_id}; attempts=1; "
+                      f"attempt_id={attempt_id_for(job.job_id, 1)}; "
+                      f"stop_class={operation_stop_class or 'NONE'}; "
+                      f"policy={operation_policy or 'NONE'}; "
+                      f"exit={exit_code}; duration={duration:.1f}s; "
+                      f"{redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)}")
+        else:
+            attempt, attempts = execute_with_failover(job, config, worktree)
+            result = attempt.result
+            delivered_sha = ""
+            if attempt.error_category == "TIMEOUT":
+                state_name, internal_state = "TIMED_OUT", "blocked"
+            elif attempt.error_category == "RUNTIME":
+                state_name, internal_state = "FAILED", "failed"
+            elif attempt.error_category:
+                state_name, internal_state = "FAILED", "blocked"
+            elif attempt.output and attempt.output.status == "blocked":
+                state_name, internal_state = "FAILED", "blocked"
+            else:
+                if job.profile == "repo_write_test":
+                    run_quality_gate(config, job, worktree)
+                elif job.profile == "repo_delivery":
+                    delivered_sha = deliver_worktree(config, job, worktree)
+                state_name, internal_state = "COMPLETED", "succeeded"
+            ordinal = max(1, len(attempts))
+            for index, record in enumerate(attempts, start=1):
+                state.record_attempt(
+                    job.job_id, index, record.worker, record.model,
+                    record.error_category, stop_class_for(record.error_category))
+            artifact_note = ""
+            if attempt.output:
+                # The full report is kept locally; the Issue carries
+                # a bounded excerpt plus the artifact digest so the
+                # record stays complete without being unbounded.
+                with contextlib.suppress(OSError, ValidationError, UnsafeOutputError):
+                    artifact, digest = store_artifact(
+                        config.state_dir, job.job_id, ordinal, attempt.output,
+                      config.artifact_retention_days)
+                    artifact_note = (f"\nartifact={artifact.name}"
+                                     f"\nartifact_sha256={digest}"
+                                     f"\nsummary_chars={attempt.output.summary_chars}"
+                                     f"\nsummary_truncated={str(attempt.output.truncated).lower()}")
+                evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
+                if attempt.output.verdict is not None:
+                    evidence += "\n" + VERDICT_SCHEMA + " " + attempt.output.verdict.as_record()
+            else:
+                evidence = f"provider_error={attempt.error_category}"
+                if attempt.error_category in {"OUTPUT_VALIDATION", "OUTPUT_LIMIT"}:
+                    # Recoverable without spending provider quota.
+                    evidence += ("\nraw output persisted; recover locally with: "
+                                 f"commander_runner.py renormalize --job {job.job_id}")
+            evidence = redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)
+            if delivered_sha:
+                evidence += f"\ndelivered_sha={delivered_sha}"
+            duration = result.duration_seconds if result else 0.0
+            exit_code = result.returncode if result else -1
+            stop_class = stop_class_for(attempt.error_category)
+            detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
+                      f"attempt_id={attempt_id_for(job.job_id, ordinal)}; "
+                      f"stop_class={stop_class or 'NONE'}; "
+                      f"policy={policy_for(attempt.error_category) or 'NONE'}; "
+                      f"quality_gate={job.quality_gate}; "
+                      f"exit={exit_code}; duration={duration:.1f}s; {evidence}{artifact_note}")
+    except QualityGateFailure as exc:
+        stop_class = stop_class_for(exc.category)
+        policy = policy_for(exc.category)
+        internal_state = "failed" if policy == "REPORT_AND_STOP" else "blocked"
+        state_name = "FAILED"
+        detail = (f"quality_gate={job.quality_gate}; gate_step={exc.ordinal}; "
+                  f"gate_category={exc.category}; stop_class={stop_class}; "
+                  f"policy={policy}; {exc}; "
+                  f"gate_output={job.job_id}.gate-{exc.ordinal}.log\n"
+                  f"{redact(exc.tail, 1500)}")
+    except RunnerError as exc:
+        state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
+    delivered = post_terminal_lifecycle(
+        client, job, state_name, detail, state, comment_id, internal_state)
+    return (f"{state_name} {job.job_id}" if delivered
+            else f"WAKE_PENDING {job.job_id}")
 
 def run_once(config: Config, dry_run: bool = False) -> str:
     config.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -3366,6 +4437,12 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                 return "WAKE_PENDING"
             if not drain_rejection_outbox(client, state):
                 return "WAKE_PENDING"
+            drain_notify_outbox(state, config)
+            refresh_user_status(client, state, config)
+            if not dry_run:
+                followed = advance_plans(client, state, config)
+                if followed is not None and not followed.startswith("PLAN_WAITING"):
+                    return followed
             high_water = state.comment_high_water()
             if high_water == 0 and state.claims_count() == 0 \
                     and queue_has_terminal_history(client, config):
@@ -3395,9 +4472,20 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                       if not dry_run:
                           state.advance_high_water(comment_id, updated_at)
                       continue
+                  ack = ACK_RE.fullmatch(body)
+                  if ack:
+                      # Owner acknowledgement of an open USER_ACTION_REQUIRED.
+                      # It resolves the decision and nothing else; the follow-up
+                      # (if any) is a new job or plan the front door posts.
+                      if not dry_run:
+                          state.resolve_user_action(ack.group(1), comment_id)
+                          state.advance_high_water(comment_id, updated_at)
+                      continue
                   try:
-                      if OPERATION_COMMENT_RE.fullmatch(body):
-                          job: Job | OperationJob = OperationJob.from_comment(body, config)
+                      if PLAN_COMMENT_RE.fullmatch(body):
+                          job: Job | OperationJob | Plan = Plan.from_comment(body, config)
+                      elif OPERATION_COMMENT_RE.fullmatch(body):
+                          job = OperationJob.from_comment(body, config)
                       else:
                           job = Job.from_comment(body, config)
                   except ValidationError as exc:
@@ -3434,6 +4522,10 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                       return (f"REJECTED {envelope.job_id}" if delivered
                               else f"WAKE_PENDING {envelope.job_id}")
                   digest = comment_hash(body)
+                  if isinstance(job, Plan):
+                      if dry_run:
+                          return f"VALIDATED {job.plan_id}"
+                      return start_plan(client, state, config, job, comment_id, updated_at, body)
                   if dry_run:
                       verify_target(config, job)
                       return f"VALIDATED {job.job_id}"
@@ -3492,119 +4584,7 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                   except (RunnerError, UnsafeOutputError) as exc:
                       print(f"runner warning: CLAIMED marker not posted for {job.job_id}: {exc}",
                             file=sys.stderr)
-                  try:
-                      worktree = prepare_worktree(config, job)
-                      state.set_status(comment_id, "running")
-                      if isinstance(job, OperationJob):
-                          operation_attempt = execute_operation(job, config, worktree)
-                          result = operation_attempt.result
-                          if result:
-                              # Persistence failure downgrades the outcome: an
-                              # operation whose evidence we could not store must
-                              # never be published as COMPLETED.
-                              try:
-                                  store_raw_output(config.state_dir, job.job_id, result.output)
-                              except (OSError, ValidationError):
-                                  operation_attempt = dataclasses.replace(
-                                      operation_attempt, output=None,
-                                      error_category="PERSISTENCE")
-                          state.record_attempt(
-                              job.job_id, 1, None, None, operation_attempt.error_category,
-                              stop_class_for(operation_attempt.error_category))
-                          if operation_attempt.error_category == "TIMEOUT":
-                              state_name, internal_state = "TIMED_OUT", "blocked"
-                          elif operation_attempt.error_category:
-                              state_name, internal_state = "FAILED", "blocked"
-                          elif operation_attempt.output and operation_attempt.output.status == "blocked":
-                              state_name, internal_state = "FAILED", "blocked"
-                          else:
-                              state_name, internal_state = "COMPLETED", "succeeded"
-                          if operation_attempt.output:
-                              evidence = (operation_attempt.output.summary + "\n"
-                                          + "\n".join(operation_attempt.output.evidence))
-                          else:
-                              evidence = f"operation_error={operation_attempt.error_category}"
-                          duration = result.duration_seconds if result else 0.0
-                          exit_code = result.returncode if result else -1
-                          detail = (f"operation={job.operation_id}; attempts=1; "
-                                    f"attempt_id={attempt_id_for(job.job_id, 1)}; "
-                                    f"stop_class={stop_class_for(operation_attempt.error_category) or 'NONE'}; "
-                                    f"policy={policy_for(operation_attempt.error_category) or 'NONE'}; "
-                                    f"exit={exit_code}; duration={duration:.1f}s; "
-                                    f"{redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)}")
-                      else:
-                          attempt, attempts = execute_with_failover(job, config, worktree)
-                          result = attempt.result
-                          delivered_sha = ""
-                          if attempt.error_category == "TIMEOUT":
-                              state_name, internal_state = "TIMED_OUT", "blocked"
-                          elif attempt.error_category == "RUNTIME":
-                              state_name, internal_state = "FAILED", "failed"
-                          elif attempt.error_category:
-                              state_name, internal_state = "FAILED", "blocked"
-                          elif attempt.output and attempt.output.status == "blocked":
-                              state_name, internal_state = "FAILED", "blocked"
-                          else:
-                              if job.profile == "repo_write_test":
-                                  run_quality_gate(config, job, worktree)
-                              elif job.profile == "repo_delivery":
-                                  delivered_sha = deliver_worktree(config, job, worktree)
-                              state_name, internal_state = "COMPLETED", "succeeded"
-                          ordinal = max(1, len(attempts))
-                          for index, record in enumerate(attempts, start=1):
-                              state.record_attempt(
-                                  job.job_id, index, record.worker, record.model,
-                                  record.error_category, stop_class_for(record.error_category))
-                          artifact_note = ""
-                          if attempt.output:
-                              # The full report is kept locally; the Issue carries
-                              # a bounded excerpt plus the artifact digest so the
-                              # record stays complete without being unbounded.
-                              with contextlib.suppress(OSError, ValidationError, UnsafeOutputError):
-                                  artifact, digest = store_artifact(
-                                      config.state_dir, job.job_id, ordinal, attempt.output,
-                                    config.artifact_retention_days)
-                                  artifact_note = (f"\nartifact={artifact.name}"
-                                                   f"\nartifact_sha256={digest}"
-                                                   f"\nsummary_chars={attempt.output.summary_chars}"
-                                                   f"\nsummary_truncated={str(attempt.output.truncated).lower()}")
-                              evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
-                              if attempt.output.verdict is not None:
-                                  evidence += "\n" + VERDICT_SCHEMA + " " + attempt.output.verdict.as_record()
-                          else:
-                              evidence = f"provider_error={attempt.error_category}"
-                              if attempt.error_category in {"OUTPUT_VALIDATION", "OUTPUT_LIMIT"}:
-                                  # Recoverable without spending provider quota.
-                                  evidence += ("\nraw output persisted; recover locally with: "
-                                               f"commander_runner.py renormalize --job {job.job_id}")
-                          evidence = redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)
-                          if delivered_sha:
-                              evidence += f"\ndelivered_sha={delivered_sha}"
-                          duration = result.duration_seconds if result else 0.0
-                          exit_code = result.returncode if result else -1
-                          stop_class = stop_class_for(attempt.error_category)
-                          detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
-                                    f"attempt_id={attempt_id_for(job.job_id, ordinal)}; "
-                                    f"stop_class={stop_class or 'NONE'}; "
-                                    f"policy={policy_for(attempt.error_category) or 'NONE'}; "
-                                    f"quality_gate={job.quality_gate}; "
-                                    f"exit={exit_code}; duration={duration:.1f}s; {evidence}{artifact_note}")
-                  except QualityGateFailure as exc:
-                      stop_class = stop_class_for(exc.category)
-                      policy = policy_for(exc.category)
-                      internal_state = "failed" if policy == "REPORT_AND_STOP" else "blocked"
-                      state_name = "FAILED"
-                      detail = (f"quality_gate={job.quality_gate}; gate_step={exc.ordinal}; "
-                                f"gate_category={exc.category}; stop_class={stop_class}; "
-                                f"policy={policy}; {exc}; "
-                                f"gate_output={job.job_id}.gate-{exc.ordinal}.log\n"
-                                f"{redact(exc.tail, 1500)}")
-                  except RunnerError as exc:
-                      state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
-                  delivered = post_terminal_lifecycle(
-                      client, job, state_name, detail, state, comment_id, internal_state)
-                  return (f"{state_name} {job.job_id}" if delivered
-                          else f"WAKE_PENDING {job.job_id}")
+                  return run_job_to_terminal(client, state, config, job, comment_id)
               if len(comments) < QUEUE_PAGE_SIZE:
                   break
             state.note_successful_poll()
@@ -3620,9 +4600,7 @@ def command_install(args: argparse.Namespace) -> int:
     runtime_script, digest = install_stable_runtime(config, Path(__file__).resolve())
     # If the transactional installer owns runtime_dir, launchd must follow its
     # `current` pointer, not a flat file that later upgrades will not touch.
-    current = config.runtime_dir / "current"
-    if current.is_symlink():
-        runtime_script = current / "commander_runner.py"
+    runtime_script = launchagent_entrypoint(config)
     template = {"Label": "com.landlordeasy.commander-runner", "RunAtLoad": True, "KeepAlive": True}
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(make_launchagent(template, config.operational_executables["python"],
@@ -3637,13 +4615,13 @@ def command_relink(config: Config, confirm: bool) -> int:
     stop/start, which stays an explicit operator action.
     """
     destination = launchagent_path(); verify_owned_launchagent(destination)
-    target = runtime_root(config) / "commander_runner.py"
+    target = launchagent_entrypoint(config)
     if not target.is_file():
         raise RunnerError("active runtime entrypoint is missing; install or upgrade first")
     health = launchagent_health(config)
     print(json.dumps(health, sort_keys=True))
-    if health["consistent"]:
-        print("LaunchAgent already points at the active runtime."); return 0
+    if health["consistent"] and health.get("follows_pointer"):
+        print("LaunchAgent already follows the current pointer."); return 0
     if not confirm: print("Not relinked: pass --confirm after review."); return 0
     data = plistlib.loads(destination.read_bytes())
     arguments = list(data.get("ProgramArguments") or [])
@@ -3688,6 +4666,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     recover.add_argument("--job", required=True, help="job UUID to recover")
     recover.add_argument("--allow-legacy-without-nonce", action="store_true",
                          help="accept a response that predates per-attempt nonces (audited exception)")
+    notify_test = subs.add_parser(
+        "notify-test", help="queue one test notification through the configured channel")
+    notify_test.add_argument("--confirm", action="store_true")
     subs.add_parser("serve")
     subs.add_parser("start"); subs.add_parser("stop")
     relink = subs.add_parser("relink-launchagent",
@@ -3719,6 +4700,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 finally:
                     state.close()
             return 0
+        if args.command == "notify-test":
+            if not args.confirm:
+                print(json.dumps(notify_health(config), sort_keys=True)); return 0
+            with ProcessLock(config.state_dir):
+                state = State(config.state_dir)
+                try:
+                    state.enqueue_notification(f"test:{int(time.time())}", "test",
+                                               f"[Commander] test notification from {config.runner_id}")
+                    ok = drain_notify_outbox(state, config)
+                finally:
+                    state.close()
+            print("NOTIFY_SENT" if ok else "NOTIFY_PENDING"); return 0 if ok else 2
         if args.command == "renormalize":
             print(json.dumps(renormalize_job(config.state_dir, args.job,
                                              args.allow_legacy_without_nonce), sort_keys=True))

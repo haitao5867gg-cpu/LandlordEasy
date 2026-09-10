@@ -54,6 +54,11 @@ candidate ends up with no CI at all.
 Open a new Issue from `templates/.github/ISSUE_TEMPLATE/commander-job-queue.md`,
 from the **Commander** account. Note its number. Do not close it.
 
+Recommended: open a second, plainly titled Issue ("Commander evidence log —
+do not close") and put its number in `evidence_issue`. The queue then holds
+only intent and stays fast to scan; every runner record goes to the evidence
+Issue, including the pinned `CURRENT_USER_STATUS` the Commander reads first.
+
 ## 4. Write the local config
 
 ```bash
@@ -174,6 +179,7 @@ decision.
 pck.py doctor --config <path>                          # health
 commander_runner.py --config <path> status             # queue and lease state
 commander_runner.py --config <path> renormalize --job <uuid>   # free recovery
+commander_runner.py --config <path> notify-test --confirm     # one test iMessage
 pck.py upgrade  --config <path>                        # backs up first
 pck.py rollback --config <path>                        # restore previous
 ```
