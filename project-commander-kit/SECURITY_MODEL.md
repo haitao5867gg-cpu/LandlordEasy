@@ -122,6 +122,45 @@ trail still names one exact commit. `main`, `dev`, `master` and `HEAD` are
 refused outright, and branch names are validated tightly enough that they cannot
 escape into a different ref.
 
+## The token is the boundary, not `_api`
+
+`GitHubClient._api` narrows what **this program asks for**: queue-Issue
+comments, single-comment reads bound to the queue Issue, the wake PR's
+comments (POST-only) and state (GET), and read-only `api user`. It cannot
+narrow what the **credential permits**, and `git push` for delivery branches
+uses the same credential outside `_api` entirely. Treat `_api` as a
+convention that keeps the code honest, and the Executor token's scope as the
+actual security boundary.
+
+`doctor` reports the token's classic scopes and flags over-broad ones
+(`workflow`, `delete_repo`, `admin:*`, `write:packages`). Narrowing the
+credential is an owner action: use a fine-grained PAT limited to this
+repository with Issues read/write and Contents read/write, nothing else.
+
+## The host is inside the trust boundary
+
+`state_dir` holds raw provider output (7-day retention) and full report
+artifacts (`artifact_retention_days`, default 30). Both quote private source.
+This framework provides **no encryption at rest**. The operator must enable
+full-disk encryption (FileVault on macOS), exclude `state_dir` from Time
+Machine, iCloud Drive and any other backup or sync tool, and treat the Runner
+host as dedicated.
+
+## The Commander ledger is not the Runner's
+
+Any Commander-side ledger (`COMMANDER_ACTION_*`, `USER_UPDATE_V1`,
+`CURRENT_USER_STATUS`) lives on a plane the Runner **never reads or writes**.
+**Do not widen the `_api` allowlist to let the Runner see it.** The ledger is
+the Commander's problem by design.
+
+## Response nonce
+
+Every prompt carries a per-attempt nonce (the derived `attempt_id`). The parser
+ignores any contract-shaped JSON that does not echo it, so a file containing a
+fake answer cannot become the terminal record. Offline re-normalization of
+records that predate nonces requires `--allow-legacy-without-nonce` and reports
+`nonce_verified: false`.
+
 ## Residual risks
 
 - **Local host compromise.** The Runner holds an Executor token and can push
@@ -129,8 +168,13 @@ escape into a different ref.
   encryption and a least-privilege token.
 - **A malicious Commander account** can dispatch any job the owner has enabled.
   It still cannot exceed the enabled profiles, gates, allowlists, or operations.
-- **Provider CLI compromise** could write inside the worktree. Delivery scanning
-  and the two-pass tree comparison bound the impact; nothing is pushed to a
-  protected branch.
+- **Provider CLI compromise, or a provider that ignores its tool restrictions,
+  can write anywhere the runner's uid can write.** Providers are *not*
+  sandboxed by this framework; tool allowlists are passed to the CLI and the
+  CLI is trusted to honour them. Earlier text said "inside the worktree" —
+  that was not true. What bounds the impact is downstream: delivery scanning,
+  the two-pass tree comparison, the UUID-derived branch, and the fact that
+  the runner's uid holds no production credential. Treat the Runner host as a
+  dedicated machine for exactly this reason.
 - **Redaction is pattern-based** and cannot recognise a novel secret format.
   Delivery path allowlists and the sensitive-path scan are the backstop.

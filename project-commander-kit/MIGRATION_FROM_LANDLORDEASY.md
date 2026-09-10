@@ -49,6 +49,29 @@ Roll back at any time:
 python3 project-commander-kit/scripts/pck.py rollback --config <live config>
 ```
 
+### 1b. Before the FIRST transactional upgrade on a flat-layout host
+
+The live host still runs the flat layout and its LaunchAgent points at
+`runtime_dir/commander_runner.py`. `pck.py upgrade` writes `versions/` and moves
+`current`, **but launchd keeps executing the flat file** — the upgrade reports
+success and changes nothing that runs. `doctor` now fails on this
+(`launchagent.consistent: false`). Sequence:
+
+```bash
+pck.py upgrade --config <live>                                     # stages versions/ + current
+commander_runner.py --config <live> relink-launchagent --confirm   # plist -> current/
+commander_runner.py --config <live> stop && … start
+commander_runner.py --config <live> doctor                         # launchagent.consistent: true
+```
+
+The comment high-water mark seeds itself at the last comment the old runner
+claimed; no GitHub call, no replay, no late REJECTEDs for historical comments.
+If the state directory was ever lost, the runner refuses to serve until
+`rebuild-claims --confirm` re-seeds claims from the Issue's terminal history.
+
+Operation definitions may now name the helper at `runtime_dir/current/…`; the
+flat path stays valid for hosts that have not migrated.
+
 ### 2. Config additions (all optional, all default-off)
 
 ```json

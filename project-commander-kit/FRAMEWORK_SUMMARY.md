@@ -160,6 +160,24 @@ Stated plainly, because earlier drafts of these documents implied more.
   not available locally the result is *unverified*, not *verified*.
 - **Redaction is pattern-based.** It cannot recognise a novel secret format;
   delivery path allowlists and the sensitive-path scan are the backstop.
+- **Providers are not sandboxed.** They can write anywhere the runner's uid
+  can. Tool allowlists are passed to the CLI, which is trusted to honour them.
+- **`_api` is a convention; the token is the boundary.** `git push` uses the
+  same credential outside `_api`. Narrow the PAT.
+- **`COMMANDER_VERDICT_V1` is defined and recorded, not consumed.** No plan
+  executor exists yet (PR B).
+- **The wake bridge still exists and still writes.** It stops only after a
+  `COMMANDER_PLAN_V1` canary passes (PR B). The Queue/Evidence Issue split has
+  not happened yet either.
+- **"Raw output" is a decoded, size-capped capture**, not the provider's exact
+  bytes: non-UTF-8 or output beyond `output_limit_bytes` is lost before
+  persistence. The persist-before-parse ORDER holds; the word "raw" overstates.
+- **Availability classification is a heuristic** (last three lines), bounded by
+  the reset window and the paid attempt ceiling, not proven.
+- **No worktree/branch garbage collection, no cancel, no heartbeat post.**
+  Worktrees and `job-*` branches accumulate; a claimed job runs to its timeout;
+  liveness is visible only to `doctor`, not to the Commander. All three are
+  PR B/PR C items.
 - **Cost ceilings depend on providers reporting cost.** A provider that never
   prints a price contributes 0 to the spend ledger; the per-job paid attempt
   ceiling is the real bound there.

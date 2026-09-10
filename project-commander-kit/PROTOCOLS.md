@@ -74,15 +74,19 @@ owner-approved branch.
 The provider must return exactly one JSON object:
 
 ```json
-{"status": "ok", "summary": "…", "evidence": ["…"], "usage": "optional"}
+{"status": "ok", "summary": "…", "evidence": ["…"], "usage": "optional",
+ "nonce": "<the attempt nonce stated in the prompt, copied verbatim>",
+ "verdict": { "…optional COMMANDER_VERDICT_V1, see below…" }}
 ```
 
 | Field | Bound |
 |---|---|
 | `status` | `ok` or `blocked` |
-| `summary` | non-empty, ≤ 20 000 chars |
+| `summary` | non-empty; **length never rejects**: > 4 000 chars is excerpted for the Issue and kept whole in the artifact; > 200 000 is refused as pathological |
 | `evidence` | list of ≤ 200 non-empty strings, each ≤ 4 000 chars |
 | `usage` | optional, ≤ 200 chars |
+| `nonce` | **required on the live path**; any contract-shaped object without this attempt's nonce is ignored |
+| `verdict` | optional; if present must be a valid `COMMANDER_VERDICT_V1` or the whole answer is invalid |
 
 The parser is tolerant about **packaging** and strict about **content**: the
 object may be bare, in a ```` ```json ```` fence, embedded in prose, or wrapped
@@ -96,7 +100,31 @@ parsing; recover with:
 python3 commander_runner.py --config <config> renormalize --job <uuid>
 ```
 
-which re-parses locally, writes the artifact, and reports `provider_calls: 0`.
+which re-parses locally, writes the artifact for the recovered attempt, and
+reports `provider_calls: 0`. Records that predate nonces need the explicit
+`--allow-legacy-without-nonce` switch and report `nonce_verified: false`.
+
+## `COMMANDER_VERDICT_V1` — structured review outcome (defined, not yet consumed)
+
+```json
+{"verdict": "accept|revise|reject|blocked", "p0": 0, "p1": 2,
+ "code_changed": true, "exact_sha_verified": "<40 hex or null>",
+ "recommended_transition": "<plan step id or stop>"}
+```
+
+Parsed when present, refused when malformed, copied into the terminal record.
+**Nothing acts on it in this release.** PR B's plan executor will read this
+shape to choose the next step; the Runner never derives an action from natural
+language.
+
+## Operator commands
+
+| Command | Purpose |
+|---|---|
+| `renormalize --job <uuid> [--allow-legacy-without-nonce]` | re-parse persisted raw output; zero provider calls |
+| `rebuild-claims --confirm` | after local state loss, re-seed claims from the queue's Executor terminal records so nothing replays |
+| `relink-launchagent --confirm` | point launchd at `runtime_dir/current/…` after the first transactional install (backs up the plist) |
+| `doctor` | last poll and its freshness, comment high-water mark, queue readability, active job/attempt, outbox depths, LaunchAgent consistency, runtime provenance, token scopes |
 
 ## Terminal records (posted by the Executor)
 
@@ -135,6 +163,9 @@ is only a nudge to go look.
 
 ## Invariants
 
+0. A comment addressed to this runner that cannot be claimed (re-posted job
+   UUID, edited comment) or that carries a newer protocol version becomes a
+   `REJECTED` record, never an exception and never silence.
 1. One job UUID → at most one terminal record, forever.
 2. Retries create new `attempt_id`s; the job UUID is never reused as an
    execution identity.
@@ -143,3 +174,8 @@ is only a nudge to go look.
 4. An edited queue comment invalidates its claim and yields `REJECTED`.
 5. Authority lives in owner config. A comment can only select from what is
    already enabled.
+6. The queue cursor is a monotonic comment-id high-water mark. Every comment
+   is examined at most once; an empty local state facing a queue with terminal
+   history refuses to serve until `rebuild-claims` runs.
+7. Paid attempts are charged on dispatch, per reset window, whether or not
+   they succeed or report a price.

@@ -5,73 +5,317 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "repository", "queue_issue", "commander_login", "executor_login", "runner_id",
-    "canonical_repo", "worktree_root", "state_dir", "origin_url", "runtime_dir",
-    "operational_executables", "enabled_providers", "enabled_profiles",
-    "enabled_quality_gates", "quality_gates", "poll_seconds", "lease_seconds",
-    "executable_paths", "provider_failover"
+    "repository",
+    "queue_issue",
+    "commander_login",
+    "executor_login",
+    "runner_id",
+    "canonical_repo",
+    "worktree_root",
+    "state_dir",
+    "origin_url",
+    "runtime_dir",
+    "operational_executables",
+    "enabled_providers",
+    "enabled_profiles",
+    "enabled_quality_gates",
+    "quality_gates",
+    "poll_seconds",
+    "lease_seconds",
+    "executable_paths",
+    "provider_failover"
   ],
   "properties": {
-    "repository": {"type": "string", "pattern": "^[\\w.-]+/[\\w.-]+$"},
-    "queue_issue": {"type": "integer", "minimum": 1, "description": "The single Issue used as the job queue."},
-    "wake_pull_request": {"type": ["integer", "null"], "minimum": 1, "description": "Optional PR for advisory wake notices. Must differ from queue_issue. Null disables the bridge."},
-    "commander_login": {"type": "string", "description": "Dispatcher GitHub login. MUST differ from executor_login."},
-    "executor_login": {"type": "string", "description": "The login the runner authenticates as."},
-    "runner_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$"},
-    "canonical_repo": {"type": "string", "description": "Absolute path to the canonical clone."},
-    "worktree_root": {"type": "string", "description": "Absolute path; job worktrees are created beneath it and never escape it."},
-    "state_dir": {"type": "string", "description": "Absolute path for state.sqlite3, raw-output/ and artifacts/ (mode 0700)."},
-    "runtime_dir": {"type": "string", "description": "Absolute path for the installed runtime. MUST be outside canonical_repo and worktree_root."},
-    "origin_url": {"type": "string"},
-    "poll_seconds": {"type": "integer", "minimum": 15, "maximum": 3600},
-    "lease_seconds": {"type": "integer", "minimum": 30, "maximum": 900},
-    "provider_failover": {"type": "boolean", "description": "Allow routing to a different provider on a transient failure."},
-    "max_attempts": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3, "description": "Bounded attempt budget per job. Protocol failures never consume a second attempt."},
-    "paid_overflow_providers": {"type": "array", "items": {"enum": ["kiro", "copilot", "claude"]}, "uniqueItems": true, "description": "Providers usable on PAID capacity once every free window is exhausted."},
-    "paid_overflow_authorized": {"type": "boolean", "default": false, "description": "Owner authorization for paid overflow. Inert without paid_overflow_providers."},
+    "repository": {
+      "type": "string",
+      "pattern": "^[\\w.-]+/[\\w.-]+$"
+    },
+    "queue_issue": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The single Issue used as the job queue."
+    },
+    "wake_pull_request": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "description": "Optional PR for advisory wake notices. Must differ from queue_issue. Null disables the bridge."
+    },
+    "commander_login": {
+      "type": "string",
+      "description": "Dispatcher GitHub login. MUST differ from executor_login."
+    },
+    "executor_login": {
+      "type": "string",
+      "description": "The login the runner authenticates as."
+    },
+    "runner_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$"
+    },
+    "canonical_repo": {
+      "type": "string",
+      "description": "Absolute path to the canonical clone."
+    },
+    "worktree_root": {
+      "type": "string",
+      "description": "Absolute path; job worktrees are created beneath it and never escape it."
+    },
+    "state_dir": {
+      "type": "string",
+      "description": "Absolute path for state.sqlite3, raw-output/ and artifacts/ (mode 0700)."
+    },
+    "runtime_dir": {
+      "type": "string",
+      "description": "Absolute path for the installed runtime. MUST be outside canonical_repo and worktree_root."
+    },
+    "origin_url": {
+      "type": "string"
+    },
+    "poll_seconds": {
+      "type": "integer",
+      "minimum": 15,
+      "maximum": 3600
+    },
+    "lease_seconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 900
+    },
+    "provider_failover": {
+      "type": "boolean",
+      "description": "Allow routing to a different provider on a transient failure."
+    },
+    "max_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "default": 3,
+      "description": "Bounded attempt budget per job. Protocol failures never consume a second attempt."
+    },
+    "paid_overflow_providers": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "kiro",
+          "copilot",
+          "claude"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Providers usable on PAID capacity once every free window is exhausted."
+    },
+    "paid_overflow_authorized": {
+      "type": "boolean",
+      "default": false,
+      "description": "Owner authorization for paid overflow. Inert without paid_overflow_providers."
+    },
     "operational_executables": {
-      "type": "object", "additionalProperties": false,
-      "required": ["gh", "git", "python"],
-      "properties": {"gh": {"type": "string"}, "git": {"type": "string"}, "python": {"type": "string"}},
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gh",
+        "git",
+        "python"
+      ],
+      "properties": {
+        "gh": {
+          "type": "string"
+        },
+        "git": {
+          "type": "string"
+        },
+        "python": {
+          "type": "string"
+        }
+      },
       "description": "Absolute paths. No shell interpreter is ever used."
     },
     "executable_paths": {
-      "type": "object", "additionalProperties": false,
-      "required": ["kiro", "copilot", "claude"],
-      "properties": {"kiro": {"type": "string"}, "copilot": {"type": "string"}, "claude": {"type": "string"}},
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kiro",
+        "copilot",
+        "claude"
+      ],
+      "properties": {
+        "kiro": {
+          "type": "string"
+        },
+        "copilot": {
+          "type": "string"
+        },
+        "claude": {
+          "type": "string"
+        }
+      },
       "description": "Absolute paths to provider CLIs."
     },
-    "enabled_providers": {"type": "array", "items": {"enum": ["kiro", "copilot", "claude"]}, "uniqueItems": true},
-    "enabled_profiles": {"type": "array", "items": {"enum": ["repo_read", "repo_write_test", "repo_delivery"]}, "uniqueItems": true, "description": "Start with repo_read only."},
-    "enabled_quality_gates": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "enabled_providers": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "kiro",
+          "copilot",
+          "claude"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "enabled_profiles": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "repo_read",
+          "repo_write_test",
+          "repo_delivery"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Start with repo_read only."
+    },
+    "enabled_quality_gates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
     "quality_gates": {
       "type": "object",
       "description": "gate id -> list of argv arrays. 'none' must exist and be empty. Shell interpreters (sh/bash/zsh/fish/osascript/env) are refused.",
-      "additionalProperties": {"type": "array", "maxItems": 20, "items": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "string"}}}
+      "additionalProperties": {
+        "type": "array",
+        "maxItems": 20,
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "delivery_path_allowlists": {
       "type": "object",
       "description": "gate id -> exact repository paths a repo_delivery job may modify. No globs. Required and non-empty for any delivery job.",
-      "additionalProperties": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "uniqueItems": true
+      }
     },
-    "enabled_operations": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "enabled_operations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
     "operation_definitions": {
       "type": "object",
       "description": "Owner-only registry. The job supplies only an operation_id; the argv lives here.",
       "additionalProperties": {
-        "type": "object", "additionalProperties": false,
-        "required": ["argv", "mode", "allowed_target_shas", "max_timeout_seconds", "max_output_bytes", "require_clean_worktree", "description"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "argv",
+          "mode",
+          "allowed_target_shas",
+          "max_timeout_seconds",
+          "max_output_bytes",
+          "require_clean_worktree",
+          "description"
+        ],
         "properties": {
-          "argv": {"type": "array", "items": {"type": "string"}, "description": "Fixed helper contract; first element an absolute executable."},
-          "mode": {"const": "read_only"},
-          "allowed_target_shas": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "uniqueItems": true},
-          "allowed_target_branches": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "maxItems": 20, "description": "Branches whose CURRENT head this operation may run against. Avoids the pin/edit/pin deadlock. main/dev/master/HEAD are refused."},
-          "max_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
-          "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
-          "require_clean_worktree": {"const": true},
-          "description": {"type": "string", "maxLength": 256}
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Fixed helper contract; first element an absolute executable."
+          },
+          "mode": {
+            "const": "read_only"
+          },
+          "allowed_target_shas": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "uniqueItems": true
+          },
+          "allowed_target_branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true,
+            "maxItems": 20,
+            "description": "Branches whose CURRENT head this operation may run against. Avoids the pin/edit/pin deadlock. main/dev/master/HEAD are refused."
+          },
+          "max_timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600
+          },
+          "max_output_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "require_clean_worktree": {
+            "const": true
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256
+          }
         }
       }
+    },
+    "paid_overflow_max_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3,
+      "default": 1,
+      "description": "Per-job ceiling on PAID attempts."
+    },
+    "paid_overflow_max_cost_usd": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 100,
+      "default": 5.0,
+      "description": "Ceiling on OBSERVED paid spend in the current reset window. Providers that report credits, not dollars, contribute 0 here -- see paid_overflow_max_attempts_per_window."
+    },
+    "paid_overflow_max_attempts_per_window": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 10,
+      "description": "Window-level ceiling on paid ATTEMPTS, charged on dispatch regardless of outcome or visible price."
+    },
+    "artifact_retention_days": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 365,
+      "default": 30,
+      "description": "Age after which whole artifact directories are pruned. Artifacts quote private source; the host is inside the trust boundary."
+    },
+    "wake_destination_kind": {
+      "enum": [
+        "legacy",
+        "wake_bus"
+      ],
+      "default": "legacy",
+      "description": "legacy: historical behaviour, target not enforced. wake_bus: target must be an OPEN PR or wake posts are refused and doctor fails."
     }
   }
 }

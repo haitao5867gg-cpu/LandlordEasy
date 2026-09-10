@@ -31,7 +31,7 @@ YOUR TASKS
 1. Verify the kit is intact:
      python3 -m unittest discover -s project-commander-kit/runner/tests
      python3 project-commander-kit/runner/tests/canary_end_to_end.py
-   Expect the suite to report OK (187 tests at the time of writing) and 21/21
+   Expect the suite to report OK (241 tests at the time of writing) and 21/21
    canary checks. If not, stop and report.
    Also run `python3 project-commander-kit/scripts/sync_from_source.py --check`:
    the kit's runner copy is generated from `tools/commander-runner/`, and a
