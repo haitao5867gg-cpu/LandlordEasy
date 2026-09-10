@@ -141,16 +141,16 @@ Haitao 睡前明确批准四项，全部完成：
 | **P1-5** CLAIMED 发帖异常逃逸烧掉 UUID | ✅ 降为 advisory，失败只记 stderr | `b3a2846` |
 | **P1-1** taxonomy 不驾驭调度（`SAFE_FAILOVER_CATEGORIES` 另起一套，且不含 TIMEOUT） | ✅ 4 policy（FAIL_CLOSED/LOCAL_RECOVERY/BOUNDED_RETRY/REPORT_AND_STOP）驱动 `failover_allowed_after`；删平行清单。**行为变化**：repo_read 的 TIMEOUT 在 failover 开启时可切 provider | 本次 |
 | **P1-7** LaunchAgent 指向 flat 路径，pck 装到 current/ → 升级 launchd 看不见 | ✅ doctor 新增 `launchagent.consistent`（按 runtime_dir 作用域，别的项目报 None）；新增 `relink-launchagent --confirm`（备份 plist） | 本次 |
-| A-1 删 `route_candidates` shim | ⏳ | |
-| A-3 summary→4000，超长进 artifact 而非拒绝 | ⏳ 高风险点 | |
-| A-4 artifact 保留期 + 信任边界声明 | ⏳ | |
-| A-5 评论 ID 高水位 + Issue #17 兼容 + P1-4（state 丢失不重放） | ⏳ | |
-| A-6 doctor 其余项（最后成功轮询/高水位/可消费/活跃 job/outbox） | ⏳ launchagent 已做 | |
-| A-7 `COMMANDER_VERDICT_V1` 只定义不消费 | ⏳ | |
-| A-8 文档 | ⏳ | |
-| P1-2 quota 污染账本 / P1-3 响应无 nonce / P1-6 pck 测 SOURCE 树 | ⏳ | |
+| A-1 删 `route_candidates` shim | ✅ | `782cf5c` |
+| A-3 summary→4000，超长截断进 Issue、全文进 artifact，**长度不再是拒绝理由** | ✅ | `782cf5c` |
+| A-4 artifact 保留期（30d 可配）+ 宿主机信任边界声明 | ✅ | `53087d5` + 文档 |
+| A-5 评论 ID 高水位（`since`、O(1) 单评论查询、从「最后看到」播种）+ P1-4 state 丢失拒绝启动 + `rebuild-claims` | ✅ | `73282a2` |
+| A-6 doctor：最后成功轮询/高水位/队列可读/活跃 job&attempt/三个 outbox 深度 | ✅ | `53087d5` |
+| A-7 `COMMANDER_VERDICT_V1` 定义、解析、记录，**不消费** | ✅ | `53087d5` |
+| A-8 文档 + schema/示例补 4 字段 | ✅ | 本次 |
+| P1-2 尾部 3 行判可用性 / P1-3 per-attempt nonce / P1-6 pck 测 SOURCE 树 | ✅ | `c673b67`, `782cf5c` |
 | Issue #12 回写 | ⏳ 待 PR A 收口后一次性做 | |
 
 **线上警告**：在 P1-7 的 relink 落地并验证前，**不要对线上跑 `pck upgrade`**——它会报成功但 launchd 继续跑旧代码。
 
-套件 197/197，canary 21/21。
+套件 **223/223**，canary 21/21。CI：`b89f421`、`73282a2` 双绿。

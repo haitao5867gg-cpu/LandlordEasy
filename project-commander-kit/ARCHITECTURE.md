@@ -119,6 +119,29 @@ must be reconstructible from the Issue itself.
 Alongside it: `raw-output/<job>.attempt-N.log` (0600) and
 `artifacts/<job>/attempt-N.md` (0600).
 
+## Delivery boundaries: PR A / PR B / PR C
+
+The remaining framework work is split so each PR can be accepted and rolled
+back on its own. **PR A never touches GitHub control-plane topology**; it is
+Runner-internal and needs no new Issue or PR to exist first.
+
+| | Scope | Depends on |
+|---|---|---|
+| **PR A** (this branch) | Runner correctness and simplification: claim-wedge fix, policy-driven failover, LaunchAgent consistency, high-water cursor with lost-state guard, response nonce, tail-scoped availability classification, artifact retention, queue-consumption health, `COMMANDER_VERDICT_V1` *defined but not consumed*, transactional install, single-source kit | nothing |
+| **PR B** | `COMMANDER_PLAN_V1` deterministic follow-up chains (no LLM); Queue Issue / Evidence Issue split; `CURRENT_USER_STATUS` + unresolved `USER_ACTION_REQUIRED`; Runner-side outbound notification; wake writes stop **only after** a real plan canary passes | Commander creates the Evidence Issue (and a Wake Bus PR if wake is kept) |
+| **PR C** | operation `version` + per-error-code retry policy; CI-side reduced-guard MySQL variant; kit finalization; migration guide executed | PR B |
+
+Migration order is fixed: **A → B → C**. The live Runner is upgraded only
+after PR A (see `MIGRATION_FROM_LANDLORDEASY.md`), and `relink-launchagent`
+must precede the first transactional upgrade on a host that still runs the
+flat layout.
+
+Standing architecture decisions recorded by the Commander (2026-09-10): only
+the front-door Commander creates intent or authorization; background
+Commanders never dispatch; no comment-based leases — if a second writer ever
+exists it uses git-ref create as the server-side CAS; historical tables and
+records are never deleted.
+
 ## What deliberately does not exist
 
 - No inbound listener. The Runner polls; nothing can call into it.
