@@ -28,9 +28,17 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
+WAKE_DESTINATION_KINDS = frozenset({"legacy", "wake_bus"})
 SCHEMA = "COMMANDER_JOB_V1"
 OPERATION_SCHEMA = "COMMANDER_OPERATION_V1"
-OPERATION_IDS = frozenset({"ops001_mysql_probe"})
+OPERATION_IDS = frozenset({"ops001_mysql_probe", "rel001_mysql_suite"})
+# The definition's declared risk mode, and the helper's own --mode value.
+# They are different vocabularies and must be validated separately.
+OPERATION_MODES = frozenset({"read_only", "isolated_test"})
+HELPER_MODES = frozenset({"probe", "rel001_suite"})
+HELPER_MODE_FOR_OPERATION_MODE = {"read_only": "probe", "isolated_test": "rel001_suite"}
+OPERATION_ARGV_FLAGS = frozenset({"--docker", "--mode", "--pnpm", "--candidate-sha"})
+OPERATION_PATH_FLAGS = {"--docker": "docker", "--pnpm": "pnpm"}
 OPS001_TARGET_SHA = "104de1521cf194c9dc76ccca52741f05a75f1180"
 PROFILES = frozenset({"repo_read", "repo_write_test", "repo_delivery"})
 WORKERS = frozenset({"kiro", "copilot", "claude"})
@@ -234,6 +242,15 @@ class Config:
     executable_paths: Mapping[str, str] = dataclasses.field(default_factory=dict)
     provider_failover: bool = False
     wake_pull_request: int | None = None
+    # Declares what `wake_pull_request` points at.  "legacy" is the historical
+    # behaviour: an arbitrary PR that happened to be open when the bridge was
+    # first configured -- including, in the original deployment, one that has
+    # since been merged.  "wake_bus" asserts the target is a dedicated,
+    # long-lived PR that exists only to receive wake notices.  The runner
+    # refuses to post wake notices to a closed or merged destination once the
+    # destination is declared a wake bus, so the migration is verifiable
+    # instead of silently degrading.
+    wake_destination_kind: str = "legacy"
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     # Providers that may be re-used on PAID capacity after every free window is
     # exhausted.  Inert unless `paid_overflow_authorized` is also true.
@@ -262,12 +279,13 @@ class Config:
             "enabled_operations", "operation_definitions", "wake_pull_request",
             "max_attempts", "paid_overflow_providers", "paid_overflow_authorized",
             "paid_overflow_max_attempts", "paid_overflow_max_cost_usd",
+            "wake_destination_kind",
         }
         required = expected - {
             "delivery_path_allowlists", "enabled_operations", "operation_definitions",
             "wake_pull_request", "max_attempts", "paid_overflow_providers",
             "paid_overflow_authorized", "paid_overflow_max_attempts",
-            "paid_overflow_max_cost_usd",
+            "paid_overflow_max_cost_usd", "wake_destination_kind",
         }
         unknown = set(raw) - expected
         missing = required - set(raw)
@@ -310,6 +328,11 @@ class Config:
             raw.get("paid_overflow_providers", []), WORKERS, "paid_overflow_providers")
         if paid_overflow_authorized and not paid_overflow_providers:
             raise ValidationError("paid overflow authorization requires at least one provider")
+        wake_destination_kind = raw.get("wake_destination_kind", "legacy")
+        if wake_destination_kind not in WAKE_DESTINATION_KINDS:
+            raise ValidationError("wake_destination_kind must be legacy or wake_bus")
+        if wake_destination_kind == "wake_bus" and wake_pull_request is None:
+            raise ValidationError("a wake bus destination requires wake_pull_request")
         paid_overflow_max_attempts = bounded_int(
             raw.get("paid_overflow_max_attempts", 1), 1, 3, "paid_overflow_max_attempts")
         paid_cost = raw.get("paid_overflow_max_cost_usd", 5.0)
@@ -356,6 +379,7 @@ class Config:
             paid_overflow_authorized=paid_overflow_authorized,
             paid_overflow_max_attempts=paid_overflow_max_attempts,
             paid_overflow_max_cost_usd=float(paid_cost),
+            wake_destination_kind=wake_destination_kind,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -617,18 +641,43 @@ def validate_operation_definitions(value: Any, operational: Mapping[str, str],
         if not isinstance(raw, dict) or not fields <= set(raw) or set(raw) - (fields | optional):
             raise ValidationError("operation definition has unknown or missing fields")
         argv = raw["argv"]
-        if (not isinstance(argv, list) or len(argv) != 4
+        # The argv is entirely owner-supplied config; a job only ever selects an
+        # operation_id.  It must still be the fixed helper contract: the
+        # configured python, the installed helper, then flag/value pairs drawn
+        # from a closed allowlist.  No free-form command can be expressed here.
+        if (not isinstance(argv, list) or len(argv) < 4 or len(argv) > 10
+                or len(argv) % 2 != 0
                 or any(not isinstance(part, str) or not part or "\x00" in part for part in argv)
                 or any(SHELL_FRAGMENT_RE.search(part) for part in argv)):
             raise ValidationError("operation argv must be the fixed bounded argv")
-        normalized = tuple(str(absolute_path(part)) if index in {0, 1, 3} else part
-                           for index, part in enumerate(argv))
+        flags = argv[2::2]
+        values = argv[3::2]
+        if (len(set(flags)) != len(flags) or not set(flags).issubset(OPERATION_ARGV_FLAGS)
+                or "--docker" not in flags):
+            raise ValidationError("operation argv uses an unsupported flag")
+        normalized_parts = [str(absolute_path(argv[0])), str(absolute_path(argv[1]))]
+        for flag, value in zip(flags, values):
+            expected_name = OPERATION_PATH_FLAGS.get(flag)
+            if expected_name is not None:
+                resolved = absolute_path(value)
+                if resolved.name != expected_name:
+                    raise ValidationError(f"operation argv {flag} must point at {expected_name}")
+                normalized_parts += [flag, str(resolved)]
+            else:
+                if flag == "--mode" and value not in HELPER_MODES:
+                    raise ValidationError("operation argv declares an unknown mode")
+                if flag == "--candidate-sha" and not SHA_RE.fullmatch(value):
+                    raise ValidationError("operation argv candidate SHA must be exact")
+                normalized_parts += [flag, value]
+        normalized = tuple(normalized_parts)
         helper = runtime_dir / "rehearsal_operations.py"
-        if (normalized[0] != operational["python"] or Path(normalized[1]) != helper
-                or normalized[2] != "--docker" or Path(normalized[3]).name != "docker"):
+        if normalized[0] != operational["python"] or Path(normalized[1]) != helper:
             raise ValidationError("operation argv does not match the fixed helper contract")
-        if raw["mode"] != "read_only":
-            raise ValidationError("only the read_only operation mode is implemented")
+        if raw["mode"] not in OPERATION_MODES:
+            raise ValidationError("operation mode is not implemented")
+        helper_mode = dict(zip(flags, values)).get("--mode", "probe")
+        if HELPER_MODE_FOR_OPERATION_MODE[raw["mode"]] != helper_mode:
+            raise ValidationError("operation mode and helper mode disagree")
         shas = raw["allowed_target_shas"]
         if (not isinstance(shas, list) or len(shas) != len(set(shas))
                 or any(not isinstance(sha, str) or not SHA_RE.fullmatch(sha) for sha in shas)):
@@ -640,14 +689,14 @@ def validate_operation_definitions(value: Any, operational: Mapping[str, str],
         if not shas and not branches:
             raise ValidationError("operation must allow at least one SHA or branch")
         if raw["require_clean_worktree"] is not True:
-            raise ValidationError("read-only operation must require a clean worktree")
+            raise ValidationError("operations must require a clean worktree")
         description = raw["description"]
         if (not isinstance(description, str) or not description.strip() or len(description) > 256
                 or SHELL_FRAGMENT_RE.search(description) or "\n" in description
                 or "\r" in description or redact(description) != description):
             raise ValidationError("operation description must be bounded inert text")
         result[operation_id] = OperationDefinition(
-            argv=normalized, mode="read_only", allowed_target_shas=frozenset(shas),
+            argv=normalized, mode=raw["mode"], allowed_target_shas=frozenset(shas),
             max_timeout_seconds=bounded_int(raw["max_timeout_seconds"], 1, MAX_TIMEOUT_SECONDS,
                                             "operation max_timeout_seconds"),
             max_output_bytes=bounded_int(raw["max_output_bytes"], 1, MAX_OUTPUT_BYTES,
@@ -1407,7 +1456,7 @@ def execute_operation(job: OperationJob, config: Config, worktree: Path) -> Oper
     definition = config.operation_definitions.get(job.operation_id)
     if job.operation_id not in config.enabled_operations or definition is None:
         raise RunnerError("operation is no longer enabled")
-    if definition.mode != "read_only":
+    if definition.mode not in OPERATION_MODES:
         raise RunnerError("operation authorization changed")
     if (job.target_sha not in definition.allowed_target_shas
             and not definition.allowed_target_branches):
@@ -1688,6 +1737,42 @@ def provider_health(config: Config) -> dict[str, dict[str, Any]]:
             "quota_reset": QuotaLedger.reset_key(worker),
         }
     return health
+
+def wake_destination_health(config: Config) -> dict[str, Any]:
+    """Report whether wake notices have a live destination.
+
+    A merged or closed PR still accepts comments, so the bridge never errored
+    -- it just delivered nudges somewhere nobody looks.  Declaring the target a
+    wake bus makes that a checkable property instead of an assumption.
+    """
+    report: dict[str, Any] = {
+        "kind": config.wake_destination_kind,
+        "pull_request": config.wake_pull_request,
+        "state": None, "usable": None,
+    }
+    if config.wake_pull_request is None:
+        report["usable"] = True  # bridge disabled; nothing to deliver
+        return report
+    gh = config.operational_executables.get("gh")
+    if not gh:
+        return report
+    try:
+        result = execute(
+            [gh, "api", f"repos/{config.repository}/pulls/{config.wake_pull_request}",
+             "--jq", ".state + \"/\" + (.merged|tostring)"],
+            timeout=30, cap=8192, env=safe_environment())
+    except (OSError, RunnerError):
+        return report
+    if result.returncode or result.timed_out or result.overflow:
+        return report
+    state = result.output.strip()
+    report["state"] = state
+    live = state.startswith("open") and state.endswith("false")
+    # A legacy destination is reported but not enforced; a declared wake bus
+    # must actually be open, or the operator is being misled about delivery.
+    report["usable"] = True if config.wake_destination_kind == "legacy" else live
+    return report
+
 
 def operational_health(config: Config) -> dict[str, dict[str, bool]]:
     health: dict[str, dict[str, bool]] = {}
@@ -2117,13 +2202,17 @@ class GitHubClient:
     def post_wake(self, body: str) -> str:
         if self.config.wake_pull_request is None:
             raise ValidationError("wake bridge is disabled")
+        if self.config.wake_destination_kind == "wake_bus":
+            health = wake_destination_health(self.config)
+            if health["usable"] is False:
+                raise RunnerError("wake bus destination is not an open pull request")
         return self._post_comment(self.config.wake_pull_request, body)
 
 def lifecycle(job: Job | OperationJob, state: str, detail: str = "") -> str:
     detail = ensure_safe_post(detail) if detail else ""
     if isinstance(job, OperationJob):
         return (f"COMMANDER_OPERATION_RUNNER_V1 {state}\njob={job.job_id}\n"
-                f"operation={job.operation_id}\nmode=read_only\nsha={job.target_sha}\n"
+                f"operation={job.operation_id}\nsha={job.target_sha}\n"
                 f"runner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
     return (f"COMMANDER_RUNNER_V1 {state}\njob={job.job_id}\nworker={job.worker}\nmodel={job.model}\n"
             f"profile={job.profile}\nsha={job.target_sha}\nrunner={job.runner_id}" + (f"\nevidence={detail}" if detail else ""))
@@ -2517,10 +2606,12 @@ def doctor(config: Config) -> dict[str, Any]:
         "quality_gates": gates,
         "operations": operations,
         "runtime_manifest": runtime_manifest_health(config),
+        "wake_destination": wake_destination_health(config),
     }
     booleans_ok = all(value for key, value in checks.items()
                       if key not in {"providers", "operational_executables", "quality_gates",
-                                     "operations", "outbound_policy", "runtime_manifest"})
+                                     "operations", "outbound_policy", "runtime_manifest",
+                                     "wake_destination"})
     # Provenance is only required once the runtime is actually installed; a
     # fresh host with no runtime_dir yet is not unhealthy.
     manifest_ok = (checks["runtime_manifest"]["ok"]
@@ -2530,8 +2621,9 @@ def doctor(config: Config) -> dict[str, Any]:
     operational_ok = all(item["available"] and item["interface_ok"] for item in operational.values())
     operation_ok = all(not item["enabled"] or (item["available"] and item["interface_ok"])
                        for item in operations.values())
+    wake_ok = checks["wake_destination"]["usable"] is not False
     checks["ok"] = (booleans_ok and provider_ok and operational_ok and operation_ok
-                    and manifest_ok and all(gates.values()))
+                    and manifest_ok and wake_ok and all(gates.values()))
     return checks
 
 def run_once(config: Config, dry_run: bool = False) -> str:
@@ -2631,7 +2723,7 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                             evidence = f"operation_error={operation_attempt.error_category}"
                         duration = result.duration_seconds if result else 0.0
                         exit_code = result.returncode if result else -1
-                        detail = (f"operation={job.operation_id}; mode=read_only; attempts=1; "
+                        detail = (f"operation={job.operation_id}; attempts=1; "
                                   f"attempt_id={attempt_id_for(job.job_id, 1)}; "
                                   f"stop_class={stop_class_for(operation_attempt.error_category) or 'NONE'}; "
                                   f"exit={exit_code}; duration={duration:.1f}s; "

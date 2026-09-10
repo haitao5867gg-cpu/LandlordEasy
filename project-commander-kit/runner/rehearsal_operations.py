@@ -36,7 +36,17 @@ COMMAND_CAP = 131_072
 
 
 class ProbeError(RuntimeError):
-    """A sanitized, expected guard failure."""
+    """A sanitized, expected guard failure.
+
+    Carries the evidence gathered before the failure.  Discarding it was the
+    same mistake this control plane was built to stop: the run had already
+    produced the facts needed to diagnose it.
+    """
+
+    def __init__(self, category: str, evidence: Sequence[str] | None = None):
+        super().__init__(category)
+        self.category = category
+        self.evidence = list(evidence or [])
 
 
 def _run(argv: Sequence[str], failure_category: str) -> str:
@@ -236,9 +246,194 @@ def probe(docker: str) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------
+# REL-001 isolated real-MySQL suite (mode: rel001_suite)
+
+COMPOSE_PROJECT = PROJECT
+COMPOSE_FILE = "e2e/docker-compose.yml"
+REQUIRED_PORT = "33317"
+REQUIRED_HOST = "127.0.0.1"
+CONTAINER_NAME = f"/{PROJECT}-{SERVICE}-1"
+SUITE_TIMEOUT = 1_800
+STARTUP_ATTEMPTS = 3
+HEALTH_DEADLINE = 180
+
+
+def _sh(argv: Sequence[str], cwd: Path, env: dict[str, str], timeout: int) -> tuple[int, str]:
+    """Bounded execution used only by the suite mode, which needs longer waits."""
+    process = subprocess.Popen(
+        list(argv), cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True)
+    try:
+        output, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        output, _ = process.communicate()
+        return 124, (output or "")[-COMMAND_CAP:]
+    return process.returncode, (output or "")[-COMMAND_CAP:]
+
+
+def _suite_env(docker: str, sha: str) -> dict[str, str]:
+    """Minimal environment. No production value can reach the child."""
+    base = {
+        "HOME": os.environ.get("HOME", ""),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": "en_US.UTF-8",
+        "CI": "true",
+        "NODE_ENV": "test",
+        "TZ": "UTC",
+        "E2E_MYSQL_PORT": REQUIRED_PORT,
+        "E2E_MYSQL_IMAGE": IMAGE,
+        "COMPOSE_PROJECT_NAME": COMPOSE_PROJECT,
+        "REL001_MYSQL_INTEGRATION": "1",
+        "REL001_MYSQL_INTEGRATION_CANDIDATE_SHA": sha,
+        "REL001_DOCKER_EXECUTABLE": docker,
+        # Loopback-only, synthetic, disposable. Never a shared or production DB.
+        "DATABASE_URL": f"mysql://e2e:e2e@{REQUIRED_HOST}:{REQUIRED_PORT}/{DATABASE}",
+    }
+    return {key: value for key, value in base.items() if value}
+
+
+TABLE_NAME_RE = __import__("re").compile(r"^[A-Za-z0-9_]{1,64}$")
+
+
+def _mysql_lines(docker: str, host: str, query: str) -> list[str]:
+    """Rows from a batch mysql query, with client warnings stripped.
+
+    The client prints "[Warning] Using a password on the command line ..." to
+    the same stream as results; treating that as data made a table-name check
+    reject a perfectly good database.
+    """
+    out = _docker(docker, host, "exec", f"{PROJECT}-{SERVICE}-1", "mysql",
+                  "-N", "-B", "-ue2e", "-pe2e", DATABASE, "-e", query)
+    lines = []
+    for line in out.splitlines():
+        text = line.strip()
+        if not text or text.startswith("mysql:") or "[Warning]" in text:
+            continue
+        lines.append(text)
+    return lines
+
+
+def _mysql_scalar(docker: str, host: str, query: str) -> str:
+    lines = _mysql_lines(docker, host, query)
+    return lines[-1] if lines else ""
+
+
+def _total_rows(docker: str, host: str) -> tuple[int, int]:
+    """Sum of rows across every application table. Must be 0 before and after."""
+    # information_schema row estimates are unreliable; count each table exactly.
+    tables = _mysql_lines(
+        docker, host,
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema=DATABASE() AND table_type='BASE TABLE' "
+        "AND table_name <> '_prisma_migrations'")
+    total = 0
+    for name in tables:
+        if not TABLE_NAME_RE.fullmatch(name):
+            raise ProbeError("unexpected_table_name")
+        value = _mysql_scalar(docker, host, f"SELECT COUNT(*) FROM `{name}`")
+        total += int(value or 0)
+    return total, len(tables)
+
+
+def run_rel001_suite(docker: str, pnpm: str, repo: Path, sha: str) -> dict[str, Any]:
+    """Bring up an isolated MySQL, run the REL-001 suite, tear it down.
+
+    Every boundary the guard requires is asserted independently here as well:
+    loopback-only binding, tmpfs storage, zero project volumes, the exact
+    compose project, and a database that is empty both before fixtures and
+    after cleanup. Transient startup problems get a bounded retry; anything
+    that looks like a boundary violation stops immediately.
+    """
+    host = trusted_local_docker_host()
+    env = _suite_env(docker, sha)
+    evidence: list[str] = [f"candidate_sha={sha}", f"compose_project={COMPOSE_PROJECT}",
+                           f"bind={REQUIRED_HOST}:{REQUIRED_PORT}"]
+    compose = [docker, "compose", "-p", COMPOSE_PROJECT, "-f", str(repo / COMPOSE_FILE)]
+
+    started = False
+    try:
+        # Always start from nothing.  An unattended operation must not inherit
+        # a container left behind by an earlier run, whose database would no
+        # longer be empty.
+        _sh([*compose, "down", "-v", "--remove-orphans"], repo, env, 180)
+        for attempt in range(1, STARTUP_ATTEMPTS + 1):
+            code, out = _sh([*compose, "up", "-d", "--wait", "--wait-timeout",
+                             str(HEALTH_DEADLINE)], repo, env, HEALTH_DEADLINE + 60)
+            if code == 0:
+                started = True
+                evidence.append(f"startup_attempts={attempt}")
+                break
+            # Only startup/health problems are retried; the container is torn
+            # down between tries so no partial state carries over.
+            _sh([*compose, "down", "-v", "--remove-orphans"], repo, env, 120)
+            if attempt == STARTUP_ATTEMPTS:
+                raise ProbeError("mysql_startup_failed")
+            time.sleep(5 * attempt)
+        if not started:
+            raise ProbeError("mysql_startup_failed")
+
+        # Schema first: the boundary probe asserts the exact application table
+        # count, which only holds once the schema has been applied.
+        code, out = _sh([pnpm, "--filter", "server", "exec", "prisma", "db", "push",
+                         "--skip-generate", "--accept-data-loss"], repo, env, 600)
+        if code != 0:
+            raise ProbeError("schema_push_failed", evidence)
+        evidence.append("schema=applied")
+
+        boundary = probe(docker)
+        if boundary.get("status") != "ok":
+            raise ProbeError("isolation_boundary_rejected", evidence)
+        evidence.append("isolation_boundary=verified")
+        evidence.extend(str(item) for item in boundary.get("evidence", [])[:6])
+
+        before, table_count = _total_rows(docker, host)
+        evidence.append(f"tables={table_count}")
+        evidence.append(f"rows_before={before}")
+        if before != 0:
+            raise ProbeError("database_not_empty_before", evidence)
+
+        code, out = _sh([pnpm, "--filter", "server", "run", "test:mysql-integration"],
+                        repo, env, SUITE_TIMEOUT)
+        summary_line = ""
+        failures: list[str] = []
+        for line in out.splitlines():
+            text = line.strip()
+            if text.startswith("Tests:") or text.startswith("Test Suites:"):
+                summary_line += text + "; "
+            elif text.startswith("●") and "›" in text and len(failures) < 8:
+                failures.append(text[:200])
+        evidence.append(f"jest={summary_line.strip() or 'no summary line'}")
+        evidence.extend(f"failed={item}" for item in failures)
+        suite_ok = code == 0
+
+        after, _ = _total_rows(docker, host)
+        evidence.append(f"rows_after={after}")
+        if after != 0:
+            raise ProbeError("database_not_empty_after", evidence)
+
+        return {
+            "status": "ok" if suite_ok else "blocked",
+            "summary": ("REL-001 isolated MySQL suite passed"
+                        if suite_ok else "REL-001 isolated MySQL suite failed"),
+            "evidence": evidence + [f"exit={code}"],
+        }
+    finally:
+        if started:
+            _sh([*compose, "down", "-v", "--remove-orphans"], repo, env, 180)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="ORG-003 fixed read-only rehearsal probe")
+    parser = argparse.ArgumentParser(description="ORG-003 fixed local rehearsal operations")
     parser.add_argument("--docker", required=True)
+    parser.add_argument("--mode", default="probe", choices=("probe", "rel001_suite"))
+    parser.add_argument("--pnpm")
+    parser.add_argument("--candidate-sha")
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args(argv)
     docker = Path(args.docker)
@@ -251,12 +446,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("OPS001_PROBE_INTERFACE_OK")
         return 0
     try:
-        result = probe(str(docker))
+        if args.mode == "rel001_suite":
+            pnpm = Path(args.pnpm) if args.pnpm else None
+            if pnpm is None or not pnpm.is_absolute() or not pnpm.is_file() \
+                    or not os.access(pnpm, os.X_OK):
+                raise ProbeError("pnpm_executable_invalid")
+            sha = (args.candidate_sha or "").strip()
+            if len(sha) != 40 or any(ch not in "0123456789abcdef" for ch in sha):
+                raise ProbeError("candidate_sha_invalid")
+            result = run_rel001_suite(str(docker), str(pnpm), Path.cwd(), sha)
+        else:
+            result = probe(str(docker))
     except ProbeError as exc:
-        result = {"status": "blocked", "summary": "OPS-001 probe blocked",
-                  "evidence": [f"category={exc}"]}
+        result = {"status": "blocked", "summary": "OPS-001 operation blocked",
+                  "evidence": [f"category={exc.category}", *getattr(exc, "evidence", [])]}
     except OSError:
-        result = {"status": "blocked", "summary": "OPS-001 probe blocked",
+        result = {"status": "blocked", "summary": "OPS-001 operation blocked",
                   "evidence": ["category=local_runtime_unavailable"]}
     print(json.dumps(result, sort_keys=True))
     return 0

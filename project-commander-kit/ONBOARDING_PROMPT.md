@@ -31,7 +31,11 @@ YOUR TASKS
 1. Verify the kit is intact:
      python3 -m unittest discover -s project-commander-kit/runner/tests
      python3 project-commander-kit/runner/tests/canary_end_to_end.py
-   Expect 146 tests OK and 21/21 canary checks. If not, stop and report.
+   Expect the suite to report OK (187 tests at the time of writing) and 21/21
+   canary checks. If not, stop and report.
+   Also run `python3 project-commander-kit/scripts/sync_from_source.py --check`:
+   the kit's runner copy is generated from `tools/commander-runner/`, and a
+   drift here means the kit would ship a runner that is not the one under test.
 
 2. Install the CI workflow from
    project-commander-kit/templates/.github/workflows/ into .github/workflows/,

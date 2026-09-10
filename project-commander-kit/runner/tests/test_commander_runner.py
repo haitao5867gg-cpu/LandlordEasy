@@ -78,7 +78,12 @@ class SchemaTests(RunnerTestCase):
         self.assertEqual(example["enabled_quality_gates"], ["none"])
         self.assertEqual(example["enabled_operations"], [])
         self.assertIsNone(example["wake_pull_request"])
-        self.assertEqual(set(example["operation_definitions"]), {"ops001_mysql_probe"})
+        self.assertEqual(set(example["operation_definitions"]),
+                         {"ops001_mysql_probe", "rel001_mysql_suite"})
+        # Defined but NOT enabled: the example ships every operation the
+        # registry supports so an owner can see the shape, while the
+        # enabled list stays empty until they opt in deliberately.
+        self.assertEqual(example["enabled_operations"], [])
         self.assertEqual(example["delivery_path_allowlists"]["org002_python"], [
             "AGENTS.md", "project-brain/CURRENT_STATE.md", "project-brain/RELEASE_PLAN.md",
             "project-brain/RISKS.md", "specs/ORG-002-LOCAL-COMMANDER-RUNNER.md"])

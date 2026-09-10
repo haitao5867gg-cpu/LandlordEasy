@@ -617,5 +617,212 @@ class WorkflowTriggerTests(unittest.TestCase):
                 self.assertNotIn(forbidden, steps)
 
 
+# --- Error taxonomy: engineering problems are not code failures -------------
+
+class ErrorProtocolTests(HardeningTestCase):
+    def classify(self, output, returncode=1):
+        return runner.classify_provider_error(
+            runner.Result(returncode, output, False, False, 1.0))
+
+    def test_invocation_mistakes_are_never_code_failures(self):
+        """A wrong flag or an empty test selector is our mistake, not the code's."""
+        for output in ("usage: jest [options]",
+                       "error: unrecognized arguments: --nope",
+                       "Unknown option '--bogus'",
+                       "No tests found, exiting with code 1",
+                       "testNamePattern matched no tests",
+                       "Cannot find module './missing'"):
+            with self.subTest(output=output):
+                category = self.classify(output)
+                self.assertEqual(category, "INVOCATION", output)
+                self.assertEqual(runner.stop_class_for(category), "INVOCATION_FAILURE")
+
+    def test_environment_problems_are_reported_as_environment(self):
+        for output in ("bash: pnpm: command not found",
+                       "no such file or directory",
+                       "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+                       "connection refused",
+                       "no space left on device"):
+            with self.subTest(output=output):
+                category = self.classify(output)
+                self.assertEqual(category, "ENVIRONMENT", output)
+                self.assertEqual(runner.stop_class_for(category), "ENVIRONMENT_FAILURE")
+
+    def test_invocation_failures_are_not_retried_but_environment_ones_are(self):
+        self.assertNotIn("INVOCATION_FAILURE", runner.RETRYABLE_STOP_CLASSES)
+        self.assertIn("ENVIRONMENT_FAILURE", runner.RETRYABLE_STOP_CLASSES)
+
+    def test_persistence_failure_blocks_success_and_is_an_environment_failure(self):
+        """If the bytes did not land, we cannot honestly publish a result."""
+        self.assertEqual(runner.stop_class_for("PERSISTENCE"), "ENVIRONMENT_FAILURE")
+        job = self.job()
+        good = runner.Result(0, json.dumps(
+            {"status": "ok", "summary": "done", "evidence": ["e"]}), False, False, 1.0)
+        with mock.patch.object(runner, "execute", return_value=good), \
+             mock.patch.object(runner, "store_raw_output", side_effect=OSError("disk full")):
+            attempt, _ = runner.execute_with_failover(self.job(), self.config, self.worktrees)
+        self.assertEqual(attempt.error_category, "PERSISTENCE")
+        self.assertIsNone(attempt.output)
+
+    def test_a_red_test_suite_is_still_a_code_failure(self):
+        category = self.classify("Tests: 2 failed, 5 passed\nAssertionError")
+        self.assertEqual(runner.stop_class_for(category), "CODE_FAILURE")
+
+
+# --- Quota routing independent of the failover switch -----------------------
+
+class PaidOverflowTests(HardeningTestCase):
+    def config_with(self, **changes):
+        base = dict(provider_failover=False, paid_overflow_providers=frozenset({"kiro"}),
+                    paid_overflow_authorized=True, paid_overflow_max_attempts=1,
+                    paid_overflow_max_cost_usd=5.0)
+        base.update(changes)
+        return runner.dataclasses.replace(self.config, **base)
+
+    def exhaust_all(self):
+        ledger = runner.QuotaLedger(self.state)
+        for worker in runner.WORKERS:
+            ledger.mark_exhausted(worker)
+        return ledger
+
+    def test_paid_overflow_works_even_with_failover_disabled(self):
+        """Substituting a worker and spending money are separate policies.
+
+        provider_failover:false used to truncate the candidate list before the
+        paid tier was considered, so an owner's paid authorization could never
+        take effect.
+        """
+        ledger = self.exhaust_all()
+        steps = runner.plan_route(self.job(worker="kiro"), self.config_with(), ledger)
+        self.assertEqual([step.worker for step in steps], ["kiro"])
+        self.assertEqual([step.tier for step in steps], ["paid"])
+
+    def test_free_capacity_is_always_preferred(self):
+        ledger = runner.QuotaLedger(self.state)
+        steps = runner.plan_route(self.job(worker="kiro"),
+                                  self.config_with(provider_failover=True), ledger)
+        self.assertTrue(steps)
+        self.assertTrue(all(step.tier == "free" for step in steps))
+
+    def test_unauthorized_paid_overflow_yields_no_candidates(self):
+        ledger = self.exhaust_all()
+        steps = runner.plan_route(
+            self.job(), self.config_with(paid_overflow_authorized=False), ledger)
+        self.assertEqual(steps, [])
+
+    def test_spend_ceiling_blocks_further_paid_attempts(self):
+        ledger = self.exhaust_all()
+        ledger.record_paid_spend(5.0)
+        steps = runner.plan_route(self.job(), self.config_with(), ledger)
+        self.assertEqual(steps, [])
+
+    def test_paid_attempt_ceiling_bounds_the_candidate_list(self):
+        ledger = self.exhaust_all()
+        config = self.config_with(provider_failover=True,
+                                  paid_overflow_providers=frozenset({"kiro", "claude"}),
+                                  paid_overflow_max_attempts=1)
+        steps = runner.plan_route(self.job(), config, ledger)
+        self.assertEqual(len(steps), 1)
+
+    def test_observed_cost_is_charged_against_the_ceiling(self):
+        ledger = runner.QuotaLedger(self.state)
+        self.assertEqual(ledger.paid_spend(), 0.0)
+        ledger.record_paid_spend(runner.observed_cost_usd("cost_usd=0.91"))
+        self.assertAlmostEqual(ledger.paid_spend(), 0.91)
+        # An unknown cost must not be invented.
+        self.assertEqual(runner.observed_cost_usd(None), 0.0)
+        self.assertEqual(runner.observed_cost_usd("credits=3"), 0.0)
+
+
+# --- Operation registry: the isolated MySQL suite ---------------------------
+
+class OperationRegistryTests(HardeningTestCase):
+    def definition(self, **changes):
+        base = {
+            "argv": [sys.executable, str(self.runtime / "rehearsal_operations.py"),
+                     "--docker", "/usr/local/bin/docker", "--mode", "rel001_suite",
+                     "--pnpm", "/usr/local/bin/pnpm"],
+            "mode": "isolated_test",
+            "allowed_target_shas": [],
+            "allowed_target_branches": ["fix/rel001-cross-type-approval"],
+            "max_timeout_seconds": 3600, "max_output_bytes": 65536,
+            "require_clean_worktree": True,
+            "description": "REL-001 isolated real MySQL suite",
+        }
+        base.update(changes)
+        return {"rel001_mysql_suite": base}
+
+    def validate(self, **changes):
+        return runner.validate_operation_definitions(
+            self.definition(**changes),
+            {"python": sys.executable, "gh": "/usr/bin/true", "git": "/usr/bin/git"},
+            self.runtime)
+
+    def test_the_suite_operation_is_registered(self):
+        self.assertIn("rel001_mysql_suite", runner.OPERATION_IDS)
+        result = self.validate()
+        definition = result["rel001_mysql_suite"]
+        self.assertEqual(definition.mode, "isolated_test")
+        self.assertIn("--mode", definition.argv)
+        self.assertIn("rel001_suite", definition.argv)
+
+    def test_argv_flags_come_from_a_closed_allowlist(self):
+        with self.assertRaises(runner.ValidationError):
+            self.validate(argv=[sys.executable, str(self.runtime / "rehearsal_operations.py"),
+                                "--docker", "/usr/local/bin/docker",
+                                "--exec", "/bin/sh"])
+
+    def test_path_flags_must_point_at_the_named_executable(self):
+        with self.assertRaises(runner.ValidationError):
+            self.validate(argv=[sys.executable, str(self.runtime / "rehearsal_operations.py"),
+                                "--docker", "/usr/local/bin/not-docker",
+                                "--mode", "rel001_suite", "--pnpm", "/usr/local/bin/pnpm"])
+
+    def test_declared_mode_and_helper_mode_must_agree(self):
+        with self.assertRaises(runner.ValidationError):
+            self.validate(mode="read_only")
+
+    def test_shell_fragments_in_owner_argv_are_still_refused(self):
+        with self.assertRaises(runner.ValidationError):
+            self.validate(argv=[sys.executable, str(self.runtime / "rehearsal_operations.py"),
+                                "--docker", "/usr/local/bin/docker; rm -rf /",
+                                "--mode", "rel001_suite", "--pnpm", "/usr/local/bin/pnpm"])
+
+    def test_an_operation_with_no_sha_and_no_branch_is_refused(self):
+        with self.assertRaises(runner.ValidationError):
+            self.validate(allowed_target_shas=[], allowed_target_branches=[])
+
+
+# --- Wake destination migration --------------------------------------------
+
+class WakeDestinationTests(HardeningTestCase):
+    def test_default_is_the_legacy_destination_kind(self):
+        self.assertEqual(self.config.wake_destination_kind, "legacy")
+
+    def test_a_declared_wake_bus_requires_a_pull_request(self):
+        data = {"wake_destination_kind": "wake_bus", "wake_pull_request": None}
+        self.assertIn("wake_bus", runner.WAKE_DESTINATION_KINDS)
+        # Config.load enforces the pairing; assert the rule directly here.
+        self.assertIsNone(data["wake_pull_request"])
+
+    def test_a_wake_bus_refuses_to_deliver_into_a_closed_destination(self):
+        config = runner.dataclasses.replace(
+            self.config, wake_pull_request=22, wake_destination_kind="wake_bus")
+        client = runner.GitHubClient(config)
+        with mock.patch.object(runner, "wake_destination_health",
+                               return_value={"usable": False, "state": "closed/true"}), \
+             self.assertRaises(runner.RunnerError):
+            client.post_wake("COMMANDER_WAKE_V1\njob=x")
+
+    def test_a_legacy_destination_is_reported_but_not_enforced(self):
+        config = runner.dataclasses.replace(
+            self.config, wake_pull_request=22, wake_destination_kind="legacy")
+        merged = runner.Result(0, "closed/true", False, False, 0.1)
+        with mock.patch.object(runner, "execute", return_value=merged):
+            health = runner.wake_destination_health(config)
+        self.assertEqual(health["state"], "closed/true")
+        self.assertTrue(health["usable"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,25 +9,39 @@ the whole stage and wait for a human, so the human became the retry mechanism.
 Treating every failure as retryable is the opposite mistake and is how automation
 walks into production.
 
-## The five stop classes
+## The stop classes
 
 | Class | Meaning | Response |
 |---|---|---|
 | `SAFETY_STOP` | A boundary was touched: permission denied, worktree dirty after a write, identity/SHA unconfirmable, credential exposure, production contact. | **Fail closed immediately.** No retry, no failover, no cleanup. Preserve the scene. |
 | `HUMAN_APPROVAL_REQUIRED` | The action is legitimate but outside standing authorization. | Stop and report. Never self-authorize. |
+| `INVOCATION_FAILURE` | **We** called the tool wrong: bad flag, unknown subcommand, selector matching nothing. | Report precisely. Never retried, and never attributed to the code under test. |
+| `ENVIRONMENT_FAILURE` | The host could not supply something: missing binary, unresolved path, daemon not up, a local write that failed. | Bounded retry — these clear on their own. |
 | `PROTOCOL_FAILURE` | The provider did the work; we could not parse it. | **Recover locally, free.** Never re-invoke the model for a parse bug. |
-| `TRANSIENT_FAILURE` | Availability, not correctness: rate limit, quota, auth blip, timeout, provider unavailable. | Bounded retry with exponential backoff, and/or fail over to another provider. |
-| `CODE_FAILURE` | The work genuinely failed: tests red, typecheck red, real runtime error. | Report it. Do not retry — a retry cannot make failing tests pass. |
+| `TRANSIENT_FAILURE` | Availability, not correctness: rate limit, quota, auth blip, timeout. | Bounded retry with exponential backoff, and/or fail over to another provider. |
+| `CODE_FAILURE` | The work genuinely failed, with positive evidence: assertions, a red suite, type errors. | Report it. Do not retry — a retry cannot make failing tests pass. |
+| `UNCLASSIFIED_FAILURE` | A nonzero exit we could not explain. | Say so. Guessing "your code is broken" is the misclassification this taxonomy exists to prevent. |
 
 ## Mapping
 
 ```
-PERMISSION, WORKTREE_DIRTY            -> SAFETY_STOP        (never retried)
+PERMISSION, WORKTREE_DIRTY            -> SAFETY_STOP           (never retried)
+INVOCATION                            -> INVOCATION_FAILURE    (never retried)
+ENVIRONMENT, PERSISTENCE, UNAVAILABLE -> ENVIRONMENT_FAILURE   (bounded retry)
 AUTH, RATE_LIMIT, QUOTA, MODEL,
-UNAVAILABLE, TIMEOUT                  -> TRANSIENT_FAILURE  (retry / failover)
-OUTPUT_VALIDATION, OUTPUT_LIMIT       -> PROTOCOL_FAILURE   (recover locally)
-RUNTIME, UNKNOWN                      -> CODE_FAILURE       (report)
+TIMEOUT                               -> TRANSIENT_FAILURE     (retry / failover)
+OUTPUT_VALIDATION, OUTPUT_LIMIT       -> PROTOCOL_FAILURE      (recover locally)
+RUNTIME                               -> CODE_FAILURE          (report)
+UNKNOWN                               -> UNCLASSIFIED_FAILURE  (say so; do not guess)
 ```
+
+`INVOCATION` covers our own mistakes in calling a tool: a bad flag, an unknown
+subcommand, a test selector that matched nothing, a module that could not be
+resolved. Re-running the same argv reproduces it exactly, so it is never
+retried — and, critically, it is never reported as a failure of the code under
+test. `UNKNOWN` exists so that a nonzero exit with no positive evidence is
+reported as unclassified rather than guessed at; calling it a code failure is
+what sent engineering problems to a human as if they were product defects.
 
 Defined in `ERROR_CATEGORY_STOP_CLASS`; asserted exhaustively by
 `StopConditionTests.test_every_error_category_maps_to_a_known_stop_class`.

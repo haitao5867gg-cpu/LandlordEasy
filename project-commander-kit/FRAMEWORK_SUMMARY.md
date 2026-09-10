@@ -61,9 +61,16 @@ Terminal states: `CLAIMED`, `COMPLETED`, `FAILED`, `TIMED_OUT`, `REJECTED`.
 |---|---|
 | `SAFETY_STOP` | fail closed, preserve scene, never retry |
 | `HUMAN_APPROVAL_REQUIRED` | stop and report; never self-authorize |
+| `INVOCATION_FAILURE` | we called the tool wrong — never retried, never blamed on the code |
+| `ENVIRONMENT_FAILURE` | host could not provide something; bounded retry |
 | `PROTOCOL_FAILURE` | recover locally, free; never re-invoke the model |
 | `TRANSIENT_FAILURE` | bounded retry with backoff, and/or fail over |
 | `CODE_FAILURE` | report; a retry cannot make failing tests pass |
+| `UNCLASSIFIED_FAILURE` | we could not tell; say so rather than guess "your code is broken" |
+
+A bare nonzero exit is **not** sufficient evidence of a code failure. Positive
+evidence (an assertion, a red suite, a type error) is required before the work
+itself is blamed.
 
 Fail-closed set: credential exposure, production/real-DB/payment/real-user
 contact, destructive operations, permission denial, unconfirmable identity or
@@ -104,9 +111,12 @@ a non-empty `paid_overflow_providers`, in which case that provider goes last.
   allowlist; mandatory `human_approval_ref`; gate run between two
   stage-and-validate passes with the committed tree compared to the validated
   tree; hooks disabled.
-- **Operations:** owner-configured argv only; job supplies just an ID; shell
-  interpreters refused; `read_only` mode only; clean worktree required; exact
-  SHA or owner-approved branch head, never a protected branch.
+- **Operations:** owner-configured argv only; the job supplies just an ID.
+  Flags come from a closed allowlist, path flags must name the expected
+  executable, shell interpreters are refused, and the declared risk mode must
+  agree with the helper mode. `read_only` and `isolated_test` are implemented;
+  a clean worktree is required; the target is an exact SHA or an owner-approved
+  branch head, never a protected branch.
 - **Secrets:** pattern redaction plus fail-closed verification on every outbound
   string and every local artifact; sensitive-path and file-mode scanning on
   delivery.
@@ -130,14 +140,34 @@ a non-empty `paid_overflow_providers`, in which case that provider goes last.
 
 ## 10. Verification
 
-- `python3 -m unittest discover -s runner/tests` — **146 tests**.
+- `python3 -m unittest discover -s runner/tests` — **187 tests**.
 - `python3 runner/tests/canary_end_to_end.py` — **21 checks**, driving the real
   loop against a real git repository and worktree with stub provider and `gh`.
   No network, GitHub, database, or credential.
 - Real-data proof: the destroyed review was recovered from its persisted raw log
   with `provider_calls: 0`.
 
-## 11. Deliberate non-features
+## 11. What this does NOT guarantee
+
+Stated plainly, because earlier drafts of these documents implied more.
+
+- **The wake bridge has no inbound listener.** Delivery is outbound-only and
+  at-least-once with an outbox; there is no webhook receiver in this
+  repository, so webhook signature verification is specified but **not
+  implemented**. `doctor` reports `NO_INBOUND_LISTENER_IMPLEMENTED`.
+- **Provenance verification needs the source repo present.** `doctor` compares
+  installed bytes against the commit the manifest names, but if that commit is
+  not available locally the result is *unverified*, not *verified*.
+- **Redaction is pattern-based.** It cannot recognise a novel secret format;
+  delivery path allowlists and the sensitive-path scan are the backstop.
+- **Cost ceilings depend on providers reporting cost.** A provider that never
+  prints a price contributes 0 to the spend ledger; the per-job paid attempt
+  ceiling is the real bound there.
+- **Operations are as safe as their owner-written argv.** The registry refuses
+  shell interpreters, free-form flags and non-matching executables, but the
+  argv itself is owner-supplied config.
+
+## 12. Deliberate non-features
 
 No inbound listener. No job-supplied command, argv, path, env, or URL. No
 protected-branch push, merge, release, or deployment. No production, SSH, real
