@@ -1097,6 +1097,29 @@ class LaunchAgentConsistencyTests(HardeningTestCase):
         with mock.patch.object(runner.Path, "home", return_value=home):
             self.assertIsNone(runner.launchagent_health(self.config)["consistent"])
 
+    def test_relink_targets_the_current_symlink_not_its_resolution(self):
+        """Found during the first live upgrade: pointing launchd at the
+        resolved version directory re-creates the flat-layout trap on the
+        very next upgrade (the pointer moves, launchd does not)."""
+        self.runtime.mkdir(parents=True)
+        version = self.runtime / "versions" / "v1"
+        version.mkdir(parents=True)
+        (version / "commander_runner.py").write_text("# v1\n")
+        os.symlink(version, self.runtime / "current")
+        entry = runner.launchagent_entrypoint(self.config)
+        self.assertEqual(entry, self.runtime / "current" / "commander_runner.py")
+        self.assertFalse(str(entry).endswith("v1/commander_runner.py"))
+        # Health: resolved path is consistent, but only the symlink follows.
+        home = self.plist(version / "commander_runner.py")
+        with mock.patch.object(runner.Path, "home", return_value=home):
+            health = runner.launchagent_health(self.config)
+        self.assertIs(health["consistent"], True)
+        self.assertIs(health["follows_pointer"], False)
+        home = self.plist(self.runtime / "current" / "commander_runner.py")
+        with mock.patch.object(runner.Path, "home", return_value=home):
+            health = runner.launchagent_health(self.config)
+        self.assertIs(health["follows_pointer"], True)
+
     def test_no_plist_is_fine_before_first_install(self):
         home = Path(self.tmp.name) / "home-empty"
         home.mkdir()

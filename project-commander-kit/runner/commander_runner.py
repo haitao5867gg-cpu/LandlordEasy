@@ -3002,6 +3002,20 @@ def launchagent_script(path: Path) -> Path | None:
     except (OSError, ValueError, TypeError):
         return None
 
+def launchagent_entrypoint(config: Config) -> Path:
+    """What the LaunchAgent SHOULD run.
+
+    On a versioned layout this is the `current` symlink itself, not its
+    resolution: pointing launchd at a concrete version directory silently
+    re-creates the flat-layout trap on the very next upgrade (the pointer
+    moves, launchd does not).  On a flat layout it is the flat file.
+    """
+    current = config.runtime_dir / "current"
+    if current.is_symlink():
+        return current / "commander_runner.py"
+    return config.runtime_dir / "commander_runner.py"
+
+
 def launchagent_health(config: Config) -> dict[str, Any]:
     """Does launchd run the runtime `doctor` is inspecting?
 
@@ -3032,7 +3046,10 @@ def launchagent_health(config: Config) -> dict[str, Any]:
         report["consistent"] = None
         return report
     expected = (runtime_root(config) / "commander_runner.py").resolve(strict=False)
+    # Consistent if launchd runs the active bytes -- whether it names the
+    # `current` symlink (preferred) or the version directory it resolves to.
     report["consistent"] = resolved == expected
+    report["follows_pointer"] = script == launchagent_entrypoint(config)
     return report
 
 def launchagent_path() -> Path:
@@ -3620,9 +3637,7 @@ def command_install(args: argparse.Namespace) -> int:
     runtime_script, digest = install_stable_runtime(config, Path(__file__).resolve())
     # If the transactional installer owns runtime_dir, launchd must follow its
     # `current` pointer, not a flat file that later upgrades will not touch.
-    current = config.runtime_dir / "current"
-    if current.is_symlink():
-        runtime_script = current / "commander_runner.py"
+    runtime_script = launchagent_entrypoint(config)
     template = {"Label": "com.landlordeasy.commander-runner", "RunAtLoad": True, "KeepAlive": True}
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(make_launchagent(template, config.operational_executables["python"],
@@ -3637,13 +3652,13 @@ def command_relink(config: Config, confirm: bool) -> int:
     stop/start, which stays an explicit operator action.
     """
     destination = launchagent_path(); verify_owned_launchagent(destination)
-    target = runtime_root(config) / "commander_runner.py"
+    target = launchagent_entrypoint(config)
     if not target.is_file():
         raise RunnerError("active runtime entrypoint is missing; install or upgrade first")
     health = launchagent_health(config)
     print(json.dumps(health, sort_keys=True))
-    if health["consistent"]:
-        print("LaunchAgent already points at the active runtime."); return 0
+    if health["consistent"] and health.get("follows_pointer"):
+        print("LaunchAgent already follows the current pointer."); return 0
     if not confirm: print("Not relinked: pass --confirm after review."); return 0
     data = plistlib.loads(destination.read_bytes())
     arguments = list(data.get("ProgramArguments") or [])
