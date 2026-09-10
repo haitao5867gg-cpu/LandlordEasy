@@ -1,0 +1,59 @@
+{
+  "repository": "YOUR-ORG/YOUR-REPO",
+  "queue_issue": 1,
+  "wake_pull_request": null,
+  "commander_login": "your-commander-github-login",
+  "executor_login": "your-executor-github-login",
+  "runner_id": "yourproject-runner-01",
+  "canonical_repo": "~/YourProject",
+  "worktree_root": "~/YourProject-runner-worktrees",
+  "state_dir": "~/.local/state/yourproject-commander",
+  "runtime_dir": "~/.local/lib/yourproject-commander",
+  "origin_url": "https://github.com/YOUR-ORG/YOUR-REPO.git",
+  "poll_seconds": 60,
+  "lease_seconds": 180,
+  "provider_failover": false,
+  "max_attempts": 3,
+  "paid_overflow_providers": [],
+  "paid_overflow_authorized": false,
+  "enabled_operations": [],
+  "operation_definitions": {},
+  "operational_executables": {
+    "gh": "/ABSOLUTE/PATH/TO/gh",
+    "git": "/ABSOLUTE/PATH/TO/git",
+    "python": "/ABSOLUTE/PATH/TO/python3"
+  },
+  "enabled_providers": [
+    "claude"
+  ],
+  "enabled_profiles": [
+    "repo_read"
+  ],
+  "enabled_quality_gates": [
+    "none"
+  ],
+  "quality_gates": {
+    "none": [],
+    "project_tests": [
+      [
+        "/ABSOLUTE/PATH/TO/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests"
+      ]
+    ]
+  },
+  "delivery_path_allowlists": {},
+  "executable_paths": {
+    "kiro": "/ABSOLUTE/PATH/TO/kiro-cli",
+    "copilot": "/ABSOLUTE/PATH/TO/copilot",
+    "claude": "/ABSOLUTE/PATH/TO/claude"
+  },
+  "paid_overflow_max_attempts": 1,
+  "paid_overflow_max_cost_usd": 5.0,
+  "paid_overflow_max_attempts_per_window": 10,
+  "artifact_retention_days": 30,
+  "wake_destination_kind": "legacy"
+}
