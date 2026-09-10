@@ -154,3 +154,31 @@ Haitao 睡前明确批准四项，全部完成：
 **线上警告**：在 P1-7 的 relink 落地并验证前，**不要对线上跑 `pck upgrade`**——它会报成功但 launchd 继续跑旧代码。
 
 套件 **223/223**，canary 21/21。CI：`b89f421`、`73282a2` 双绿。
+
+
+### Phase G 续 — 审计报告全量处理（用户外出期间，自主模式）
+
+收到另一 session 的完整审计（2 P0 / 11 P1 / 8 P2 / 7 缺失）。**逐条对当前代码核实后**处理：
+
+| 项 | 核实 | 处理 |
+|---|---|---|
+| P1-8 SECURITY_MODEL 两句假话 | 真 | 文档改口：`isolated_test` 是真实（隔离）数据库路径 |
+| P1-9 付费上限对 credits 型 provider 失效、超时不记账、按任务不按窗口 | 真 | 付费尝试**发起即计**到窗口级计数 `paid_overflow_max_attempts_per_window`；另发现 `record()` 会复活 exhausted，已修 |
+| P1-10 `_api` 是约定非收窄点 | 真 | pulls GET 纳入白名单；doctor 报告 token scope 并对过宽告警；**收窄 PAT 是 owner 动作** |
+| P1-11 门失败丢 Result | 真 | 门输出先落盘 `<job>.gate-N.log`，分类+policy 进终态 |
+| P1-6 (a)(c) | 真 | install 漂移即拒；SYNCED 由源树派生（opt-out） |
+| P2-3 renormalize 永写 attempt-1 | 真 | 按恢复的 ordinal 写 |
+| P2-4 付费池取自 `capable` | 真 | 取自 `free_pool`，尊重 `provider_failover` |
+| P2-6 递归无界/二次复杂度 | 真 | 深度 ≤2、候选 ≤64 |
+| P2-7 悬空 `.current.*`、prune 可删运行中版本 | 真 | activate 清扫；prune 保护 launchd 目标 + 最小 7 天 |
+| P2-8 helper 无界缓冲 | 真 | 流式读、尾部截断 |
+| 未编号 `Job.from_comment` 丢弃归一化 | 真 | 使用校验值；清死变量 |
+| 缺失 5 V2 任务静默跳过 | 真 | REJECTED + "unsupported protocol version" |
+| 缺失 7 三个测试 | 已存在 | — |
+| P2-1/缺失 1/2/3（GC、心跳、取消） | 真 | **PR B/C**，文档列为未保证 |
+| P2-5 "raw" 实为解码截断文本 | 真 | 文档改口为 "raw capture" |
+| helper 路径只认 flat（审计未列） | 真 | 同时接受 `current/` |
+
+Issue #12 回写：评论 `5612820060`（Executor 身份，脱敏自检通过）。
+
+套件 **241/241**，canary 21/21。
