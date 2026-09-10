@@ -174,6 +174,11 @@ OPERATION_COMMENT_RE = re.compile(
     r"\A\s*COMMANDER_OPERATION_V1\s*\n```json\s*\n(\{.*\})\s*\n```\s*\Z", re.DOTALL
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+TERMINAL_RECORD_RE = re.compile(
+    r"\ACOMMANDER_(?:OPERATION_)?RUNNER_V1 (COMPLETED|FAILED|TIMED_OUT|REJECTED)\n"
+    r"job=([0-9a-f-]{36})\n")
+MAX_PAGES_PER_TICK = 50
 WORKTREE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$")
 GITHUB_LOGIN_RE = re.compile(
@@ -1028,6 +1033,7 @@ class State:
           wake_pull_request INTEGER, terminal_comment_id TEXT,
           created_at INTEGER NOT NULL, completed_at INTEGER);
         """)
+        self._migrate_high_water()
         claim_columns = {row[1] for row in self.db.execute("PRAGMA table_info(claims)")}
         if "recovery_body" not in claim_columns:
             self.db.execute("ALTER TABLE claims ADD COLUMN recovery_body TEXT")
@@ -1195,6 +1201,59 @@ class State:
         lease = self.db.execute("SELECT runner_id, expires_at FROM lease WHERE singleton=1").fetchone()
         return {"jobs": dict(rows), "lease": {"active": bool(lease and lease[1] > int(time.time()))} if lease else None,
                 "queue_page": self.queue_page()}
+    def _migrate_high_water(self) -> None:
+        """Seed the comment high-water mark on first run after upgrade.
+
+        It starts at the LAST comment the previous runner saw -- the largest
+        comment_id with a claims row -- not at zero and not at the Issue's
+        current maximum.  Zero would re-examine every historical comment and
+        post a late REJECTED for each one that was silently skipped years ago;
+        the current maximum would skip any job posted while the runner was
+        stopped for the upgrade.  "Last seen" is right on both counts and needs
+        no GitHub call.  The legacy queue_page row is left untouched.
+        """
+        if self.db.execute("SELECT 1 FROM metadata WHERE key='comment_high_water'").fetchone():
+            return
+        row = self.db.execute(
+            "SELECT MAX(CAST(comment_id AS INTEGER)) FROM claims").fetchone()
+        seed = int(row[0]) if row and row[0] is not None else 0
+        self.db.execute("INSERT INTO metadata(key,value) VALUES ('comment_high_water',?)",
+                        (str(seed),))
+    def comment_high_water(self) -> int:
+        row = self.db.execute("SELECT value FROM metadata WHERE key='comment_high_water'").fetchone()
+        try: return max(0, int(row[0])) if row else 0
+        except (TypeError, ValueError): return 0
+    def advance_high_water(self, comment_id: str, updated_at: str | None = None) -> None:
+        """Monotonic: the mark only ever moves forward."""
+        if not re.fullmatch(r"[1-9][0-9]*", comment_id):
+            raise ValidationError("invalid comment ID for high-water mark")
+        value = int(comment_id)
+        if value <= self.comment_high_water():
+            return
+        self.db.execute("INSERT INTO metadata(key,value) VALUES ('comment_high_water',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(value),))
+        if isinstance(updated_at, str) and ISO_TIMESTAMP_RE.fullmatch(updated_at):
+            self.db.execute("INSERT INTO metadata(key,value) VALUES ('high_water_updated_at',?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (updated_at,))
+    def high_water_updated_at(self) -> str | None:
+        row = self.db.execute(
+            "SELECT value FROM metadata WHERE key='high_water_updated_at'").fetchone()
+        return row[0] if row and ISO_TIMESTAMP_RE.fullmatch(str(row[0])) else None
+    def claims_count(self) -> int:
+        return int(self.db.execute("SELECT count(*) FROM claims").fetchone()[0])
+    def seed_terminal_claim(self, comment_id: str, job_id: str, content_hash_value: str,
+                            internal_state: str) -> bool:
+        """Rebuild one historical claim as already-terminal (never re-runnable)."""
+        if internal_state not in {"succeeded", "failed", "blocked"}:
+            raise ValidationError("rebuilt claims must be terminal")
+        now = int(time.time())
+        cursor = self.db.execute(
+            "INSERT OR IGNORE INTO claims(comment_id,job_id,content_hash,status,claimed_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", (comment_id, job_id, content_hash_value, internal_state, now, now))
+        if cursor.rowcount == 1:
+            self.db.execute("INSERT INTO history(comment_id,status,created_at) VALUES (?,?,?)",
+                            (comment_id, internal_state, now))
+        return cursor.rowcount == 1
     def queue_page(self) -> int:
         row = self.db.execute("SELECT value FROM metadata WHERE key='queue_page'").fetchone()
         try: return max(1, int(row[0])) if row else 1
@@ -2296,11 +2355,15 @@ class GitHubClient:
         wake_comments = (f"repos/{self.config.repository}/issues/"
                          f"{self.config.wake_pull_request}/comments"
                          if self.config.wake_pull_request is not None else None)
+        single_comment = re.fullmatch(
+            re.escape(f"repos/{self.config.repository}/issues/comments/") + r"[1-9][0-9]*", endpoint)
         fixed_endpoints = {expected, comments}
         if wake_comments is not None:
             fixed_endpoints.add(wake_comments)
-        if endpoint not in fixed_endpoints and not re.fullmatch(
-                re.escape(comments) + rf"\?per_page={QUEUE_PAGE_SIZE}&page=[1-9][0-9]*", endpoint):
+        listing = re.fullmatch(
+            re.escape(comments) + rf"\?per_page={QUEUE_PAGE_SIZE}&page=[1-9][0-9]*"
+            r"(?:&since=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)?", endpoint)
+        if endpoint not in fixed_endpoints and not listing and not (single_comment and method == "GET"):
             raise ValidationError("GitHub endpoint outside queue issue")
         allowed_posts = {comments}
         if wake_comments is not None:
@@ -2323,30 +2386,38 @@ class GitHubClient:
         except (json.JSONDecodeError, AttributeError) as exc: raise RunnerError("invalid GitHub login response") from exc
         if not github_login_matches(login, self.config.executor_login):
             raise RunnerError("unexpected executor GitHub login")
-    def comments(self, page: int = 1) -> list[dict[str, Any]]:
+    def comments(self, page: int = 1, since: str | None = None) -> list[dict[str, Any]]:
         if not isinstance(page, int) or page < 1 or page > 1_000_000:
             raise ValidationError("queue page is outside the bounded cursor range")
+        if since is not None and not ISO_TIMESTAMP_RE.fullmatch(since):
+            raise ValidationError("since must be an exact UTC ISO-8601 timestamp")
         endpoint = (f"repos/{self.config.repository}/issues/{self.config.queue_issue}/comments"
-                    f"?per_page={QUEUE_PAGE_SIZE}&page={page}")
+                    f"?per_page={QUEUE_PAGE_SIZE}&page={page}"
+                    + (f"&since={since}" if since else ""))
         value = self._api("GET", endpoint, cap=MAX_QUEUE_PAGE_BYTES)
         if not isinstance(value, list): return []
         return [comment for comment in value if isinstance(comment, dict)]
-    def comment(self, comment_id: str, page: int) -> dict[str, Any]:
-        if not re.fullmatch(r"[0-9]+", comment_id):
+    def comment(self, comment_id: str, page: int = 0) -> dict[str, Any]:
+        """Fetch one comment by id -- O(1), exact, and bound to the queue issue.
+
+        The page-scan this replaced was O(pages) on every claim re-check and
+        every crash recovery, and could not find a comment beyond the stale
+        legacy page cursor at all.  `page` is accepted and ignored for callers
+        written against the old signature.
+        """
+        if not re.fullmatch(r"[1-9][0-9]*", comment_id):
             raise ValidationError("invalid GitHub comment ID")
-        for value in self.comments(page):
-            if str(value.get("id", "")) == comment_id:
-                return value
-        raise RunnerError("claimed comment no longer exists on the queue issue")
-    def find_comment(self, comment_id: str, max_page: int) -> dict[str, Any]:
-        if (not re.fullmatch(r"[0-9]+", comment_id) or not isinstance(max_page, int)
-                or isinstance(max_page, bool) or max_page < 1 or max_page > 1_000_000):
-            raise ValidationError("invalid bounded comment lookup")
-        for page in range(1, max_page + 1):
-            for value in self.comments(page):
-                if str(value.get("id", "")) == comment_id:
-                    return value
-        raise RunnerError("claimed comment no longer exists on the queue issue")
+        value = self._api("GET", f"repos/{self.config.repository}/issues/comments/{comment_id}")
+        if not isinstance(value, dict):
+            raise RunnerError("claimed comment no longer exists on the queue issue")
+        issue_url = str(value.get("issue_url", ""))
+        if not issue_url.endswith(f"/repos/{self.config.repository}/issues/{self.config.queue_issue}"):
+            # The endpoint is repository-wide; a comment from any other issue
+            # must be refused as firmly as a foreign repository would be.
+            raise RunnerError("comment does not belong to the queue issue")
+        return value
+    def find_comment(self, comment_id: str, max_page: int = 0) -> dict[str, Any]:
+        return self.comment(comment_id)
     def _post_comment(self, issue_number: int, body: str) -> str:
         value = self._api(
             "POST", f"repos/{self.config.repository}/issues/{issue_number}/comments",
@@ -2464,6 +2535,83 @@ def drain_wake_outbox(client: GitHubClient, state_db: State,
             return False
         state_db.mark_wake_delivered(job_id)
     return True
+
+def executor_terminal(comment: Mapping[str, Any], config: Config) -> tuple[str, str] | None:
+    """(terminal_state, job_id) if this comment is one of OUR terminal records."""
+    author = (comment.get("user") or {}).get("login")
+    body = comment.get("body")
+    if not github_login_matches(author, config.executor_login) or not isinstance(body, str):
+        return None
+    match = TERMINAL_RECORD_RE.match(body)
+    if not match or not valid_uuid(match.group(2)):
+        return None
+    return match.group(1), match.group(2)
+
+
+def commander_job_identity(comment: Mapping[str, Any], config: Config) -> str | None:
+    """job_id of a Commander-authored job/operation comment, without validating it."""
+    author = (comment.get("user") or {}).get("login")
+    body = comment.get("body")
+    if not github_login_matches(author, config.commander_login) or not isinstance(body, str):
+        return None
+    envelope = envelope_for_rejection(body, config)
+    return envelope.job_id if envelope else None
+
+
+def queue_has_terminal_history(client: GitHubClient, config: Config,
+                               max_pages: int = MAX_PAGES_PER_TICK) -> bool:
+    for page in range(1, max_pages + 1):
+        comments = client.comments(page)
+        if any(executor_terminal(comment, config) for comment in comments):
+            return True
+        if len(comments) < QUEUE_PAGE_SIZE:
+            return False
+    return False
+
+
+def rebuild_claims_from_history(client: GitHubClient, state_db: State, config: Config,
+                                max_pages: int = 1_000) -> dict[str, int]:
+    """Re-seed local claims from the immutable queue history after state loss.
+
+    Exactly-once used to live only in local SQLite: delete the state directory
+    and the whole queue history would run again.  The Issue is the durable
+    record, so it can rebuild the claims table -- every job that already has an
+    Executor terminal record is re-inserted as terminal and can never run
+    again, and the high-water mark moves to the newest comment seen.
+    """
+    jobs: dict[str, tuple[str, str]] = {}        # job_id -> (comment_id, hash)
+    terminals: dict[str, str] = {}               # job_id -> terminal state
+    newest = 0
+    newest_updated: str | None = None
+    for page in range(1, max_pages + 1):
+        comments = client.comments(page)
+        for comment in comments:
+            comment_id = str(comment.get("id", ""))
+            if not re.fullmatch(r"[1-9][0-9]*", comment_id):
+                continue
+            if int(comment_id) > newest:
+                newest, newest_updated = int(comment_id), comment.get("updated_at")
+            job_id = commander_job_identity(comment, config)
+            if job_id and job_id not in jobs:
+                jobs[job_id] = (comment_id, comment_hash(comment["body"]))
+            terminal = executor_terminal(comment, config)
+            if terminal:
+                terminals[terminal[1]] = terminal[0]
+        if len(comments) < QUEUE_PAGE_SIZE:
+            break
+    seeded = 0
+    for job_id, terminal_state in terminals.items():
+        if job_id not in jobs:
+            continue
+        comment_id, digest = jobs[job_id]
+        internal = "succeeded" if terminal_state == "COMPLETED" else "blocked"
+        if state_db.seed_terminal_claim(comment_id, job_id, digest, internal):
+            seeded += 1
+    if newest:
+        state_db.advance_high_water(str(newest), newest_updated)
+    return {"jobs_seen": len(jobs), "terminals_seen": len(terminals),
+            "claims_seeded": seeded, "comment_high_water": state_db.comment_high_water()}
+
 
 def drain_rejection_outbox(client: GitHubClient, state_db: State) -> bool:
     """Post REJECTED records for unclaimable comments; at-least-once, never re-run."""
@@ -2883,206 +3031,234 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                 return "WAKE_PENDING"
             if not drain_rejection_outbox(client, state):
                 return "WAKE_PENDING"
-            queue_page = state.queue_page()
-            comments = client.comments(queue_page)
-            for comment in comments:
-                author = ((comment.get("user") or {}).get("login"))
-                body, comment_id = comment.get("body"), str(comment.get("id", ""))
-                if (not github_login_matches(author, config.commander_login)
-                        or not isinstance(body, str) or not comment_id):
-                    continue
-                if state.is_rejected_comment(comment_id):
-                    continue
-                try:
-                    if OPERATION_COMMENT_RE.fullmatch(body):
-                        job: Job | OperationJob = OperationJob.from_comment(body, config)
-                    else:
-                        job = Job.from_comment(body, config)
-                except ValidationError as exc:
-                    envelope = envelope_for_rejection(body, config)
-                    if envelope is None:
-                        continue
-                    if dry_run:
-                        return f"REJECTED {envelope.job_id}"
-                    rejection_digest = comment_hash(body)
-                    recovery = rejection_lifecycle(
-                        envelope, "runner restarted before the rejection was recorded")
-                    try:
-                        claimed = state.claim(comment_id, envelope.job_id,
-                                              rejection_digest, recovery)
-                    except ValidationError as claim_error:
-                        # Same defect class as the valid branch below: never
-                        # let an unclaimable comment be re-examined forever.
-                        state.record_rejected_comment(
-                            comment_id, envelope.job_id, str(claim_error),
-                            rejection_lifecycle(envelope, f"{exc}; {claim_error}"))
-                        drain_rejection_outbox(client, state)
-                        return f"REJECTED {envelope.job_id}"
-                    if not claimed:
-                        continue
-                    state.queue_terminal(comment_id, envelope.job_id,
-                                         rejection_lifecycle(envelope, str(exc)),
-                                         "blocked", "REJECTED", config)
-                    delivered = drain_terminal_outbox(client, state, config)
-                    return (f"REJECTED {envelope.job_id}" if delivered
-                            else f"WAKE_PENDING {envelope.job_id}")
-                digest = comment_hash(body)
-                if dry_run:
-                    verify_target(config, job)
-                    return f"VALIDATED {job.job_id}"
-                recovery_body = lifecycle(
-                    job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
-                try:
-                    claimed = state.claim(comment_id, job.job_id, digest, recovery_body)
-                except ValidationError as claim_error:
-                    # A re-posted job UUID, or an already-claimed comment that
-                    # was edited.  This used to propagate out of run_once; the
-                    # serve loop caught it, backed off, and re-read the SAME
-                    # comment next tick -- raising again, forever.  The runner
-                    # stayed alive and processed nothing, with no terminal
-                    # record and no signal.  It must become a terminal instead.
-                    if state.claim_status(comment_id) in {"claimed", "running"}:
-                        # We hold this very comment and it changed under us.
-                        delivered = post_terminal_lifecycle(
-                            client, job, "REJECTED",
-                            f"claim invalidated: {claim_error}", state, comment_id, "blocked")
-                        # The terminal is already on its way; just make sure
-                        # this comment is never re-examined.
-                        state.suppress_comment(comment_id, job.job_id, str(claim_error))
-                        return (f"REJECTED {job.job_id}" if delivered
-                                else f"WAKE_PENDING {job.job_id}")
-                    schema = OPERATION_SCHEMA if isinstance(job, OperationJob) else SCHEMA
-                    envelope = RejectedEnvelope(job.job_id, config.runner_id, schema)
-                    state.record_rejected_comment(
-                        comment_id, job.job_id, str(claim_error),
-                        rejection_lifecycle(envelope, f"cannot claim: {claim_error}"))
-                    drain_rejection_outbox(client, state)
-                    return f"REJECTED {job.job_id}"
-                if not claimed: continue
-                latest = client.comment(comment_id, queue_page)
-                if (not github_login_matches((latest.get("user") or {}).get("login"),
-                                             config.commander_login)
-                        or not isinstance(latest.get("body"), str)
-                        or comment_hash(latest["body"]) != digest):
-                    delivered = post_terminal_lifecycle(
-                        client, job, "REJECTED", "claimed comment was edited or author changed",
-                        state, comment_id, "blocked")
-                    return f"REJECTED {job.job_id}" if delivered else f"WAKE_PENDING {job.job_id}"
-                # Advisory progress marker only.  Letting a transient GitHub
-                # failure escape here left the claim recorded and the job
-                # unexecuted, so the next tick's recovery posted a FAILED
-                # "ambiguous execution" record that said the opposite of what
-                # happened -- and burned the job UUID.
-                try:
-                    client.post(lifecycle(job, "CLAIMED"))
-                except (RunnerError, UnsafeOutputError) as exc:
-                    print(f"runner warning: CLAIMED marker not posted for {job.job_id}: {exc}",
-                          file=sys.stderr)
-                try:
-                    worktree = prepare_worktree(config, job)
-                    state.set_status(comment_id, "running")
-                    if isinstance(job, OperationJob):
-                        operation_attempt = execute_operation(job, config, worktree)
-                        result = operation_attempt.result
-                        if result:
-                            # Persistence failure downgrades the outcome: an
-                            # operation whose evidence we could not store must
-                            # never be published as COMPLETED.
-                            try:
-                                store_raw_output(config.state_dir, job.job_id, result.output)
-                            except (OSError, ValidationError):
-                                operation_attempt = dataclasses.replace(
-                                    operation_attempt, output=None,
-                                    error_category="PERSISTENCE")
-                        state.record_attempt(
-                            job.job_id, 1, None, None, operation_attempt.error_category,
-                            stop_class_for(operation_attempt.error_category))
-                        if operation_attempt.error_category == "TIMEOUT":
-                            state_name, internal_state = "TIMED_OUT", "blocked"
-                        elif operation_attempt.error_category:
-                            state_name, internal_state = "FAILED", "blocked"
-                        elif operation_attempt.output and operation_attempt.output.status == "blocked":
-                            state_name, internal_state = "FAILED", "blocked"
-                        else:
-                            state_name, internal_state = "COMPLETED", "succeeded"
-                        if operation_attempt.output:
-                            evidence = (operation_attempt.output.summary + "\n"
-                                        + "\n".join(operation_attempt.output.evidence))
-                        else:
-                            evidence = f"operation_error={operation_attempt.error_category}"
-                        duration = result.duration_seconds if result else 0.0
-                        exit_code = result.returncode if result else -1
-                        detail = (f"operation={job.operation_id}; attempts=1; "
-                                  f"attempt_id={attempt_id_for(job.job_id, 1)}; "
-                                  f"stop_class={stop_class_for(operation_attempt.error_category) or 'NONE'}; "
-                                  f"policy={policy_for(operation_attempt.error_category) or 'NONE'}; "
-                                  f"exit={exit_code}; duration={duration:.1f}s; "
-                                  f"{redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)}")
-                    else:
-                        attempt, attempts = execute_with_failover(job, config, worktree)
-                        result = attempt.result
-                        delivered_sha = ""
-                        if attempt.error_category == "TIMEOUT":
-                            state_name, internal_state = "TIMED_OUT", "blocked"
-                        elif attempt.error_category == "RUNTIME":
-                            state_name, internal_state = "FAILED", "failed"
-                        elif attempt.error_category:
-                            state_name, internal_state = "FAILED", "blocked"
-                        elif attempt.output and attempt.output.status == "blocked":
-                            state_name, internal_state = "FAILED", "blocked"
-                        else:
-                            if job.profile == "repo_write_test":
-                                run_quality_gate(config, job, worktree)
-                            elif job.profile == "repo_delivery":
-                                delivered_sha = deliver_worktree(config, job, worktree)
-                            state_name, internal_state = "COMPLETED", "succeeded"
-                        ordinal = max(1, len(attempts))
-                        for index, record in enumerate(attempts, start=1):
-                            state.record_attempt(
-                                job.job_id, index, record.worker, record.model,
-                                record.error_category, stop_class_for(record.error_category))
-                        artifact_note = ""
-                        if attempt.output:
-                            # The full report is kept locally; the Issue carries
-                            # a bounded excerpt plus the artifact digest so the
-                            # record stays complete without being unbounded.
-                            with contextlib.suppress(OSError, ValidationError, UnsafeOutputError):
-                                artifact, digest = store_artifact(
-                                    config.state_dir, job.job_id, ordinal, attempt.output)
-                                artifact_note = (f"\nartifact={artifact.name}"
-                                                 f"\nartifact_sha256={digest}"
-                                                 f"\nsummary_chars={attempt.output.summary_chars}"
-                                                 f"\nsummary_truncated={str(attempt.output.truncated).lower()}")
-                            evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
-                        else:
-                            evidence = f"provider_error={attempt.error_category}"
-                            if attempt.error_category in {"OUTPUT_VALIDATION", "OUTPUT_LIMIT"}:
-                                # Recoverable without spending provider quota.
-                                evidence += ("\nraw output persisted; recover locally with: "
-                                             f"commander_runner.py renormalize --job {job.job_id}")
-                        evidence = redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)
-                        if delivered_sha:
-                            evidence += f"\ndelivered_sha={delivered_sha}"
-                        duration = result.duration_seconds if result else 0.0
-                        exit_code = result.returncode if result else -1
-                        stop_class = stop_class_for(attempt.error_category)
-                        detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
-                                  f"attempt_id={attempt_id_for(job.job_id, ordinal)}; "
-                                  f"stop_class={stop_class or 'NONE'}; "
-                                  f"policy={policy_for(attempt.error_category) or 'NONE'}; "
-                                  f"quality_gate={job.quality_gate}; "
-                                  f"exit={exit_code}; duration={duration:.1f}s; {evidence}{artifact_note}")
-                except RunnerError as exc:
-                    state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
-                delivered = post_terminal_lifecycle(
-                    client, job, state_name, detail, state, comment_id, internal_state)
-                return (f"{state_name} {job.job_id}" if delivered
-                        else f"WAKE_PENDING {job.job_id}")
-            if len(comments) == QUEUE_PAGE_SIZE:
-                state.set_queue_page(queue_page + 1)
-                return "QUEUE_CURSOR_ADVANCED"
-            if not comments and queue_page > 1:
-                state.set_queue_page(queue_page - 1)
+            high_water = state.comment_high_water()
+            if high_water == 0 and state.claims_count() == 0 \
+                    and queue_has_terminal_history(client, config):
+                # Empty local state facing a queue with terminal records means
+                # the state was lost, not that this is a fresh install.  Scanning
+                # from here would replay every historical job.  Fail closed.
+                raise RunnerError(
+                    "local state is empty but the queue already has terminal history; "
+                    "run `rebuild-claims --confirm` before serving")
+            since = state.high_water_updated_at() if high_water else None
+            queue_page = 0  # legacy name kept for the claim re-check call below
+            for page in range(1, MAX_PAGES_PER_TICK + 1):
+              comments = client.comments(page, since)
+              for comment in comments:
+                  comment_id = str(comment.get("id", ""))
+                  if not re.fullmatch(r"[1-9][0-9]*", comment_id) or int(comment_id) <= high_water:
+                      continue  # already examined; `since` may echo edited old comments
+                  updated_at = comment.get("updated_at")
+                  author = ((comment.get("user") or {}).get("login"))
+                  body = comment.get("body")
+                  if (not github_login_matches(author, config.commander_login)
+                          or not isinstance(body, str)):
+                      if not dry_run:
+                          state.advance_high_water(comment_id, updated_at)
+                      continue
+                  if state.is_rejected_comment(comment_id):
+                      if not dry_run:
+                          state.advance_high_water(comment_id, updated_at)
+                      continue
+                  try:
+                      if OPERATION_COMMENT_RE.fullmatch(body):
+                          job: Job | OperationJob = OperationJob.from_comment(body, config)
+                      else:
+                          job = Job.from_comment(body, config)
+                  except ValidationError as exc:
+                      envelope = envelope_for_rejection(body, config)
+                      if envelope is None:
+                          if not dry_run:
+                              state.advance_high_water(comment_id, updated_at)
+                          continue
+                      if dry_run:
+                          return f"REJECTED {envelope.job_id}"
+                      rejection_digest = comment_hash(body)
+                      recovery = rejection_lifecycle(
+                          envelope, "runner restarted before the rejection was recorded")
+                      try:
+                          claimed = state.claim(comment_id, envelope.job_id,
+                                                rejection_digest, recovery)
+                      except ValidationError as claim_error:
+                          # Same defect class as the valid branch below: never
+                          # let an unclaimable comment be re-examined forever.
+                          state.record_rejected_comment(
+                              comment_id, envelope.job_id, str(claim_error),
+                              rejection_lifecycle(envelope, f"{exc}; {claim_error}"))
+                          state.advance_high_water(comment_id, updated_at)
+                          drain_rejection_outbox(client, state)
+                          return f"REJECTED {envelope.job_id}"
+                      if not claimed:
+                          state.advance_high_water(comment_id, updated_at)
+                          continue
+                      state.advance_high_water(comment_id, updated_at)
+                      state.queue_terminal(comment_id, envelope.job_id,
+                                           rejection_lifecycle(envelope, str(exc)),
+                                           "blocked", "REJECTED", config)
+                      delivered = drain_terminal_outbox(client, state, config)
+                      return (f"REJECTED {envelope.job_id}" if delivered
+                              else f"WAKE_PENDING {envelope.job_id}")
+                  digest = comment_hash(body)
+                  if dry_run:
+                      verify_target(config, job)
+                      return f"VALIDATED {job.job_id}"
+                  recovery_body = lifecycle(
+                      job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+                  try:
+                      claimed = state.claim(comment_id, job.job_id, digest, recovery_body)
+                  except ValidationError as claim_error:
+                      # A re-posted job UUID, or an already-claimed comment that
+                      # was edited.  This used to propagate out of run_once; the
+                      # serve loop caught it, backed off, and re-read the SAME
+                      # comment next tick -- raising again, forever.  The runner
+                      # stayed alive and processed nothing, with no terminal
+                      # record and no signal.  It must become a terminal instead.
+                      if state.claim_status(comment_id) in {"claimed", "running"}:
+                          # We hold this very comment and it changed under us.
+                          delivered = post_terminal_lifecycle(
+                              client, job, "REJECTED",
+                              f"claim invalidated: {claim_error}", state, comment_id, "blocked")
+                          # The terminal is already on its way; just make sure
+                          # this comment is never re-examined.
+                          state.suppress_comment(comment_id, job.job_id, str(claim_error))
+                          state.advance_high_water(comment_id, updated_at)
+                          return (f"REJECTED {job.job_id}" if delivered
+                                  else f"WAKE_PENDING {job.job_id}")
+                      schema = OPERATION_SCHEMA if isinstance(job, OperationJob) else SCHEMA
+                      envelope = RejectedEnvelope(job.job_id, config.runner_id, schema)
+                      state.record_rejected_comment(
+                          comment_id, job.job_id, str(claim_error),
+                          rejection_lifecycle(envelope, f"cannot claim: {claim_error}"))
+                      state.advance_high_water(comment_id, updated_at)
+                      drain_rejection_outbox(client, state)
+                      return f"REJECTED {job.job_id}"
+                  if not claimed:
+                      state.advance_high_water(comment_id, updated_at)
+                      continue
+                  # Ours now: the mark moves before execution so a crash here is
+                  # handled by claim recovery, never by re-reading the comment.
+                  state.advance_high_water(comment_id, updated_at)
+                  latest = client.comment(comment_id, queue_page)
+                  if (not github_login_matches((latest.get("user") or {}).get("login"),
+                                               config.commander_login)
+                          or not isinstance(latest.get("body"), str)
+                          or comment_hash(latest["body"]) != digest):
+                      delivered = post_terminal_lifecycle(
+                          client, job, "REJECTED", "claimed comment was edited or author changed",
+                          state, comment_id, "blocked")
+                      return f"REJECTED {job.job_id}" if delivered else f"WAKE_PENDING {job.job_id}"
+                  # Advisory progress marker only.  Letting a transient GitHub
+                  # failure escape here left the claim recorded and the job
+                  # unexecuted, so the next tick's recovery posted a FAILED
+                  # "ambiguous execution" record that said the opposite of what
+                  # happened -- and burned the job UUID.
+                  try:
+                      client.post(lifecycle(job, "CLAIMED"))
+                  except (RunnerError, UnsafeOutputError) as exc:
+                      print(f"runner warning: CLAIMED marker not posted for {job.job_id}: {exc}",
+                            file=sys.stderr)
+                  try:
+                      worktree = prepare_worktree(config, job)
+                      state.set_status(comment_id, "running")
+                      if isinstance(job, OperationJob):
+                          operation_attempt = execute_operation(job, config, worktree)
+                          result = operation_attempt.result
+                          if result:
+                              # Persistence failure downgrades the outcome: an
+                              # operation whose evidence we could not store must
+                              # never be published as COMPLETED.
+                              try:
+                                  store_raw_output(config.state_dir, job.job_id, result.output)
+                              except (OSError, ValidationError):
+                                  operation_attempt = dataclasses.replace(
+                                      operation_attempt, output=None,
+                                      error_category="PERSISTENCE")
+                          state.record_attempt(
+                              job.job_id, 1, None, None, operation_attempt.error_category,
+                              stop_class_for(operation_attempt.error_category))
+                          if operation_attempt.error_category == "TIMEOUT":
+                              state_name, internal_state = "TIMED_OUT", "blocked"
+                          elif operation_attempt.error_category:
+                              state_name, internal_state = "FAILED", "blocked"
+                          elif operation_attempt.output and operation_attempt.output.status == "blocked":
+                              state_name, internal_state = "FAILED", "blocked"
+                          else:
+                              state_name, internal_state = "COMPLETED", "succeeded"
+                          if operation_attempt.output:
+                              evidence = (operation_attempt.output.summary + "\n"
+                                          + "\n".join(operation_attempt.output.evidence))
+                          else:
+                              evidence = f"operation_error={operation_attempt.error_category}"
+                          duration = result.duration_seconds if result else 0.0
+                          exit_code = result.returncode if result else -1
+                          detail = (f"operation={job.operation_id}; attempts=1; "
+                                    f"attempt_id={attempt_id_for(job.job_id, 1)}; "
+                                    f"stop_class={stop_class_for(operation_attempt.error_category) or 'NONE'}; "
+                                    f"policy={policy_for(operation_attempt.error_category) or 'NONE'}; "
+                                    f"exit={exit_code}; duration={duration:.1f}s; "
+                                    f"{redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)}")
+                      else:
+                          attempt, attempts = execute_with_failover(job, config, worktree)
+                          result = attempt.result
+                          delivered_sha = ""
+                          if attempt.error_category == "TIMEOUT":
+                              state_name, internal_state = "TIMED_OUT", "blocked"
+                          elif attempt.error_category == "RUNTIME":
+                              state_name, internal_state = "FAILED", "failed"
+                          elif attempt.error_category:
+                              state_name, internal_state = "FAILED", "blocked"
+                          elif attempt.output and attempt.output.status == "blocked":
+                              state_name, internal_state = "FAILED", "blocked"
+                          else:
+                              if job.profile == "repo_write_test":
+                                  run_quality_gate(config, job, worktree)
+                              elif job.profile == "repo_delivery":
+                                  delivered_sha = deliver_worktree(config, job, worktree)
+                              state_name, internal_state = "COMPLETED", "succeeded"
+                          ordinal = max(1, len(attempts))
+                          for index, record in enumerate(attempts, start=1):
+                              state.record_attempt(
+                                  job.job_id, index, record.worker, record.model,
+                                  record.error_category, stop_class_for(record.error_category))
+                          artifact_note = ""
+                          if attempt.output:
+                              # The full report is kept locally; the Issue carries
+                              # a bounded excerpt plus the artifact digest so the
+                              # record stays complete without being unbounded.
+                              with contextlib.suppress(OSError, ValidationError, UnsafeOutputError):
+                                  artifact, digest = store_artifact(
+                                      config.state_dir, job.job_id, ordinal, attempt.output)
+                                  artifact_note = (f"\nartifact={artifact.name}"
+                                                   f"\nartifact_sha256={digest}"
+                                                   f"\nsummary_chars={attempt.output.summary_chars}"
+                                                   f"\nsummary_truncated={str(attempt.output.truncated).lower()}")
+                              evidence = attempt.output.summary + "\n" + "\n".join(attempt.output.evidence)
+                          else:
+                              evidence = f"provider_error={attempt.error_category}"
+                              if attempt.error_category in {"OUTPUT_VALIDATION", "OUTPUT_LIMIT"}:
+                                  # Recoverable without spending provider quota.
+                                  evidence += ("\nraw output persisted; recover locally with: "
+                                               f"commander_runner.py renormalize --job {job.job_id}")
+                          evidence = redact(evidence, MAX_ISSUE_EVIDENCE_CHARS)
+                          if delivered_sha:
+                              evidence += f"\ndelivered_sha={delivered_sha}"
+                          duration = result.duration_seconds if result else 0.0
+                          exit_code = result.returncode if result else -1
+                          stop_class = stop_class_for(attempt.error_category)
+                          detail = (f"provider={attempt.worker}; model={attempt.model}; attempts={len(attempts)}; "
+                                    f"attempt_id={attempt_id_for(job.job_id, ordinal)}; "
+                                    f"stop_class={stop_class or 'NONE'}; "
+                                    f"policy={policy_for(attempt.error_category) or 'NONE'}; "
+                                    f"quality_gate={job.quality_gate}; "
+                                    f"exit={exit_code}; duration={duration:.1f}s; {evidence}{artifact_note}")
+                  except RunnerError as exc:
+                      state_name, internal_state, detail = "FAILED", "blocked", f"runner stop condition: {exc}"
+                  delivered = post_terminal_lifecycle(
+                      client, job, state_name, detail, state, comment_id, internal_state)
+                  return (f"{state_name} {job.job_id}" if delivered
+                          else f"WAKE_PENDING {job.job_id}")
+              if len(comments) < QUEUE_PAGE_SIZE:
+                  break
             return "NO_JOB"
         finally: state.close()
 
@@ -3153,6 +3329,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     install = subs.add_parser("install"); install.add_argument("--confirm", action="store_true")
     subs.add_parser("doctor"); subs.add_parser("health"); subs.add_parser("status"); subs.add_parser("heartbeat")
     once = subs.add_parser("run-once"); once.add_argument("--dry-run", action="store_true")
+    rebuild = subs.add_parser(
+        "rebuild-claims",
+        help="re-seed local claims from the queue's terminal history after state loss")
+    rebuild.add_argument("--confirm", action="store_true")
     recover = subs.add_parser(
         "renormalize",
         help="re-parse a job's persisted raw provider output locally; calls no provider")
@@ -3176,6 +3356,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "heartbeat":
             state = State(config.state_dir); ok = state.acquire_lease(config.runner_id, config.lease_seconds); state.close(); print("LEASE_OK" if ok else "LEASE_HELD"); return 0 if ok else 2
         if args.command == "run-once": print(run_once(config, args.dry_run)); return 0
+        if args.command == "rebuild-claims":
+            with ProcessLock(config.state_dir):
+                state = State(config.state_dir)
+                try:
+                    client = GitHubClient(config); client.verify_login()
+                    if not args.confirm:
+                        print(json.dumps({"claims_now": state.claims_count(),
+                                          "comment_high_water": state.comment_high_water(),
+                                          "note": "pass --confirm to rebuild"}, sort_keys=True))
+                        return 0
+                    print(json.dumps(rebuild_claims_from_history(client, state, config), sort_keys=True))
+                finally:
+                    state.close()
+            return 0
         if args.command == "renormalize":
             print(json.dumps(renormalize_job(config.state_dir, args.job,
                                              args.allow_legacy_without_nonce), sort_keys=True))

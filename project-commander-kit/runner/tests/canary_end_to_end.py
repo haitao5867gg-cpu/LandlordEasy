@@ -57,7 +57,7 @@ print("I reviewed everything and it all looks fine, but in prose.")
 # path is baked in at generation time rather than passed through the
 # environment, because `safe_environment()` correctly strips unknown variables.
 GH = '''#!/usr/bin/env python3
-import json, os, sys
+import json, os, re, sys
 store = "__STORE__"
 argv = sys.argv[1:]
 if argv[:2] == ["api", "user"]:
@@ -66,9 +66,18 @@ method = argv[argv.index("--method") + 1]
 endpoint = argv[argv.index("--method") + 2]
 state = json.load(open(store))
 if method == "GET":
+    if "/issues/comments/" in endpoint:
+        # single-comment lookup, bound to the queue issue
+        wanted = endpoint.rsplit("/", 1)[1]
+        for c in state["comments"]:
+            if str(c["id"]) == wanted:
+                c = dict(c); c.setdefault("issue_url", "https://api.github.com/repos/canary/repo/issues/42")
+                print(json.dumps(c)); raise SystemExit(0)
+        print("{}"); raise SystemExit(1)
     page = 1
-    if "page=" in endpoint:
-        page = int(endpoint.rsplit("page=", 1)[1])
+    m = re.search(r"[?&]page=(\d+)", endpoint)
+    if m:
+        page = int(m.group(1))
     print(json.dumps(state["comments"] if page == 1 else []))
     raise SystemExit(0)
 body = ""

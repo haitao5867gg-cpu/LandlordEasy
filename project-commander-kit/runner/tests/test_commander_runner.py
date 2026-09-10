@@ -711,7 +711,7 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         class FixtureClient:
             def __init__(self, config): pass
             def verify_login(self): pass
-            def comments(self, page): return [{"id": 1, "user": {"login": "attacker"}, "body": self.outer.comment()}]
+            def comments(self, page, since=None): return [{"id": 1, "user": {"login": "attacker"}, "body": self.outer.comment()}]
             def post(self, body): raise AssertionError("no post")
         FixtureClient.outer = self
         with mock.patch.object(runner, "GitHubClient", FixtureClient):
@@ -720,7 +720,7 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         class FixtureClient:
             def __init__(self, config): pass
             def verify_login(self): pass
-            def comments(self, page):
+            def comments(self, page, since=None):
                 return [{"id": 1, "user": {"login": "executor"}, "body": self.outer.comment()}]
             def post(self, body): raise AssertionError("executor lifecycle comment must not execute")
         FixtureClient.outer = self
@@ -733,7 +733,7 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         class FixtureClient:
             def __init__(self, config): pass
             def verify_login(self): pass
-            def comments(self, page):
+            def comments(self, page, since=None):
                 return [{"id": 1, "user": {"login": "COMMANDER"}, "body": self.outer.comment()}]
             def post(self, body): raise AssertionError("dry-run must not post")
         FixtureClient.outer = self
@@ -821,7 +821,7 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
             def __init__(self, supplied): self.config = supplied
             def verify_login(self): pass
             def post_wake(self, body): raise runner.RunnerError("fixture")
-            def comments(self, page): raise AssertionError("must not scan or claim while wake is pending")
+            def comments(self, page, since=None): raise AssertionError("must not scan or claim while wake is pending")
         with mock.patch.object(runner, "GitHubClient", FixtureClient):
             self.assertEqual(runner.run_once(config), "WAKE_PENDING")
 
@@ -848,7 +848,7 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
             def __init__(self, supplied): self.config = supplied
             def verify_login(self): pass
             def post_wake(self, body): raise AssertionError("mismatch must block before POST")
-            def comments(self, page): raise AssertionError("must not scan while wake identity differs")
+            def comments(self, page, since=None): raise AssertionError("must not scan while wake identity differs")
         with mock.patch.object(runner, "GitHubClient", FixtureClient), self.assertRaises(runner.RunnerError):
             runner.run_once(disabled)
 
@@ -875,7 +875,7 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
             outer = None
             def __init__(self, supplied): self.config = supplied
             def verify_login(self): pass
-            def comments(self, page):
+            def comments(self, page, since=None):
                 return [{"id": 1, "user": {"login": "commander"}, "body": self.outer.comment()}]
             def find_comment(self, comment_id, max_page):
                 return self.comments(1)[0]
@@ -893,24 +893,37 @@ class GitHubAndLaunchAgentTests(RunnerTestCase):
         self.assertEqual(recovered.pending_terminals(), ())
         recovered.close()
     def test_incremental_cursor_finds_latest_job_after_large_history(self):
+        """A backlog deeper than MAX_PAGES_PER_TICK is drained by the mark, and
+        the next tick's `since` brings anything newer to page one -- exactly
+        how the GitHub API behaves.  The page cursor this replaced needed 50
+        ticks to get here and oscillated once it arrived."""
+        job = {"id": 999999, "user": {"login": "commander"}, "body": self.comment(),
+               "updated_at": "2026-09-10T12:00:00Z"}
         class FixtureClient:
             outer = None
             def __init__(self, config): pass
             def verify_login(self): pass
-            def comments(self, page):
-                if page < 51:
-                    return [{"id": page * 100 + index, "user": {"login": "observer"}, "body": "history"}
+            def comments(self, page, since=None):
+                if since is not None:
+                    # GitHub returns only comments updated at/after `since`.
+                    return [job] if page == 1 else []
+                if page <= runner.MAX_PAGES_PER_TICK:
+                    return [{"id": page * 100 + index, "user": {"login": "observer"},
+                             "body": "history", "updated_at": f"2026-09-10T00:{page % 60:02d}:00Z"}
                             for index in range(runner.QUEUE_PAGE_SIZE)]
-                return [{"id": 999999, "user": {"login": "commander"}, "body": self.outer.comment()}]
+                return [job]
             def post(self, body): raise AssertionError("dry-run must not post")
         FixtureClient.outer = self
         with mock.patch.object(runner, "GitHubClient", FixtureClient), \
              mock.patch.object(runner, "verify_target"):
-            for _ in range(50):
-                self.assertEqual(runner.run_once(self.config, dry_run=True), "QUEUE_CURSOR_ADVANCED")
+            # Tick 1 drains the whole 50-page backlog and moves the mark.
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+            state = runner.State(self.state)
+            self.assertEqual(state.comment_high_water(), 50 * 100 + runner.QUEUE_PAGE_SIZE - 1)
+            self.assertEqual(state.queue_page(), 1)   # legacy row untouched, never used
+            state.close()
+            # Tick 2 asks `since` the mark and finds the newer job on page one.
             self.assertTrue(runner.run_once(self.config, dry_run=True).startswith("VALIDATED "))
-        state = runner.State(self.state)
-        self.assertEqual(state.queue_page(), 51); state.close()
     def test_launchagent_rendering_is_inert_and_bounded_to_fixture(self):
         rendered = runner.make_launchagent({"Label": "com.landlordeasy.commander-runner", "KeepAlive": True},
                                            "/fixture/python", "/fixture/runner.py", "/fixture/config.json", "/fixture/state")

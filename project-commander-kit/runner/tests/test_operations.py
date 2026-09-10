@@ -214,7 +214,7 @@ class OperationExecutionTests(OperationTestCase):
         class CommanderClient:
             def __init__(self, config): pass
             def verify_login(self): pass
-            def comments(self, page):
+            def comments(self, page, since=None):
                 return [{"id": 71, "user": {"login": "COMMANDER"}, "body": outer.comment()}]
             def post(self, body): raise AssertionError("dry-run must not post")
         with mock.patch.object(runner, "GitHubClient", CommanderClient), \
@@ -223,7 +223,7 @@ class OperationExecutionTests(OperationTestCase):
         verify.assert_called_once()
 
         class ExecutorClient(CommanderClient):
-            def comments(self, page):
+            def comments(self, page, since=None):
                 return [{"id": 72, "user": {"login": "executor"}, "body": outer.comment()}]
         with mock.patch.object(runner, "GitHubClient", ExecutorClient), \
              mock.patch.object(runner, "verify_target") as verify:

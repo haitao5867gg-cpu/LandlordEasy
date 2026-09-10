@@ -82,7 +82,7 @@ class HardeningTestCase(unittest.TestCase):
             def verify_login(self):
                 pass
 
-            def comments(self, page):
+            def comments(self, page, since=None):
                 if page != 1:
                     return []
                 return [{"id": comment_id, "user": {"login": author}, "body": body}]
@@ -183,7 +183,7 @@ class ClaimWedgeRegressionTests(HardeningTestCase):
             def verify_login(self):
                 pass
 
-            def comments(self, page):
+            def comments(self, page, since=None):
                 return list(comments) if page == 1 else []
 
             def comment(self, cid, page):
@@ -261,6 +261,171 @@ class ClaimWedgeRegressionTests(HardeningTestCase):
             self.assertEqual(runner.run_once(self.config), "NO_JOB")
         self.assertTrue(any("COMPLETED" in p for p in posts))
         self.assertFalse(any("ambiguous execution" in p for p in posts))
+
+
+class HighWaterCursorTests(HardeningTestCase):
+    """The queue cursor is a monotonic comment-id mark, not a page number.
+
+    The page cursor oscillated at the last page, wasted half its polls, and
+    scanned O(pages) on every recovery.  Every comment is now examined at most
+    once, a tick may drain several pages, and the mark only moves forward.
+    """
+
+    def paged_client(self, comments):
+        calls = []
+        posts = []
+
+        class FixtureClient:
+            def __init__(self, config):
+                self.config = config
+
+            def verify_login(self):
+                pass
+
+            def comments(self, page, since=None):
+                calls.append((page, since))
+                start = (page - 1) * runner.QUEUE_PAGE_SIZE
+                return list(comments[start:start + runner.QUEUE_PAGE_SIZE])
+
+            def comment(self, cid, page=0):
+                return next(c for c in comments if str(c["id"]) == str(cid))
+
+            def find_comment(self, cid, max_page=0):
+                return self.comment(cid)
+
+            def post(self, body):
+                posts.append(runner.ensure_safe_post(body))
+                return str(9000 + len(posts))
+
+            def post_wake(self, body):
+                return "1"
+
+        return FixtureClient, calls, posts
+
+    def chatter(self, comment_id):
+        return {"id": comment_id, "user": {"login": "someone-else"},
+                "body": f"noise {comment_id}", "updated_at": f"2026-09-10T00:00:{comment_id % 60:02d}Z"}
+
+    def test_one_tick_drains_several_pages_of_noise_and_never_looks_back(self):
+        noise = [self.chatter(i) for i in range(1, 46)]           # 45 comments = 3 pages
+        client, calls, _ = self.paged_client(noise)
+        with mock.patch.object(runner, "GitHubClient", client):
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+            first_tick_calls = len(calls)
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        state = runner.State(self.state)
+        try:
+            self.assertEqual(state.comment_high_water(), 45)
+        finally:
+            state.close()
+        # 3 pages for the one-time lost-state check (claims empty, mark 0) plus
+        # 3 pages for the scan itself.  The check never runs again once the mark
+        # has moved, so this doubling is confined to the first tick of a fresh
+        # install.
+        self.assertEqual(first_tick_calls, 6)
+        # The second tick used `since` and never re-examined the 45 old ids.
+        self.assertIsNotNone(calls[first_tick_calls][1])
+
+    def test_a_job_beyond_the_mark_is_found_and_the_mark_moves_past_it(self):
+        comments = [self.chatter(i) for i in range(1, 25)]
+        comments.append({"id": 25, "user": {"login": "commander"}, "body": self.comment(),
+                         "updated_at": "2026-09-10T00:01:00Z"})
+        client, _, posts = self.paged_client(comments)
+        ok = runner.Result(0, json.dumps({"status": "ok", "summary": "done", "evidence": ["e"],
+                                          "nonce": runner.attempt_id_for(JOB_ID, 1)}),
+                           False, False, 1.0)
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "prepare_worktree", return_value=self.worktrees), \
+             mock.patch.object(runner, "execute", return_value=ok):
+            self.assertEqual(runner.run_once(self.config), f"COMPLETED {JOB_ID}")
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        state = runner.State(self.state)
+        try:
+            self.assertEqual(state.comment_high_water(), 25)
+        finally:
+            state.close()
+        self.assertEqual(len([p for p in posts if "COMPLETED" in p]), 1)
+
+    def test_migration_seeds_the_mark_at_the_last_comment_the_old_runner_saw(self):
+        state = runner.State(self.state)
+        try:
+            state.claim("5", JOB_ID, "h" * 64)
+            state.claim("9", "123e4567-e89b-12d3-a456-426614174099", "h" * 64)
+            state.db.execute("DELETE FROM metadata WHERE key='comment_high_water'")
+        finally:
+            state.close()
+        reopened = runner.State(self.state)
+        try:
+            self.assertEqual(reopened.comment_high_water(), 9)
+            reopened.advance_high_water("4")                     # never moves backwards
+            self.assertEqual(reopened.comment_high_water(), 9)
+        finally:
+            reopened.close()
+
+    def test_dry_run_does_not_move_the_mark(self):
+        client, _, _ = self.paged_client([self.chatter(1), self.chatter(2)])
+        with mock.patch.object(runner, "GitHubClient", client):
+            runner.run_once(self.config, dry_run=True)
+        state = runner.State(self.state)
+        try:
+            self.assertEqual(state.comment_high_water(), 0)
+        finally:
+            state.close()
+
+
+class LostStateTests(HardeningTestCase):
+    """P1-4: exactly-once must survive losing the local SQLite file."""
+
+    def history(self):
+        job = {"id": 1, "user": {"login": "commander"}, "body": self.comment(),
+               "updated_at": "2026-09-10T00:00:01Z"}
+        terminal = {"id": 2, "user": {"login": "executor"},
+                    "body": f"COMMANDER_RUNNER_V1 COMPLETED\njob={JOB_ID}\nworker=kiro",
+                    "updated_at": "2026-09-10T00:00:02Z"}
+        return [job, terminal]
+
+    def test_empty_state_facing_terminal_history_refuses_to_serve(self):
+        client, _, _ = HighWaterCursorTests.paged_client(self, self.history())
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "execute") as execute, \
+             self.assertRaises(runner.RunnerError) as refused:
+            runner.run_once(self.config)
+        self.assertIn("rebuild-claims", str(refused.exception))
+        execute.assert_not_called()
+
+    def test_fresh_install_with_no_history_serves_normally(self):
+        client, _, _ = HighWaterCursorTests.paged_client(self, [self.history()[0]])
+        ok = runner.Result(0, json.dumps({"status": "ok", "summary": "d", "evidence": ["e"],
+                                          "nonce": runner.attempt_id_for(JOB_ID, 1)}),
+                           False, False, 1.0)
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "prepare_worktree", return_value=self.worktrees), \
+             mock.patch.object(runner, "execute", return_value=ok):
+            self.assertEqual(runner.run_once(self.config), f"COMPLETED {JOB_ID}")
+
+    def test_rebuild_reseeds_terminal_claims_and_nothing_replays(self):
+        client, _, _ = HighWaterCursorTests.paged_client(self, self.history())
+        state = runner.State(self.state)
+        try:
+            report = runner.rebuild_claims_from_history(client(self.config), state, self.config)
+            self.assertEqual(report["claims_seeded"], 1)
+            self.assertEqual(report["comment_high_water"], 2)
+            self.assertEqual(state.claim_status("1"), "succeeded")
+        finally:
+            state.close()
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "execute") as execute:
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        execute.assert_not_called()
+
+    def test_single_comment_lookup_refuses_a_comment_from_another_issue(self):
+        client = runner.GitHubClient(self.config)
+        foreign = runner.Result(0, json.dumps({
+            "id": 7, "issue_url": "https://api.github.com/repos/owner/repo/issues/999"}),
+            False, False, 0.1)
+        with mock.patch.object(runner, "execute", return_value=foreign), \
+             self.assertRaises(runner.RunnerError):
+            client.comment("7")
 
 
 # --- D3 / D4: long output survives, and recovery costs no quota --------------
