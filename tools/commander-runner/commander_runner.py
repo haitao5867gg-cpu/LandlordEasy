@@ -973,6 +973,9 @@ class State:
           expires_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS metadata (
           key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS rejected_comments (
+          comment_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, reason TEXT NOT NULL,
+          body TEXT NOT NULL, created_at INTEGER NOT NULL, posted_comment_id TEXT);
         CREATE TABLE IF NOT EXISTS attempts (
           attempt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
           worker TEXT, model TEXT, error_category TEXT, stop_class TEXT,
@@ -1001,6 +1004,51 @@ class State:
                 self.db.execute(f"ALTER TABLE wake_outbox ADD COLUMN {name} {declaration}")
     def close(self) -> None:
         self.db.close()
+    def claim_status(self, comment_id: str) -> str | None:
+        row = self.db.execute("SELECT status FROM claims WHERE comment_id=?", (comment_id,)).fetchone()
+        return str(row[0]) if row else None
+    def is_rejected_comment(self, comment_id: str) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM rejected_comments WHERE comment_id=?", (comment_id,)).fetchone() is not None
+    def record_rejected_comment(self, comment_id: str, job_id: str, reason: str, body: str) -> bool:
+        """Make a comment that can never be claimed terminal-by-record.
+
+        A re-posted job UUID, or an edited comment whose job already finished,
+        cannot pass `claim()`.  Raising there re-raised on every later poll and
+        wedged the runner permanently with no terminal record.  Recording the
+        comment here means it is skipped forever and gets exactly one REJECTED.
+        """
+        if not re.fullmatch(r"[1-9][0-9]*", comment_id) or not valid_uuid(job_id):
+            raise ValidationError("invalid rejected comment identity")
+        body = ensure_safe_post(body)
+        cursor = self.db.execute(
+            "INSERT OR IGNORE INTO rejected_comments(comment_id,job_id,reason,body,created_at) "
+            "VALUES (?,?,?,?,?)", (comment_id, job_id, redact(reason, 500), body, int(time.time())))
+        return cursor.rowcount == 1
+    def suppress_comment(self, comment_id: str, job_id: str, reason: str) -> None:
+        """Skip a comment forever WITHOUT queuing another post.
+
+        For an edited in-flight claim the REJECTED terminal already travels
+        through terminal_outbox; recording the comment here only stops the next
+        tick from re-hitting the same ValidationError and posting a duplicate.
+        """
+        if not re.fullmatch(r"[1-9][0-9]*", comment_id) or not valid_uuid(job_id):
+            raise ValidationError("invalid suppressed comment identity")
+        self.db.execute(
+            "INSERT OR IGNORE INTO rejected_comments"
+            "(comment_id,job_id,reason,body,created_at,posted_comment_id) "
+            "VALUES (?,?,?,?,?,'terminal-outbox')",
+            (comment_id, job_id, redact(reason, 500), "", int(time.time())))
+    def pending_rejections(self, limit: int = 20) -> tuple[tuple[str, str, str], ...]:
+        rows = self.db.execute(
+            "SELECT comment_id,job_id,body FROM rejected_comments "
+            "WHERE posted_comment_id IS NULL ORDER BY created_at,comment_id LIMIT ?", (limit,)).fetchall()
+        return tuple((str(a), str(b), str(c)) for a, b, c in rows)
+    def mark_rejection_posted(self, comment_id: str, posted_comment_id: str) -> None:
+        if not re.fullmatch(r"[1-9][0-9]*", posted_comment_id):
+            raise ValidationError("invalid posted comment ID")
+        self.db.execute("UPDATE rejected_comments SET posted_comment_id=? "
+                        "WHERE comment_id=? AND posted_comment_id IS NULL", (posted_comment_id, comment_id))
     def record_attempt(self, job_id: str, ordinal: int, worker: str | None, model: str | None,
                        error_category: str | None, stop_class: str | None) -> str:
         """Append one execution attempt to the audit chain.
@@ -2254,6 +2302,19 @@ def envelope_for_rejection(body: str, config: Config) -> RejectedEnvelope | None
         return RejectedEnvelope(job_id=job_id, runner_id=config.runner_id, schema=schema)
     return None
 
+def orphan_lifecycle(job_id: str, runner_id: str, state: str, reason: str) -> str:
+    """Terminal body for a claim we can no longer reconstruct into a Job.
+
+    Used when a queue comment was edited or removed after being claimed.  The
+    alternative -- raising -- aborted the whole tick on every future poll, so
+    one edited comment silently stopped the entire control plane.
+    """
+    if not valid_uuid(job_id) or state not in {"FAILED", "REJECTED"}:
+        raise ValidationError("invalid orphan lifecycle")
+    return (f"COMMANDER_RUNNER_V1 {state}\njob={job_id}\nrunner={runner_id}\n"
+            f"stop_class=PROTOCOL_FAILURE\npolicy=REPORT_AND_STOP\nreason={ensure_safe_post(reason)}")
+
+
 def rejection_lifecycle(envelope: RejectedEnvelope, reason: str) -> str:
     detail = ensure_safe_post(reason) if reason else "unspecified validation failure"
     return (f"COMMANDER_RUNNER_V1 REJECTED\njob={envelope.job_id}\n"
@@ -2292,6 +2353,17 @@ def drain_wake_outbox(client: GitHubClient, state_db: State,
         state_db.mark_wake_delivered(job_id)
     return True
 
+def drain_rejection_outbox(client: GitHubClient, state_db: State) -> bool:
+    """Post REJECTED records for unclaimable comments; at-least-once, never re-run."""
+    for comment_id, _job_id, body in state_db.pending_rejections():
+        try:
+            posted = client.post(body)
+        except RunnerError:
+            return False
+        state_db.mark_rejection_posted(comment_id, posted)
+    return True
+
+
 def drain_terminal_outbox(client: GitHubClient, state_db: State, config: Config) -> bool:
     for (job_id, _comment_id, terminal_body, _internal_state, _terminal_state,
          repository, terminal_issue, runner_id, wake_pull_request) in state_db.pending_terminals():
@@ -2312,28 +2384,45 @@ def recover_incomplete_jobs(client: GitHubClient, state_db: State, config: Confi
         if pending:
             continue
         if recovery_body is None:
-            original = client.find_comment(comment_id, state_db.queue_page())
-            author = (original.get("user") or {}).get("login")
-            body = original.get("body")
-            fetched_comment_id = original.get("id")
-            if (str(fetched_comment_id) != comment_id
-                    or not github_login_matches(author, config.commander_login)
-                    or not isinstance(body, str)):
-                raise RunnerError("legacy in-flight claim source is invalid")
-            if not re.fullmatch(r"[0-9a-f]{64}", persisted_hash) \
-                    or comment_hash(body) != persisted_hash:
-                raise RunnerError("legacy in-flight claim content hash mismatch")
+            # Every failure below used to raise.  Because the same in-flight
+            # claim is re-examined on every poll, one edited or deleted comment
+            # aborted every subsequent tick and stopped the runner for good.  A
+            # claim we cannot reconstruct is closed with an honest FAILED
+            # instead, and the queue keeps moving.
+            reason: str | None = None
+            job: Job | OperationJob | None = None
             try:
-                if OPERATION_COMMENT_RE.fullmatch(body):
-                    job: Job | OperationJob = OperationJob.from_comment(body, config)
+                original = client.find_comment(comment_id, state_db.queue_page())
+            except RunnerError:
+                original, reason = None, "claimed comment is no longer on the queue issue"
+            if original is not None:
+                author = (original.get("user") or {}).get("login")
+                body = original.get("body")
+                if (str(original.get("id")) != comment_id
+                        or not github_login_matches(author, config.commander_login)
+                        or not isinstance(body, str)):
+                    reason = "claimed comment source is invalid"
+                elif (not re.fullmatch(r"[0-9a-f]{64}", persisted_hash)
+                      or comment_hash(body) != persisted_hash):
+                    reason = "claimed comment was edited after it was claimed"
                 else:
-                    job = Job.from_comment(body, config)
-            except ValidationError as exc:
-                raise RunnerError("legacy in-flight claim cannot be reconstructed") from exc
-            if job.job_id != job_id:
-                raise RunnerError("legacy in-flight claim identity mismatch")
-            recovery_body = lifecycle(
-                job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
+                    try:
+                        if OPERATION_COMMENT_RE.fullmatch(body):
+                            job = OperationJob.from_comment(body, config)
+                        else:
+                            job = Job.from_comment(body, config)
+                    except ValidationError:
+                        reason = "claimed comment can no longer be parsed"
+                    if job is not None and job.job_id != job_id:
+                        job, reason = None, "claimed comment identity changed"
+            if job is not None:
+                recovery_body = lifecycle(
+                    job, "FAILED",
+                    "runner stop condition: ambiguous execution recovered after restart")
+            else:
+                recovery_body = orphan_lifecycle(
+                    job_id, config.runner_id, "FAILED",
+                    f"runner stop condition: {reason or 'claim could not be reconstructed'}")
             state_db.set_recovery_body(comment_id, job_id, recovery_body)
         state_db.queue_terminal(comment_id, job_id, recovery_body, "blocked", "FAILED", config)
     return len(rows)
@@ -2636,6 +2725,8 @@ def run_once(config: Config, dry_run: bool = False) -> str:
             recover_incomplete_jobs(client, state, config)
             if not drain_terminal_outbox(client, state, config):
                 return "WAKE_PENDING"
+            if not drain_rejection_outbox(client, state):
+                return "WAKE_PENDING"
             queue_page = state.queue_page()
             comments = client.comments(queue_page)
             for comment in comments:
@@ -2643,6 +2734,8 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                 body, comment_id = comment.get("body"), str(comment.get("id", ""))
                 if (not github_login_matches(author, config.commander_login)
                         or not isinstance(body, str) or not comment_id):
+                    continue
+                if state.is_rejected_comment(comment_id):
                     continue
                 try:
                     if OPERATION_COMMENT_RE.fullmatch(body):
@@ -2661,8 +2754,14 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                     try:
                         claimed = state.claim(comment_id, envelope.job_id,
                                               rejection_digest, recovery)
-                    except ValidationError:
-                        continue
+                    except ValidationError as claim_error:
+                        # Same defect class as the valid branch below: never
+                        # let an unclaimable comment be re-examined forever.
+                        state.record_rejected_comment(
+                            comment_id, envelope.job_id, str(claim_error),
+                            rejection_lifecycle(envelope, f"{exc}; {claim_error}"))
+                        drain_rejection_outbox(client, state)
+                        return f"REJECTED {envelope.job_id}"
                     if not claimed:
                         continue
                     state.queue_terminal(comment_id, envelope.job_id,
@@ -2677,7 +2776,32 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                     return f"VALIDATED {job.job_id}"
                 recovery_body = lifecycle(
                     job, "FAILED", "runner stop condition: ambiguous execution recovered after restart")
-                claimed = state.claim(comment_id, job.job_id, digest, recovery_body)
+                try:
+                    claimed = state.claim(comment_id, job.job_id, digest, recovery_body)
+                except ValidationError as claim_error:
+                    # A re-posted job UUID, or an already-claimed comment that
+                    # was edited.  This used to propagate out of run_once; the
+                    # serve loop caught it, backed off, and re-read the SAME
+                    # comment next tick -- raising again, forever.  The runner
+                    # stayed alive and processed nothing, with no terminal
+                    # record and no signal.  It must become a terminal instead.
+                    if state.claim_status(comment_id) in {"claimed", "running"}:
+                        # We hold this very comment and it changed under us.
+                        delivered = post_terminal_lifecycle(
+                            client, job, "REJECTED",
+                            f"claim invalidated: {claim_error}", state, comment_id, "blocked")
+                        # The terminal is already on its way; just make sure
+                        # this comment is never re-examined.
+                        state.suppress_comment(comment_id, job.job_id, str(claim_error))
+                        return (f"REJECTED {job.job_id}" if delivered
+                                else f"WAKE_PENDING {job.job_id}")
+                    schema = OPERATION_SCHEMA if isinstance(job, OperationJob) else SCHEMA
+                    envelope = RejectedEnvelope(job.job_id, config.runner_id, schema)
+                    state.record_rejected_comment(
+                        comment_id, job.job_id, str(claim_error),
+                        rejection_lifecycle(envelope, f"cannot claim: {claim_error}"))
+                    drain_rejection_outbox(client, state)
+                    return f"REJECTED {job.job_id}"
                 if not claimed: continue
                 latest = client.comment(comment_id, queue_page)
                 if (not github_login_matches((latest.get("user") or {}).get("login"),
@@ -2688,7 +2812,16 @@ def run_once(config: Config, dry_run: bool = False) -> str:
                         client, job, "REJECTED", "claimed comment was edited or author changed",
                         state, comment_id, "blocked")
                     return f"REJECTED {job.job_id}" if delivered else f"WAKE_PENDING {job.job_id}"
-                client.post(lifecycle(job, "CLAIMED"))
+                # Advisory progress marker only.  Letting a transient GitHub
+                # failure escape here left the claim recorded and the job
+                # unexecuted, so the next tick's recovery posted a FAILED
+                # "ambiguous execution" record that said the opposite of what
+                # happened -- and burned the job UUID.
+                try:
+                    client.post(lifecycle(job, "CLAIMED"))
+                except (RunnerError, UnsafeOutputError) as exc:
+                    print(f"runner warning: CLAIMED marker not posted for {job.job_id}: {exc}",
+                          file=sys.stderr)
                 try:
                     worktree = prepare_worktree(config, job)
                     state.set_status(comment_id, "running")

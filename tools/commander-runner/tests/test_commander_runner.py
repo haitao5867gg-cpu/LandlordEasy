@@ -592,7 +592,7 @@ class StateTests(RunnerTestCase):
                 self.assertEqual(state.summary()["jobs"], {"running": 1})
             state.close()
 
-    def test_legacy_migration_rejects_wrong_author_malformed_edit_and_job_mismatch(self):
+    def test_legacy_migration_closes_tampered_claims_without_executing_or_raising(self):
         original = self.comment()
         other_job = "123e4567-e89b-12d3-a456-426614174099"
         cases = (
@@ -611,11 +611,25 @@ class StateTests(RunnerTestCase):
                 def find_comment(comment_id, max_page):
                     return {"id": 1, "user": {"login": author}, "body": fetched_body}
             with self.subTest(author=author, job=stored_job,
-                              malformed=fetched_body != original), \
-                 self.assertRaises(runner.RunnerError):
+                              malformed=fetched_body != original):
+                # The security intent is unchanged: a tampered, foreign-authored
+                # or mismatched claim is NEVER reconstructed into a runnable
+                # job.  What changed is the outcome.  Raising here re-raised on
+                # every later poll -- the same in-flight claim is re-examined
+                # each tick -- so one edited comment wedged the runner forever
+                # with no terminal record.  It now closes the claim honestly.
                 runner.recover_incomplete_jobs(Client(), state, self.config)
-            self.assertEqual(state.summary()["jobs"], {"running": 1})
-            self.assertEqual(state.pending_terminals(), ())
+                pending = state.pending_terminals()
+                self.assertEqual(len(pending), 1)
+                _job, _cid, body, _internal, terminal_state, *_ = pending[0]
+                self.assertEqual(terminal_state, "FAILED")
+                self.assertIn("COMMANDER_RUNNER_V1 FAILED", body)
+                self.assertIn("stop_class=PROTOCOL_FAILURE", body)
+                self.assertIn("runner stop condition:", body)
+                # Idempotent: a second pass must not raise or enqueue again.
+                runner.recover_incomplete_jobs(Client(), state, self.config)
+                self.assertEqual(len(state.pending_terminals()), 1)
+                self.assertEqual(state.summary()["jobs"], {"running": 1})
             state.close()
 
     def test_complete_terminal_failure_rolls_back_all_three_state_changes(self):

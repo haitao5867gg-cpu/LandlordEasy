@@ -164,6 +164,104 @@ class RejectionTests(HardeningTestCase):
                 self.job(prompt=bad)
 
 
+class ClaimWedgeRegressionTests(HardeningTestCase):
+    """The runner must never be wedged by a comment it cannot claim.
+
+    Incident (found by independent audit): `state.claim` raised ValidationError
+    on a re-posted job UUID or an edited comment; the serve loop caught it,
+    backed off, re-read the SAME comment next tick, and raised again -- forever.
+    The process stayed alive and processed nothing, with no terminal record.
+    """
+
+    def multi_queue(self, comments):
+        posts = []
+
+        class FixtureClient:
+            def __init__(self, config):
+                self.config = config
+
+            def verify_login(self):
+                pass
+
+            def comments(self, page):
+                return list(comments) if page == 1 else []
+
+            def comment(self, cid, page):
+                return next(c for c in comments if str(c["id"]) == str(cid))
+
+            def find_comment(self, cid, max_page):
+                return self.comment(cid, 1)
+
+            def post(self, body):
+                posts.append(runner.ensure_safe_post(body))
+                return str(1000 + len(posts))
+
+            def post_wake(self, body):
+                return "1"
+
+        return FixtureClient, posts
+
+    def provider_ok(self):
+        return runner.Result(0, json.dumps(
+            {"status": "ok", "summary": "done", "evidence": ["e"]}), False, False, 1.0)
+
+    def test_reposted_job_uuid_is_rejected_once_and_the_queue_keeps_moving(self):
+        first = {"id": 1, "user": {"login": "commander"}, "body": self.comment()}
+        dup = {"id": 2, "user": {"login": "commander"},
+               "body": self.comment(prompt="same UUID, re-posted by mistake")}
+        client, posts = self.multi_queue([first, dup])
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "prepare_worktree", return_value=self.worktrees), \
+             mock.patch.object(runner, "execute", return_value=self.provider_ok()):
+            self.assertEqual(runner.run_once(self.config), f"COMPLETED {JOB_ID}")
+            # The duplicate is refused once, explicitly...
+            self.assertEqual(runner.run_once(self.config), f"REJECTED {JOB_ID}")
+            # ...and every later tick is a clean NO_JOB, not an exception.
+            for _ in range(3):
+                self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        rejected = [p for p in posts if "REJECTED" in p]
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("cannot claim", rejected[0])
+        self.assertIn("duplicate job ID", rejected[0])
+
+    def test_edited_claimed_comment_is_rejected_not_raised(self):
+        edited = {"id": 1, "user": {"login": "commander"}, "body": self.comment(prompt="edited")}
+        client, posts = self.multi_queue([edited])
+        state = runner.State(self.state)
+        try:
+            # Simulate a claim taken on the ORIGINAL body before the edit.
+            state.claim("1", JOB_ID, runner.comment_hash(self.comment()),
+                        runner.lifecycle(self.job(), "FAILED", "recovery"))
+        finally:
+            state.close()
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "recover_incomplete_jobs", return_value=0):
+            self.assertEqual(runner.run_once(self.config), f"REJECTED {JOB_ID}")
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        self.assertEqual(len([p for p in posts if "REJECTED" in p]), 1)
+
+    def test_claimed_marker_failure_does_not_burn_the_job(self):
+        """P1-5: the CLAIMED post is advisory.  A GitHub blip there must not
+        leave a recorded claim with no execution, which the next tick would
+        close as a FAILED 'ambiguous execution' -- the opposite of the truth."""
+        client, posts = self.queue(self.comment())
+        real_post = client.post
+
+        def flaky_post(self_, body):
+            if "CLAIMED" in body:
+                raise runner.RunnerError("GitHub API request failed")
+            return real_post(self_, body)
+
+        client.post = flaky_post
+        with mock.patch.object(runner, "GitHubClient", client), \
+             mock.patch.object(runner, "prepare_worktree", return_value=self.worktrees), \
+             mock.patch.object(runner, "execute", return_value=self.provider_ok()):
+            self.assertEqual(runner.run_once(self.config), f"COMPLETED {JOB_ID}")
+            self.assertEqual(runner.run_once(self.config), "NO_JOB")
+        self.assertTrue(any("COMPLETED" in p for p in posts))
+        self.assertFalse(any("ambiguous execution" in p for p in posts))
+
+
 # --- D3 / D4: long output survives, and recovery costs no quota --------------
 
 class OutputRecoveryTests(HardeningTestCase):
