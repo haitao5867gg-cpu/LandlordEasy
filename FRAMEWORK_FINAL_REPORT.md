@@ -1,3 +1,10 @@
+> **STALE — superseded.** This report describes the first hardening round
+> (suite 151, five stop classes, flat runtime layout). The current state of
+> PR A — 241 tests, eight classes / four policies, transactional versioned
+> install, high-water cursor, nonce, verdict schema, audit findings P0-1
+> through P2-8 — is in `FRAMEWORK_HANDOFF_TO_CHATGPT.md`. Kept unchanged as a
+> historical record.
+
 # Framework final report
 
 **Branch:** `infra/commander-kit-hardening`, based on `origin/infra/pr-event-wake-bridge` @ `b81833de`

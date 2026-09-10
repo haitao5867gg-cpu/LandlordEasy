@@ -182,3 +182,12 @@ Haitao 睡前明确批准四项，全部完成：
 Issue #12 回写：评论 `5612820060`（Executor 身份，脱敏自检通过）。
 
 套件 **241/241**，canary 21/21。
+
+
+### Phase G 收口
+
+- PR A 代码项全部完成并推送：head `9d7dff2`（含 `53087d5` A-4/6/7、`75c3b52` 审计批次、文档四个提交）。
+- **提交说明勘误**：`0e1c14b`（仅 ARCHITECTURE+PROGRESS）、`31e4c86`（仅 PROGRESS）、`4104d9d`（仅 FAILURE_AND_RETRY 表 + SECURITY_MODEL 的 isolated_test 段）三个提交的说明**超额声称**了文档改动；根因是编辑脚本中途失败而 shell 链未守卫（`set -e` 在本工具的 eval 包装下无效）。`9d7dff2` 用显式 `&&` 守卫真正落地了其余文档，说明里逐个写明了前三者的实际内容。**历史未改写。**
+- Issue #12 回写：评论 `5612820060`（Executor）。PR #25 的 SUPERSEDED 评论由另一 session 于 02:29Z 发出，已核实存在。
+- 线上 runner **未升级**（ChatGPT 决定 #13：不部署）；仍为第一轮版本，manifest v2 无 provenance。
+- 未完成 / 留给 PR B/C：Evidence Issue 分离、`COMMANDER_PLAN_V1`、`CURRENT_USER_STATUS`、通知外发、wake 停写、worktree/分支 GC、取消、心跳、operation `version`、CI 侧 MySQL 降级变体、PAT 收窄（owner）。

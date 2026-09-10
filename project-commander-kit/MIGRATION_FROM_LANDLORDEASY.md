@@ -13,14 +13,14 @@ existing operator will notice:
 |---|---|---|
 | Job text validation | `;` `\|` `&&` backticks rejected | control characters rejected; punctuation allowed |
 | Invalid job | silently skipped | explicit `REJECTED` terminal with reason + stop class |
-| Summary limit | 2 000 chars | 20 000 chars |
+| Summary limit | 2 000 chars (rejecting) | 4 000-char Issue excerpt; full text in artifact; length never rejects |
 | Evidence item / count | 1 000 / 50 | 4 000 / 200 |
 | Output capture | 64 KiB | 1 MiB |
 | Raw persistence | after parsing, final attempt only | **before** parsing, per attempt |
 | Recovery from a parse failure | re-run the model | `renormalize`, zero provider calls |
 | Long reports | truncated into the Issue | local artifact + sha256 in the Issue |
-| Stop conditions | one undifferentiated `FAILED` | five graded classes |
-| Retry | none | bounded, with backoff, transient/protocol only |
+| Stop conditions | one undifferentiated `FAILED` | eight diagnostic classes mapped to four policies |
+| Retry | none | bounded with backoff for BOUNDED_RETRY; PROTOCOL recovers locally; INVOCATION/CODE never retried |
 | Attempt identity | job UUID reused | derived `attempt_id`, full audit chain |
 | Routing | static order, quota ignored | free quota first, authorized paid overflow last |
 | Operation targets | exact SHA pin only | exact SHA **or** owner-approved branch head |
@@ -40,8 +40,11 @@ python3 project-commander-kit/scripts/pck.py doctor  --config <live config>
 python3 project-commander-kit/scripts/pck.py upgrade --config <live config>
 ```
 
-`upgrade` copies the current runtime aside as `*.<timestamp>.bak` before
-replacing it. Nothing is deleted. Restart the runner afterwards.
+`upgrade` stages a complete new version under `versions/`, verifies and fsyncs
+it, and atomically moves the `current` pointer. Previous versions stay on disk
+(never deleted by upgrade; pruned only when older than a week, beyond the
+newest ten, and neither `current` nor the launchd target). Restart the runner
+afterwards -- and on a flat-layout host, see 1b first.
 
 Roll back at any time:
 
