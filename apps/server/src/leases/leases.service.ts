@@ -1,6 +1,4 @@
 import { randomInt } from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
 import {
   BadRequestException,
   Inject,
@@ -45,7 +43,7 @@ import {
   WEIQIAN_SERVICE,
 } from '../weiqian/weiqian.interface';
 
-const SIGNED_CONTRACT_UPLOAD_DIR = path.join(process.cwd(), 'data/uploads');
+import { readContractPdf, writeContractPdf } from './contract-storage';
 const DEFAULT_WEIQIAN_SIGN_BASE_URL = 'http://forwave.picp.net:8888';
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -445,37 +443,49 @@ ${signUrl}
    * 不修改任务状态、signedPdfUrl、signedAt,也不做 openid 绑定。
    */
   async previewSignedFile(taskId: number): Promise<{ previewUrl: string }> {
-    const task = await this.prisma.contractSigningTask.findUnique({
-      where: { id: taskId },
-    });
+    await this.previewContractPdf(taskId);
+    return { previewUrl: `/api/v1/leases/contract-signing-tasks/${taskId}/preview` };
+  }
+
+  async previewContractPdf(taskId: number): Promise<Buffer> {
+    const task = await this.prisma.contractSigningTask.findUnique({ where: { id: taskId } });
     if (!task) throw new NotFoundException('电子签约任务不存在');
     if (task.status !== 'CREATED' || !task.weiqianBId) {
       throw new BadRequestException('当前状态不支持预览签署进度');
     }
+    const pdf = await this.weiqian.downloadSignedFile(task.weiqianBId);
+    if (!pdf) throw new BadRequestException('微签暂未返回文件,可能签署尚未开始,请稍后重试');
+    writeContractPdf(taskId, 'preview', pdf);
+    return pdf;
+  }
 
-    const signedPdf = await this.weiqian.downloadSignedFile(task.weiqianBId);
-    if (!signedPdf) {
-      throw new BadRequestException(
-        '微签暂未返回文件,可能签署尚未开始,请稍后重试',
-      );
+  async listTenantContracts(tenantId: number) {
+    return this.prisma.contractSigningTask.findMany({
+      where: { status: 'SIGNED', lease: { tenantId } },
+      select: { id: true, leaseId: true, status: true, createdAt: true, signedAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async downloadSignedContract(taskId: number, tenantId?: number): Promise<Buffer> {
+    const task = await this.prisma.contractSigningTask.findUnique({
+      where: { id: taskId }, include: { lease: true },
+    });
+    // No lease-status filter: historic contracts remain the tenant's own records.
+    if (!task || task.status !== 'SIGNED' || (tenantId !== undefined && task.lease.tenantId !== tenantId)) {
+      throw new NotFoundException('已签合同不存在或无权访问');
     }
-
-    const fileName = `contract-${taskId}-preview.pdf`;
-    this.writeUploadFile(fileName, signedPdf);
-    return { previewUrl: `/uploads/${fileName}` };
+    try {
+      return readContractPdf(taskId);
+    } catch {
+      // Fail closed for missing/unmigrated/unsafe files; never follow signedPdfUrl or public fallback.
+      throw new NotFoundException('合同文件暂不可用,请联系房东');
+    }
   }
 
   private saveSignedPdf(taskId: number, signedPdf: Buffer): string {
-    const fileName = `contract-${taskId}-signed.pdf`;
-    this.writeUploadFile(fileName, signedPdf);
-    return `/uploads/${fileName}`;
-  }
-
-  private writeUploadFile(fileName: string, content: Buffer): void {
-    if (!fs.existsSync(SIGNED_CONTRACT_UPLOAD_DIR)) {
-      fs.mkdirSync(SIGNED_CONTRACT_UPLOAD_DIR, { recursive: true });
-    }
-    fs.writeFileSync(path.join(SIGNED_CONTRACT_UPLOAD_DIR, fileName), content);
+    writeContractPdf(taskId, 'signed', signedPdf);
+    return `/api/v1/leases/contract-signing-tasks/${taskId}/pdf`;
   }
 
   private buildPropertyAddress(room: {
