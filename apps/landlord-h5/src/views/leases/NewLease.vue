@@ -87,7 +87,17 @@
           </template>
         </van-field>
         <van-field v-model="carPlateModel" label="车牌号" placeholder="车牌格式：粤B12345（可选）" />
-        <van-field v-model="form.commission" label="佣金" type="number" inputmode="decimal" placeholder="可选">
+        <div class="co-occupant-section">
+        <div class="co-occupant-header">共同居住人(可选,合同附件二)</div>
+        <div v-for="(co, index) in coOccupants" :key="index" class="co-occupant-row">
+          <van-field v-model.trim="co.name" placeholder="姓名" style="flex:1.2;" />
+          <van-field v-model.trim="co.idNumberLast4" placeholder="证件后4位" maxlength="4" style="flex:1;" />
+          <van-field v-model.trim="co.phone" placeholder="手机号(可选)" type="tel" style="flex:1.4;" />
+          <van-icon name="delete-o" class="checklist-delete" @click="coOccupants.splice(index, 1)" />
+        </div>
+        <van-button size="small" plain @click="coOccupants.push({ name: '', idNumberLast4: '', phone: '' })">+ 添加同住人</van-button>
+      </div>
+      <van-field v-model="form.commission" label="佣金" type="number" inputmode="decimal" placeholder="可选">
           <template #button><span class="amount-unit">元</span></template>
         </van-field>
       </van-cell-group>
@@ -137,6 +147,7 @@ const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
 const showResult = ref(false);
+const coOccupants = ref<Array<{ name: string; idNumberLast4: string; phone: string }>>([]);
 const bindQrcodeImage = ref('');
 const bindQrcodeLoading = ref(false);
 const newLeaseId = ref<number | null>(null);
@@ -256,6 +267,17 @@ async function handleSubmit() {
     if (form.feeItems.length) data.feeItems = form.feeItems.filter(i => i.name && i.amount);
     const res = await http.post('/leases', data) as any;
     newLeaseId.value = res.id;
+    // 同住人登记(备案信息,失败不阻断租约创建主流程)
+    for (const co of coOccupants.value) {
+      if (!co.name || !/^\d{4}$/.test(co.idNumberLast4)) continue;
+      try {
+        const body: Record<string, unknown> = { name: co.name, idNumberLast4: co.idNumberLast4 };
+        if (co.phone) body.phone = co.phone;
+        await http.post(`/leases/${res.id}/co-occupants`, body);
+      } catch {
+        showToast(`同住人「${co.name}」登记失败,可稍后在租约详情页补充`);
+      }
+    }
     showResult.value = true;
     bindQrcodeLoading.value = true;
     try {
@@ -283,4 +305,9 @@ function closeResult() {
 .lease-term { padding: 4px 0; }
 .amount-unit { color: #646566; }
 .bind-qrcode-error { color: #ee0a24; font-size: 13px; }
+.checklist-delete { color: #969799; padding: 0 8px; font-size: 18px; }
+.co-occupant-section { padding: 4px 0; }
+.co-occupant-header { font-size: 13px; color: #646566; padding: 6px 16px; }
+.co-occupant-row { display: flex; align-items: center; gap: 6px; padding: 0 8px; }
+.co-occupant-row .van-field { flex: 1; }
 </style>

@@ -113,6 +113,24 @@
         </template>
       </van-cell-group>
 
+      <van-cell-group inset title="共同居住人">
+        <div v-if="lease.status === 'ACTIVE'" class="handover-actions">
+          <van-button size="small" plain type="primary" @click="openCoOccupantDialog()">新增同住人</van-button>
+        </div>
+        <van-empty v-if="!(lease.coOccupants && lease.coOccupants.length)" description="无共同居住人" />
+        <van-cell v-for="co in lease.coOccupants" :key="co.id">
+          <template #title>
+            {{ co.name }}
+            <van-tag plain type="primary" style="margin-left:6px;">证件后四位 {{ co.idNumberLast4 }}</van-tag>
+          </template>
+          <template #label>{{ co.phone || '未留联系方式' }}（备案信息,用于合同附件二）</template>
+          <template #right-icon>
+            <van-icon name="edit" style="margin-right:10px;" @click="openCoOccupantDialog(co)" />
+            <van-icon name="delete-o" class="checklist-delete" @click="handleRemoveCoOccupant(co)" />
+          </template>
+        </van-cell>
+      </van-cell-group>
+
       <van-cell-group inset title="交接记录">
         <div v-if="lease.status === 'ACTIVE'" class="handover-actions">
           <van-button size="small" plain type="primary" @click="openHandoverDialog">新增交接记录</van-button>
@@ -129,7 +147,7 @@
           </template>
           <template #label>
             <div v-for="(item, index) in record.checklist || []" :key="index">
-              {{ item.item }}: {{ item.condition }}
+              {{ item.item }}<template v-if="item.quantity !== undefined && item.quantity !== null && item.quantity !== ''"> ×{{ item.quantity }}</template>: {{ item.condition }}
             </div>
             <div v-if="record.remark">备注: {{ record.remark }}</div>
           </template>
@@ -165,12 +183,10 @@
           <van-field v-model="contractForm.electricityMeterReading" label="电表底数" type="number" placeholder="可选" />
           <van-field v-model="contractForm.gasMeterReading" label="燃气表底数" type="number" placeholder="可选" />
         </van-cell-group>
-        <van-cell-group title="屋内设施">
-          <van-checkbox-group v-model="contractForm.facilities" direction="horizontal" class="facility-grid">
-            <van-checkbox v-for="facility in facilityOptions" :key="facility" :name="facility">
-              {{ facility }}
-            </van-checkbox>
-          </van-checkbox-group>
+        <van-cell-group title="物品清单(自动取自交接单)">
+          <div class="contract-hint" style="padding:8px 16px;">
+            合同附件三的物品清单、数量与交付日期将自动取自该租约的「入住交接记录」,无需在此重复填写;如尚未填写,请先完成入住交接。
+          </div>
         </van-cell-group>
         <van-cell-group title="补充条款">
           <van-field
@@ -194,6 +210,13 @@
       </van-form>
     </van-popup>
 
+    <!-- 同住人新增/编辑弹窗 -->
+    <van-dialog v-model:show="showCoOccupantDialog" :title="editingCoOccupantId ? '编辑同住人' : '新增同住人'" show-cancel-button @confirm="handleSaveCoOccupant">
+      <van-field v-model.trim="coOccupantForm.name" label="姓名" placeholder="同住人姓名" :rules="[{ required: true, message: '请填写姓名' }]" />
+      <van-field v-model.trim="coOccupantForm.idNumberLast4" label="证件后四位" maxlength="4" placeholder="身份证号后4位数字" :rules="[{ required: true, message: '请填写证件后四位' }, { pattern: /^\d{4}$/, message: '请输入4位数字' }]" />
+      <van-field v-model.trim="coOccupantForm.phone" label="联系方式" type="tel" placeholder="可选,11位手机号" />
+    </van-dialog>
+
     <!-- 新增交接记录弹窗 -->
     <van-dialog v-model:show="showHandoverDialog" title="新增交接记录" show-cancel-button @confirm="handleAddHandover">
       <van-field name="type" label="类型">
@@ -206,12 +229,14 @@
       </van-field>
       <div v-for="(item, index) in handoverForm.checklist" :key="index" class="checklist-row">
         <van-field v-model="item.item" placeholder="项目" />
+        <van-field v-model="item.quantity" placeholder="数量" type="number" style="flex:0 0 64px;" />
         <van-field v-model="item.condition" placeholder="状况" />
         <van-icon name="delete-o" class="checklist-delete" @click="handoverForm.checklist.splice(index, 1)" />
       </div>
-      <van-button size="small" plain class="add-checklist-button" @click="handoverForm.checklist.push({ item: '', condition: '' })">
-        + 添加检查项
-      </van-button>
+      <div style="display:flex;gap:8px;padding:0 16px 8px;">
+        <van-button size="small" plain @click="handoverForm.checklist.push({ item: '', quantity: '', condition: '' })">+ 添加检查项</van-button>
+        <van-button size="small" plain type="primary" :loading="prefilling" @click="prefillDefaultChecklist">预填默认物品清单</van-button>
+      </div>
       <van-field v-model="handoverForm.remark" label="备注" type="textarea" rows="2" autosize placeholder="可选" />
     </van-dialog>
   </div>
@@ -242,23 +267,22 @@ const confirming = ref(false);
 const bindQrcodeImage = ref('');
 const bindQrcodeLoading = ref(false);
 
-const facilityOptions = [
-  '空调', '冰箱', '洗衣机', '热水器', '燃气灶', '电视',
-  '淋浴器', '油烟机', '床', '桌子', '椅子', '沙发',
-];
+const showCoOccupantDialog = ref(false);
+const editingCoOccupantId = ref<number | null>(null);
+const prefilling = ref(false);
+const coOccupantForm = reactive({ name: '', idNumberLast4: '', phone: '' });
 
 const endForm = reactive({ endDate: '', depositRefund: 0, depositDeductReason: '', endReason: '' });
 const renewForm = reactive({ newEndDate: '', newRent: undefined as number | undefined });
 const handoverForm = reactive({
   type: 'CHECKIN',
-  checklist: [] as Array<{ item: string; condition: string }>,
+  checklist: [] as Array<{ item: string; quantity: string; condition: string }>,
   remark: '',
 });
 const contractForm = reactive({
   waterMeterReading: '',
   electricityMeterReading: '',
   gasMeterReading: '',
-  facilities: [] as string[],
   extraTerms: '',
   penaltyMonths: '',
   overdueToleranceDays: '',
@@ -319,7 +343,6 @@ function openContractDialog() {
     waterMeterReading: '',
     electricityMeterReading: '',
     gasMeterReading: '',
-    facilities: [],
     extraTerms: '',
     penaltyMonths: '',
     overdueToleranceDays: '',
@@ -341,13 +364,7 @@ function getLaunchOverrides() {
 async function handleGenerateContract() {
   generating.value = true;
   try {
-    const payload: Record<string, unknown> = {
-      type: 'NEW',
-      facilities: facilityOptions.map(name => ({
-        name,
-        has: contractForm.facilities.includes(name),
-      })),
-    };
+    const payload: Record<string, unknown> = { type: 'NEW' };
     const waterMeterReading = optionalNumber(contractForm.waterMeterReading);
     const electricityMeterReading = optionalNumber(contractForm.electricityMeterReading);
     const gasMeterReading = optionalNumber(contractForm.gasMeterReading);
@@ -453,8 +470,72 @@ function openHandoverDialog() {
   showHandoverDialog.value = true;
 }
 
+/** 从合同签约设置拉默认物品清单预填检查项,房东只需改数量/状况 */
+async function prefillDefaultChecklist() {
+  prefilling.value = true;
+  try {
+    const settings = await http.get('/admin/contract-settings') as any;
+    const checklist: Array<{ item: string; quantity?: number }> =
+      settings.defaultItemChecklist && settings.defaultItemChecklist.length
+        ? settings.defaultItemChecklist
+        : [];
+    if (!checklist.length) {
+      showToast('尚未在系统设置-合同签约设置里配置默认物品清单');
+      return;
+    }
+    handoverForm.checklist = checklist.map((entry) => ({
+      item: entry.item,
+      quantity: entry.quantity === undefined || entry.quantity === null ? '' : String(entry.quantity),
+      condition: '',
+    }));
+  } finally {
+    prefilling.value = false;
+  }
+}
+
+function openCoOccupantDialog(co?: { id: number; name: string; idNumberLast4: string; phone?: string | null }) {
+  editingCoOccupantId.value = co ? co.id : null;
+  coOccupantForm.name = co?.name ?? '';
+  coOccupantForm.idNumberLast4 = co?.idNumberLast4 ?? '';
+  coOccupantForm.phone = co?.phone ?? '';
+  showCoOccupantDialog.value = true;
+}
+
+async function handleSaveCoOccupant() {
+  if (!coOccupantForm.name || !/^\d{4}$/.test(coOccupantForm.idNumberLast4)) {
+    showToast('请填写姓名和4位证件后四位');
+    return;
+  }
+  const body: Record<string, unknown> = {
+    name: coOccupantForm.name,
+    idNumberLast4: coOccupantForm.idNumberLast4,
+  };
+  if (coOccupantForm.phone) body.phone = coOccupantForm.phone;
+  if (editingCoOccupantId.value) {
+    await http.put(`/leases/co-occupants/${editingCoOccupantId.value}`, body);
+  } else {
+    await http.post(`/leases/${route.params.id}/co-occupants`, body);
+  }
+  showToast('已保存');
+  showCoOccupantDialog.value = false;
+  await fetchLease();
+}
+
+async function handleRemoveCoOccupant(co: { id: number; name: string }) {
+  await showConfirmDialog({ title: '删除同住人', message: `确定删除「${co.name}」吗?` });
+  await http.delete(`/leases/co-occupants/${co.id}`);
+  showToast('已删除');
+  await fetchLease();
+}
+
 async function handleAddHandover() {
-  const checklist = handoverForm.checklist.filter(item => item.item && item.condition);
+  const checklist = handoverForm.checklist
+    .filter(item => item.item && item.condition)
+    .map(item => ({
+      item: item.item,
+      quantity: item.quantity === '' ? null : Number(item.quantity),
+      condition: item.condition,
+    }));
   await http.post('/handover', {
     leaseId: Number(route.params.id),
     type: handoverForm.type,

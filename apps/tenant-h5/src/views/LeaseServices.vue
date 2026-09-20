@@ -29,6 +29,7 @@
           <van-field v-model="terminationForm.date" label="期望搬离日" placeholder="YYYY-MM-DD" @blur="fetchPenaltyPreview" />
           <van-field v-model="terminationForm.reason" label="原因" placeholder="可选" />
           <van-notice-bar v-if="penaltyPreview !== null" left-icon="info-o" wrapable :text="`按当前合同条款,预计违约金约¥${penaltyPreview},最终以房东审批为准`" />
+          <van-notice-bar v-if="earlyNoticeDays !== null" color="#ed6a0c" background="#fffbe8" left-icon="warning-o" wrapable :text="`根据合同约定,提前退租应至少提前${earlyNoticeDays}日通知房东;系统不做强制拦截,请尽早提交申请`" />
           <van-button size="small" type="danger" plain style="margin:8px 16px" :loading="submittingTermination" @click="submitTermination">提交退租申请</van-button>
         </template>
       </van-cell-group>
@@ -70,6 +71,7 @@ const terminationForm = ref({ date: '', reason: '' });
 const submittingTermination = ref(false);
 const pendingTermination = ref<any>(null);
 const penaltyPreview = ref<number | null>(null);
+const earlyNoticeDays = ref<number | null>(null);
 
 const transferForm = ref({ preferredRoom: '', reason: '' });
 const submittingTransfer = ref(false);
@@ -130,6 +132,7 @@ async function fetchPenaltyPreview() {
   try {
     const res = (await http.get(`/tenant/leases/${leaseId}/termination-penalty-preview`)) as any;
     penaltyPreview.value = res.suggestedPenalty;
+    earlyNoticeDays.value = res.earlyTerminationNoticeDays ?? null;
   } catch {
     penaltyPreview.value = null;
   }
