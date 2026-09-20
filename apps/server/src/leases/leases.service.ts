@@ -390,8 +390,8 @@ export class LeasesService {
       checklist,
       coOccupants: task.lease.coOccupants.map((c) => ({
         name: c.name,
-        idNumberLast4: c.idNumberLast4,
-        phone: c.phone,
+        idCard: c.idCard ?? '',
+        phone: c.phone ?? '',
       })),
       penaltyMonths:
         dto.penaltyMonths ?? task.penaltyMonths ?? settings.defaultPenaltyMonths,

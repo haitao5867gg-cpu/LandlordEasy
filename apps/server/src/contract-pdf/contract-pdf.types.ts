@@ -7,8 +7,8 @@ export interface ChecklistEntry {
 
 export interface CoOccupantInfo {
   name: string;
-  idNumberLast4: string;
-  phone: string | null;
+  idCard: string;
+  phone: string;
 }
 
 export interface ContractPdfData {

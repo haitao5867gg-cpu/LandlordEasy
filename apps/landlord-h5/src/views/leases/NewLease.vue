@@ -90,12 +90,12 @@
         <div class="co-occupant-section">
         <div class="co-occupant-header">共同居住人(可选,合同附件二)</div>
         <div v-for="(co, index) in coOccupants" :key="index" class="co-occupant-row">
-          <van-field v-model.trim="co.name" placeholder="姓名" style="flex:1.2;" />
-          <van-field v-model.trim="co.idNumberLast4" placeholder="证件后4位" maxlength="4" style="flex:1;" />
-          <van-field v-model.trim="co.phone" placeholder="手机号(可选)" type="tel" style="flex:1.4;" />
+          <van-field v-model.trim="co.name" placeholder="姓名" style="flex:1;" />
+          <van-field v-model.trim="co.idCard" placeholder="身份证号" style="flex:1.6;" />
+          <van-field v-model.trim="co.phone" placeholder="手机号" type="tel" style="flex:1.2;" />
           <van-icon name="delete-o" class="checklist-delete" @click="coOccupants.splice(index, 1)" />
         </div>
-        <van-button size="small" plain @click="coOccupants.push({ name: '', idNumberLast4: '', phone: '' })">+ 添加同住人</van-button>
+        <van-button size="small" plain @click="coOccupants.push({ name: '', idCard: '', phone: '' })">+ 添加同住人</van-button>
       </div>
       <van-field v-model="form.commission" label="佣金" type="number" inputmode="decimal" placeholder="可选">
           <template #button><span class="amount-unit">元</span></template>
@@ -147,7 +147,7 @@ const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
 const showResult = ref(false);
-const coOccupants = ref<Array<{ name: string; idNumberLast4: string; phone: string }>>([]);
+const coOccupants = ref<Array<{ name: string; idCard: string; phone: string }>>([]);
 const bindQrcodeImage = ref('');
 const bindQrcodeLoading = ref(false);
 const newLeaseId = ref<number | null>(null);
@@ -269,14 +269,14 @@ async function handleSubmit() {
     newLeaseId.value = res.id;
     // 同住人登记(备案信息,失败不阻断租约创建主流程)
     for (const co of coOccupants.value) {
-      if (!co.name || !/^[0-9Xx]{4}$/.test(co.idNumberLast4)) {
-        if (co.name || co.idNumberLast4) showToast(`同住人「${co.name || co.idNumberLast4}」信息不完整(姓名+4位证件后四位必填),已跳过`);
+      const idCardOk = /^\d{17}[\dXx]$|^\d{15}$/.test(co.idCard);
+      const phoneOk = /^1[3-9]\d{9}$/.test(co.phone);
+      if (!co.name || !idCardOk || !phoneOk) {
+        if (co.name || co.idCard || co.phone) showToast(`同住人「${co.name || '未填姓名'}」信息不完整(姓名/完整身份证号/手机号均必填),已跳过`);
         continue;
       }
       try {
-        const body: Record<string, unknown> = { name: co.name, idNumberLast4: co.idNumberLast4 };
-        if (co.phone) body.phone = co.phone;
-        await http.post(`/leases/${res.id}/co-occupants`, body);
+        await http.post(`/leases/${res.id}/co-occupants`, { name: co.name, idCard: co.idCard, phone: co.phone });
       } catch {
         showToast(`同住人「${co.name}」登记失败,可稍后在租约详情页补充`);
       }

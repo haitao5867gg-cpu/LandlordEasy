@@ -253,13 +253,14 @@ export class CreateCoOccupantDto {
   @Length(1, 30)
   name!: string;
 
+  // GasCan 2026-09-20晚追加:身份证必须填完整号码(15或18位含X),手机号必填
   @IsString()
-  @Length(4, 4)
-  idNumberLast4!: string;
+  @Matches(/^\d{17}[\dXx]$|^\d{15}$/)
+  idCard!: string;
 
-  @IsOptional()
+  @IsString()
   @Matches(/^1[3-9]\d{9}$/)
-  phone?: string;
+  phone!: string;
 }
 
 export class UpdateCoOccupantDto {
@@ -270,9 +271,8 @@ export class UpdateCoOccupantDto {
   name?: string;
 
   @IsOptional()
-  @IsString()
-  @Length(4, 4)
-  idNumberLast4?: string;
+  @Matches(/^\d{17}[\dXx]$|^\d{15}$/)
+  idCard?: string;
 
   @IsOptional()
   @Matches(/^1[3-9]\d{9}$/)

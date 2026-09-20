@@ -73,8 +73,8 @@ describe('ContractPdfService(M22 新模板)', () => {
       ...baseData(),
       coOccupants: Array.from({ length: 12 }, (_, i) => ({
         name: `同住人${i + 1}号`,
-        idNumberLast4: String(1000 + i),
-        phone: null,
+        idCard: '310101199001011234',
+        phone: '13800001111',
       })),
     };
     const html = buildContractHtml(data, numberToChineseUppercase(data.monthlyRent));
@@ -118,8 +118,8 @@ describe('ContractPdfService(M22 新模板)', () => {
           { item: '扫地机器人', quantity: 2, condition: '备注很长很长很长很长很长很长' },
         ],
         coOccupants: [
-          { name: '张同住', idNumberLast4: '1234', phone: '13800001111' },
-          { name: '李同住', idNumberLast4: '5678', phone: null },
+          { name: '张同住', idCard: '310101199001015678', phone: '13800001111' },
+          { name: '李同住', idCard: '310101199001015678', phone: '13800002222' },
         ],
         extraTerms: '乙方承诺不饲养宠物；如需安装额外电器须事先告知甲方并承担相应电费。',
       },
@@ -130,8 +130,8 @@ describe('ContractPdfService(M22 新模板)', () => {
         ...baseData(),
         coOccupants: Array.from({ length: 12 }, (_, i) => ({
           name: `同住人${i + 1}号`,
-          idNumberLast4: String(1000 + i),
-          phone: null,
+          idCard: '310101199001011234',
+          phone: '13800001111',
         })),
       },
     ],

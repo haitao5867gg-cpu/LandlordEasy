@@ -189,11 +189,11 @@ model ContractSettings {
 
 // ========== 共同居住人(M22,备案性质,无审批流程;合同附件二数据来源) ==========
 model CoOccupant {
-  id            Int      @id @default(autoincrement())
-  leaseId       Int
-  name          String
-  idNumberLast4 String   @db.VarChar(4) // 证件号后四位
-  phone         String?  @db.VarChar(20)
+  id       Int      @id @default(autoincrement())
+  leaseId  Int
+  name     String
+  idCard   String?  @db.VarChar(18) // 完整身份证号(2026-09-20晚GasCan追加:必填完整号;列可空,应用层强制,与Tenant.idCard同款)
+  phone    String?  @db.VarChar(20) // 必填(2026-09-20晚GasCan追加;列可空,应用层强制)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

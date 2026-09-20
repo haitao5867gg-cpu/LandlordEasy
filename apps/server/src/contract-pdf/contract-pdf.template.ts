@@ -103,7 +103,7 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
     allCoOccupants.length === 0 ? '无' : `共${allCoOccupants.length}人，详见附件二`;
   const coRows = Array.from({ length: CO_OCCUPANT_ROWS }, (_, i) => {
     const c = coOccupants[i];
-    return `<tr><td class="idx">${i + 1}</td><td>${c ? escapeHtml(c.name) : ''}</td><td>${c ? escapeHtml(c.idNumberLast4) : ''}</td><td>${c && c.phone ? escapeHtml(c.phone) : ''}</td></tr>`;
+    return `<tr><td class="idx">${i + 1}</td><td>${c ? escapeHtml(c.name) : ''}</td><td>${c ? escapeHtml(c.idCard) : ''}</td><td>${c ? escapeHtml(c.phone) : ''}</td></tr>`;
   }).join('');
   const extraTerms = (data.extraTerms ?? '').trim().slice(0, 200);
   const n = (v: number | undefined) => (v === undefined || v === null ? '　' : String(v));
@@ -232,7 +232,7 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   <div class="info-row" style="margin:4mm 0;"><span class="info-label">承租人</span>${field(data.tenantName, '40mm')}</div>
   <p class="no-indent" style="margin:2mm 0 3mm; font-weight:700;">共同居住人名单</p>
   <table class="co-table">
-    <tr><th style="width:12mm;">序号</th><th>姓名</th><th style="width:38mm;">证件号后四位</th><th style="width:44mm;">联系方式</th></tr>
+    <tr><th style="width:10mm;">序号</th><th style="width:26mm;">姓名</th><th style="width:52mm;">身份证号</th><th style="width:34mm;">联系电话</th></tr>
     ${coRows}
   </table>
   ${coOccupants.length === 0 ? '<p class="note">无共同居住人。</p>' : ''}

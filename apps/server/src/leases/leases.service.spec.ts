@@ -756,14 +756,14 @@ describe('LeasesService contract signing tasks', () => {
     it('新增共同居住人:校验租约存在后创建', async () => {
       (prisma.lease.findUnique as jest.Mock).mockResolvedValue({ id: 1 });
       (prisma.coOccupant.create as jest.Mock).mockResolvedValue({
-        id: 5, leaseId: 1, name: '张同住', idNumberLast4: '1234', phone: null,
+        id: 5, leaseId: 1, name: '张同住', idCard: '310101199001011234', phone: '13800001111',
       });
 
       await expect(
-        service.addCoOccupant(1, { name: '张同住', idNumberLast4: '1234' } as never),
-      ).resolves.toEqual({ id: 5, leaseId: 1, name: '张同住', idNumberLast4: '1234', phone: null });
+        service.addCoOccupant(1, { name: '张同住', idCard: '310101199001011234', phone: '13800001111' } as never),
+      ).resolves.toEqual({ id: 5, leaseId: 1, name: '张同住', idCard: '310101199001011234', phone: '13800001111' });
       expect(prisma.coOccupant.create).toHaveBeenCalledWith({
-        data: { leaseId: 1, name: '张同住', idNumberLast4: '1234' },
+        data: { leaseId: 1, name: '张同住', idCard: '310101199001011234', phone: '13800001111' },
       });
     });
 

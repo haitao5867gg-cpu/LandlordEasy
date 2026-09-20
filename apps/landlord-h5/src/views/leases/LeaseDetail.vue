@@ -125,9 +125,9 @@
         <van-cell v-for="co in lease.coOccupants" :key="co.id">
           <template #title>
             {{ co.name }}
-            <van-tag plain type="primary" style="margin-left:6px;">证件后四位 {{ co.idNumberLast4 }}</van-tag>
+            <van-tag plain type="primary" style="margin-left:6px;">{{ co.idCard }}</van-tag>
           </template>
-          <template #label>{{ co.phone || '未留联系方式' }}（备案信息,用于合同附件二）</template>
+          <template #label>{{ co.phone }}（备案信息,用于合同附件二）</template>
           <template #right-icon>
             <van-icon name="edit" style="margin-right:10px;" @click="openCoOccupantDialog(co)" />
             <van-icon name="delete-o" class="checklist-delete" @click="handleRemoveCoOccupant(co)" />
@@ -217,8 +217,8 @@
     <!-- 同住人新增/编辑弹窗 -->
     <van-dialog v-model:show="showCoOccupantDialog" :title="editingCoOccupantId ? '编辑同住人' : '新增同住人'" show-cancel-button @confirm="handleSaveCoOccupant">
       <van-field v-model.trim="coOccupantForm.name" label="姓名" placeholder="同住人姓名" :rules="[{ required: true, message: '请填写姓名' }]" />
-      <van-field v-model.trim="coOccupantForm.idNumberLast4" label="证件后四位" maxlength="4" placeholder="身份证号后4位数字" :rules="[{ required: true, message: '请填写证件后四位' }, { pattern: /^[0-9Xx]{4}$/, message: '请输入4位(数字或含X)' }]" />
-      <van-field v-model.trim="coOccupantForm.phone" label="联系方式" type="tel" placeholder="可选,11位手机号" />
+      <van-field v-model.trim="coOccupantForm.idCard" label="身份证号" maxlength="18" placeholder="15或18位身份证号" :rules="[{ required: true, message: '请填写完整身份证号' }, { pattern: /^\d{17}[\dXx]$|^\d{15}$/, message: '身份证号格式不正确' }]" />
+      <van-field v-model.trim="coOccupantForm.phone" label="手机号" type="tel" maxlength="11" placeholder="11位手机号" :rules="[{ required: true, message: '请填写手机号' }, { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确' }]" />
     </van-dialog>
 
     <!-- 新增交接记录弹窗 -->
@@ -274,7 +274,7 @@ const bindQrcodeLoading = ref(false);
 const showCoOccupantDialog = ref(false);
 const editingCoOccupantId = ref<number | null>(null);
 const prefilling = ref(false);
-const coOccupantForm = reactive({ name: '', idNumberLast4: '', phone: '' });
+const coOccupantForm = reactive({ name: '', idCard: '', phone: '' });
 
 const endForm = reactive({ endDate: '', depositRefund: 0, depositDeductReason: '', endReason: '' });
 const renewForm = reactive({ newEndDate: '', newRent: undefined as number | undefined });
@@ -508,24 +508,26 @@ async function prefillDefaultChecklist() {
   }
 }
 
-function openCoOccupantDialog(co?: { id: number; name: string; idNumberLast4: string; phone?: string | null }) {
+function openCoOccupantDialog(co?: { id: number; name: string; idCard?: string | null; phone?: string | null }) {
   editingCoOccupantId.value = co ? co.id : null;
   coOccupantForm.name = co?.name ?? '';
-  coOccupantForm.idNumberLast4 = co?.idNumberLast4 ?? '';
+  coOccupantForm.idCard = co?.idCard ?? '';
   coOccupantForm.phone = co?.phone ?? '';
   showCoOccupantDialog.value = true;
 }
 
 async function handleSaveCoOccupant() {
-  if (!coOccupantForm.name || !/^[0-9Xx]{4}$/.test(coOccupantForm.idNumberLast4)) {
-    showToast('请填写姓名和4位证件后四位');
+  const idCardOk = /^\d{17}[\dXx]$|^\d{15}$/.test(coOccupantForm.idCard);
+  const phoneOk = /^1[3-9]\d{9}$/.test(coOccupantForm.phone);
+  if (!coOccupantForm.name || !idCardOk || !phoneOk) {
+    showToast('请填写姓名、完整身份证号和手机号');
     return;
   }
   const body: Record<string, unknown> = {
     name: coOccupantForm.name,
-    idNumberLast4: coOccupantForm.idNumberLast4,
+    idCard: coOccupantForm.idCard,
+    phone: coOccupantForm.phone,
   };
-  if (coOccupantForm.phone) body.phone = coOccupantForm.phone;
   if (editingCoOccupantId.value) {
     await http.put(`/leases/co-occupants/${editingCoOccupantId.value}`, body);
   } else {
