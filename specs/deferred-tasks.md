@@ -6,6 +6,17 @@
 
 ## 待处理队列
 
+## [2026-09-21 00:20] 签署完成→立即出账单(含押金)→提醒带跳转→微信支付 链路补线
+- GasCan原话:"签署好之后,正常应该立马生成账单,账单包括月租金和押金。这个账单需要可以支持微信支付。租客需要收到付费提醒,并且可以直接在线上完成微信支付。房东应该可以看到租客在系统里面的支付记录。你看看这部分功能是不是已经做过了,不要重复开发。"
+- 夜间会话已完成的排查结论(主会话可直接引用,不用重查):
+  - **已有,勿重复开发**:①微信支付线上交租全链路(tenant-h5 PayBill.vue → POST /payments/wechat/create-order → 回调自动确认,M18真实环境实测过);②催缴模板消息(reminders.service.ts每日09:00,到期前3天/当天/逾期每3天,字段amount3/time4/thing5/thing7/time10对齐真实模板)+手动催缴接口(bills/:id/remind、batch-remind);③房东看收款:BillDetail.vue显示每笔支付记录、工作台"待确认收款"卡片;④账单引擎bill-engine.service.ts每日02:00给ACTIVE租约生成下期账单(租金+feeItems),generateBillsForLease幂等可复用,另有POST /bills/generate手动触发;⑤签署回调tryConfirmSigned(leases.service.ts:594)已做:归档PDF+SIGNED+发"已签署"通知+绑定租客openid。
+  - **缺口1(小改,后端)**:签署回调不生成账单,首期账单要等当天02:00定时任务——新签当天租客看不到账单。改法:tryConfirmSigned里调this.billEngine.generateBillsForLease(task.lease)(现成方法,幂等,注 leases.service需注入bills模块或抽事件,注意循环依赖,bills模块不依赖leases则单向OK)
+  - **缺口2(需GasCan拍板口径,后端)**:押金不在账单里(独立DepositRecord台账,不入bill)。方案建议:首期账单加"押金"费用项(billItem type='DEPOSIT' name='押金'),一张单一次付清,退租仍走现有押金退还流程。**需要GasCan确认:押金是否跟首期租金一起线上付?**
+  - **缺口3(小改,后端)**:催缴模板消息没传url字段(wechat-notify.interface支持顶层url),租客收到提醒不能点击直达付款页。改法:reminders.service和"已签署"通知加url=租客端/bills/:id/pay(需带租客登录态考虑——tenant端有token校验,跳转后未登录会进登录页走微信授权,链路通但要在真机验证)
+  - **缺口4(可选)**:房东无全局收款流水页(只有按账单看+待确认收款),问GasCan要不要,不影响上线最低范围
+- 为什么夜间没做:全部是apps/server后端改动+涉及押金口径需GasCan拍板
+- 状态:待处理(建议主会话明天先跟GasCan确认缺口2口径,再一次性实施1/3)
+
 ## [2026-09-20 23:28] 合同模板及全系统清理燃气相关内容(公寓无燃气服务)
 - GasCan原话:"现有的合同模版要调整,我们的公寓楼不允许用燃气,看到所有跟燃气有关的地方都要调整。我们也不提供燃气服务。"
 - 要做什么:①合同PDF模板(apps/server/src/contract-pdf/contract-pdf.template.ts)里燃气相关条款/字段删掉或改文案;②发起签署弹窗的"燃气表底数"字段(LeaseDetail.vue contractForm.gasMeterReading,前端可顺手处理但后端模板渲染要同步);③排查水电燃气费用项、交接清单默认值等所有燃气痕迹(grep 燃气/燃气表/gas)
