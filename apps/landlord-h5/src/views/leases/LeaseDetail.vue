@@ -268,7 +268,12 @@ const contractForm = reactive({
 const currentSigningTask = computed(() => lease.value?.contractSigningTasks?.[0] ?? null);
 
 function d(s: string) { return s?.split('T')[0] || ''; }
-function dt(s: string) { return s ? s.replace('T', ' ').slice(0, 16) : ''; }
+function dt(s: string) {
+  const date = new Date(s);
+  if (Number.isNaN(date.getTime())) return s || '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 function billStatusLabel(s: string) { return billStatusMap[s] || s; }
 function billTagType(s: string) {
   if (s === 'PAID') return 'success';
