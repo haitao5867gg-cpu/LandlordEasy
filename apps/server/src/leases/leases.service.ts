@@ -617,6 +617,13 @@ ${signUrl}
       notVacant: '房间不是空置状态,无法签约',
     },
   ) {
+    // 新签(create)和换租审批(approveTransferRequest → createInTransaction)共用这个
+    // 入口,DTO 里 startDate/endDate 只做了各自的格式校验,没有先后关系校验——不
+    // 拦住的话可以建出结束日早于起租日的租约,账单引擎按 periodStart < endDate
+    // 循环生成账单,倒挂租期下循环体一次都不执行,房间被占用但租金永不出账。
+    if (new Date(dto.endDate) <= new Date(dto.startDate)) {
+      throw new BadRequestException('结束日期必须晚于起始日期');
+    }
     await this.lockRow(db, 'rooms', dto.roomId);
     // 原子claim:仅当房间此刻确实空置才转为已租且要求恰好一行受影响,
     // 避免可重复读快照下"先查后写"让两笔并发操作都误判房间仍空置。
@@ -763,8 +770,11 @@ ${signUrl}
     if (lease.status !== 'ACTIVE') {
       throw new BadRequestException('只能续签活跃租约');
     }
-    if (new Date(dto.newEndDate) <= lease.startDate) {
-      throw new BadRequestException('新到期日不能早于或等于起租日');
+    // 续签语义上只允许延长:原来只挡了"newEndDate<=startDate",没挡"比当前
+    // endDate还短"这种输入,会把接口名叫renew实际执行成静默缩期,账单引擎从
+    // 新endDate之后就停止出账,但租客继续住。
+    if (new Date(dto.newEndDate) <= lease.endDate) {
+      throw new BadRequestException('新到期日必须晚于当前到期日');
     }
 
     return this.prisma.lease.update({
