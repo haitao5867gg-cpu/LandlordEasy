@@ -4,6 +4,7 @@ import { tap } from 'rxjs/operators';
 import { Request } from 'express';
 import { PrismaService } from '../../prisma/prisma.service';
 import { JwtPayload } from '../../auth/auth.service';
+import { maskPii } from '../utils/pii-mask';
 
 /**
  * 操作日志拦截器
@@ -36,7 +37,10 @@ export class AuditLogInterceptor implements NestInterceptor {
           const pathSegments = request.path.split('/').filter(Boolean);
           // /api/v1/leases/123 → entityType=leases, entityId=123
           const entityType = pathSegments[2] || 'unknown';
-          const entityId = parseInt(pathSegments[3]) || (responseData as Record<string, unknown>)?.['id'] as number || 0;
+          const entityId =
+            parseInt(pathSegments[3]) ||
+            ((responseData as Record<string, unknown>)?.['id'] as number) ||
+            0;
 
           await this.prisma.auditLog.create({
             data: {
@@ -44,12 +48,14 @@ export class AuditLogInterceptor implements NestInterceptor {
               action: `${method} ${request.path}`,
               entityType,
               entityId: entityId || 0,
-              detail: JSON.parse(JSON.stringify({
-                method,
-                path: request.path,
-                body: this.sanitizeBody(request.body),
-                duration: Date.now() - startTime,
-              })),
+              detail: JSON.parse(
+                JSON.stringify({
+                  method,
+                  path: request.path,
+                  body: maskPii(request.body),
+                  duration: Date.now() - startTime,
+                }),
+              ),
             },
           });
         } catch (error) {
@@ -58,14 +64,5 @@ export class AuditLogInterceptor implements NestInterceptor {
         }
       }),
     );
-  }
-
-  private sanitizeBody(body: Record<string, unknown>): Record<string, unknown> {
-    if (!body) return {};
-    // 脱敏：移除可能的密码等敏感字段
-    const sanitized = { ...body };
-    delete sanitized['password'];
-    delete sanitized['secret'];
-    return sanitized;
   }
 }
