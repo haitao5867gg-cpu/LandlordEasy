@@ -9,7 +9,7 @@ export class CreateHandoverDto {
 
   @IsOptional()
   @IsArray()
-  checklist?: Array<{ item: string; condition: string }>;
+  checklist?: Array<{ item: string; quantity?: number | null; condition: string }>;
 
   @IsOptional()
   @IsString()
@@ -19,7 +19,7 @@ export class CreateHandoverDto {
 export class UpdateHandoverDto {
   @IsOptional()
   @IsArray()
-  checklist?: Array<{ item: string; condition: string }>;
+  checklist?: Array<{ item: string; quantity?: number | null; condition: string }>;
 
   @IsOptional()
   @IsString()

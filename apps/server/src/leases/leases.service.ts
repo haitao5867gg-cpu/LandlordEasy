@@ -12,6 +12,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   ApproveTerminationRequestDto,
   ApproveTransferRequestDto,
+  CreateCoOccupantDto,
+  UpdateCoOccupantDto,
   CreateContractSigningTaskDto,
   CreateLeaseDto,
   CreateTerminationRequestDto,
@@ -35,9 +37,10 @@ import {
 } from '../wechat/wechat-notify.interface';
 import { ContractPdfService } from '../contract-pdf/contract-pdf.service';
 import {
-  ContractFacilities,
+  ChecklistEntry,
   ContractPdfData,
 } from '../contract-pdf/contract-pdf.types';
+import { AdminService } from '../admin/admin.service';
 import {
   IWeiQianService,
   WEIQIAN_SERVICE,
@@ -53,20 +56,6 @@ type LockTable =
   | 'lease_termination_requests'
   | 'room_transfer_requests';
 
-const FACILITY_NAME_TO_KEY: Record<string, keyof ContractFacilities> = {
-  空调: 'airConditioner',
-  冰箱: 'refrigerator',
-  洗衣机: 'washingMachine',
-  热水器: 'waterHeater',
-  燃气灶: 'gasStove',
-  电视: 'television',
-  淋浴器: 'shower',
-  油烟机: 'rangeHood',
-  床: 'bed',
-  桌子: 'table',
-  椅子: 'chair',
-  沙发: 'sofa',
-};
 
 @Injectable()
 export class LeasesService {
@@ -81,6 +70,7 @@ export class LeasesService {
     private readonly wechatCustomerService: IWechatCustomerServiceService,
     @Inject(WECHAT_NOTIFY_SERVICE)
     private readonly wechatNotify: IWechatNotifyService,
+    private readonly admin: AdminService,
   ) {}
 
   async findAll(roomId?: number, status?: string) {
@@ -105,6 +95,7 @@ export class LeasesService {
         depositRecords: true,
         handoverRecords: true,
         contractSigningTasks: { orderBy: { createdAt: 'desc' } },
+        coOccupants: { orderBy: { id: 'asc' } },
       },
     });
     if (!lease) throw new NotFoundException('租约不存在');
@@ -118,6 +109,18 @@ export class LeasesService {
       select: { id: true, tenant: { select: { openid: true } } },
     });
     if (!lease) throw new NotFoundException('租约不存在');
+
+    // GasCan 2026-09-20 拍板:强制"先做入住交接、再生成电子签约"——附件三的
+    // 物品清单/交付日期取自 CHECKIN 交接记录,没有记录就不允许生成合同
+    const checkinHandover = await this.prisma.handoverRecord.findFirst({
+      where: { leaseId, type: 'CHECKIN' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!checkinHandover) {
+      throw new BadRequestException(
+        '请先在租约详情页填写"入住交接记录"(物品清单),再生成电子签约——合同附件三将自动使用交接单数据',
+      );
+    }
 
     const followerOpenid = lease.tenant.openid;
     const task = await this.createContractSigningTaskRecord(
@@ -144,6 +147,49 @@ export class LeasesService {
       where: { id: task.id },
       data: { qrCodeImage },
     });
+  }
+
+  // ===== 共同居住人(M22,备案性质,合同附件二数据来源) =====
+
+  async listCoOccupants(leaseId: number) {
+    await this.ensureLeaseExists(leaseId);
+    return this.prisma.coOccupant.findMany({
+      where: { leaseId },
+      orderBy: { id: 'asc' },
+    });
+  }
+
+  async addCoOccupant(leaseId: number, dto: CreateCoOccupantDto) {
+    await this.ensureLeaseExists(leaseId);
+    return this.prisma.coOccupant.create({ data: { leaseId, ...dto } });
+  }
+
+  async updateCoOccupant(coOccupantId: number, dto: UpdateCoOccupantDto) {
+    const existing = await this.prisma.coOccupant.findUnique({
+      where: { id: coOccupantId },
+    });
+    if (!existing) throw new NotFoundException('共同居住人不存在');
+    return this.prisma.coOccupant.update({
+      where: { id: coOccupantId },
+      data: dto,
+    });
+  }
+
+  async removeCoOccupant(coOccupantId: number) {
+    const existing = await this.prisma.coOccupant.findUnique({
+      where: { id: coOccupantId },
+    });
+    if (!existing) throw new NotFoundException('共同居住人不存在');
+    await this.prisma.coOccupant.delete({ where: { id: coOccupantId } });
+    return { deleted: true };
+  }
+
+  private async ensureLeaseExists(leaseId: number) {
+    const lease = await this.prisma.lease.findUnique({
+      where: { id: leaseId },
+      select: { id: true },
+    });
+    if (!lease) throw new NotFoundException('租约不存在');
   }
 
   /** 生成(或复用)租客账号绑定二维码,扫码关注公众号即自动绑定 tenant-h5,替代邀请码。 */
@@ -249,6 +295,7 @@ export class LeasesService {
               include: { building: { include: { property: true } } },
             },
             tenant: true,
+            coOccupants: { orderBy: { id: 'asc' } },
           },
         },
       },
@@ -296,6 +343,15 @@ export class LeasesService {
       throw new BadRequestException('签约任务正在发起或已发起,请勿重复操作');
     }
 
+    // M22:附件三的物品清单/交付日期取该租约最近一次入住交接记录
+    // (GasCan 2026-09-20 拍板:强制先做入住交接、再生成电子签约,合同数据从交接单自动取)
+    const checkinHandover = await this.prisma.handoverRecord.findFirst({
+      where: { leaseId: task.leaseId, type: 'CHECKIN' },
+      orderBy: { createdAt: 'desc' },
+    });
+    const checklist = this.toChecklistEntries(checkinHandover?.checklist);
+    const systemSettings = this.admin.getSettings();
+
     const pdfData: ContractPdfData = {
       landlordName: settings.landlordName,
       landlordIdCard: settings.landlordIdCard,
@@ -307,8 +363,27 @@ export class LeasesService {
       leaseStartDate: task.lease.startDate,
       leaseEndDate: task.lease.endDate,
       monthlyRent: Number(task.lease.rent),
-      paymentCycle: this.formatPaymentCycle(task.lease.payCycle),
+      paymentCycle: task.lease.payCycle,
       depositAmount: Number(task.lease.deposit),
+      payeeName: settings.payeeName ?? '占秀英',
+      advancePaymentDays: systemSettings.reminderPreDays,
+      handoverDate: checkinHandover?.createdAt ?? null,
+      waterMeterReading:
+        task.waterMeterReading === null
+          ? undefined
+          : Number(task.waterMeterReading),
+      electricityMeterReading:
+        task.electricityMeterReading === null
+          ? undefined
+          : Number(task.electricityMeterReading),
+      gasMeterReading:
+        task.gasMeterReading === null ? undefined : Number(task.gasMeterReading),
+      checklist,
+      coOccupants: task.lease.coOccupants.map((c) => ({
+        name: c.name,
+        idNumberLast4: c.idNumberLast4,
+        phone: c.phone,
+      })),
       penaltyMonths:
         dto.penaltyMonths ?? task.penaltyMonths ?? settings.defaultPenaltyMonths,
       overdueToleranceDays:
@@ -322,17 +397,18 @@ export class LeasesService {
         dto.renewalNoticeDays ??
         task.renewalNoticeDays ??
         settings.defaultRenewNoticeDays,
-      waterMeterReading:
-        task.waterMeterReading === null
-          ? undefined
-          : Number(task.waterMeterReading),
-      electricityMeterReading:
-        task.electricityMeterReading === null
-          ? undefined
-          : Number(task.electricityMeterReading),
-      gasMeterReading:
-        task.gasMeterReading === null ? undefined : Number(task.gasMeterReading),
-      facilities: this.toContractFacilities(task.facilities),
+      continuousStayDays: settings.continuousStayDays ?? 30,
+      cumulativeStayDays: settings.cumulativeStayDays ?? 90,
+      abandonedPropertyDays: settings.abandonedPropertyDays ?? 30,
+      nonRenewalNoticeDays: settings.nonRenewalNoticeDays ?? 30,
+      earlyTerminationNoticeDays: settings.earlyTerminationNoticeDays ?? 30,
+      depositRefundWorkDays: settings.depositRefundWorkDays ?? 3,
+      electronicNoticeHours: settings.electronicNoticeHours ?? 24,
+      waterFeeRule: settings.waterFeeRule ?? '以实际发生为准',
+      electricityFeeRule: settings.electricityFeeRule ?? '以实际发生为准',
+      gasFeeRule: settings.gasFeeRule ?? '以实际发生为准',
+      otherFeeRule: settings.otherFeeRule ?? '以实际发生为准',
+      launchDate: new Date(),
       extraTerms: task.extraTerms ?? undefined,
       contractNumber: `LE-${task.id}`,
     };
@@ -598,31 +674,17 @@ ${signUrl}
     return { MONTHLY: '月付', QUARTERLY: '季付', YEARLY: '年付' }[payCycle] ?? payCycle;
   }
 
-  private toContractFacilities(value: unknown): ContractFacilities {
-    const result: ContractFacilities = {
-      airConditioner: false,
-      refrigerator: false,
-      washingMachine: false,
-      waterHeater: false,
-      gasStove: false,
-      television: false,
-      shower: false,
-      rangeHood: false,
-      bed: false,
-      table: false,
-      chair: false,
-      sofa: false,
-    };
-    if (!Array.isArray(value)) return result;
-
-    for (const facility of value) {
-      if (!facility || typeof facility !== 'object') continue;
-      const item = facility as { name?: unknown; has?: unknown };
-      if (typeof item.name !== 'string') continue;
-      const key = FACILITY_NAME_TO_KEY[item.name];
-      if (key) result[key] = item.has === true;
-    }
-    return result;
+  /** HandoverRecord.checklist JSON → 附件三 ChecklistEntry;兼容旧的 {item,condition} 与新的 {item,quantity,condition} 两种形状 */
+  private toChecklistEntries(value: unknown): ChecklistEntry[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+      .filter((e) => typeof e.item === 'string' && e.item.trim() !== '')
+      .map((e) => ({
+        item: String(e.item),
+        quantity: typeof e.quantity === 'number' && Number.isFinite(e.quantity) ? e.quantity : null,
+        condition: typeof e.condition === 'string' ? e.condition : '',
+      }));
   }
 
   /** 新签租约 */
@@ -836,7 +898,15 @@ ${signUrl}
     const lease = await this.prisma.lease.findUnique({ where: { id: leaseId } });
     if (!lease || lease.tenantId !== tenantId) throw new NotFoundException('租约不存在');
     const suggestedPenalty = await this.calculateSuggestedPenalty(leaseId);
-    return { suggestedPenalty };
+    // M22:退租提交页展示"根据合同约定应提前N日通知"提醒(仅提示,不做系统拦截,GasCan拍板)
+    const settings = await this.prisma.contractSettings.findFirst({
+      orderBy: { id: 'asc' },
+      select: { earlyTerminationNoticeDays: true },
+    });
+    return {
+      suggestedPenalty,
+      earlyTerminationNoticeDays: settings?.earlyTerminationNoticeDays ?? 30,
+    };
   }
 
   async createTerminationRequest(

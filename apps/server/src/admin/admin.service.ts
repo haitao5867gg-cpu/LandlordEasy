@@ -18,6 +18,20 @@ export interface ContractSettingsInput {
   defaultOverdueDays?: number;
   defaultCleaningFee?: number;
   defaultRenewNoticeDays?: number;
+  // M22 新增(全部可选,缺省沿用数据库默认值)
+  payeeName?: string;
+  waterFeeRule?: string;
+  electricityFeeRule?: string;
+  gasFeeRule?: string;
+  otherFeeRule?: string;
+  defaultItemChecklist?: Array<{ item: string; quantity?: number }>;
+  continuousStayDays?: number;
+  cumulativeStayDays?: number;
+  abandonedPropertyDays?: number;
+  nonRenewalNoticeDays?: number;
+  earlyTerminationNoticeDays?: number;
+  depositRefundWorkDays?: number;
+  electronicNoticeHours?: number;
 }
 
 const DEFAULT_CONTRACT_SETTINGS = {
@@ -25,6 +39,18 @@ const DEFAULT_CONTRACT_SETTINGS = {
   defaultOverdueDays: 5,
   defaultCleaningFee: 110,
   defaultRenewNoticeDays: 30,
+  payeeName: '占秀英',
+  waterFeeRule: '以实际发生为准',
+  electricityFeeRule: '以实际发生为准',
+  gasFeeRule: '以实际发生为准',
+  otherFeeRule: '以实际发生为准',
+  continuousStayDays: 30,
+  cumulativeStayDays: 90,
+  abandonedPropertyDays: 30,
+  nonRenewalNoticeDays: 30,
+  earlyTerminationNoticeDays: 30,
+  depositRefundWorkDays: 3,
+  electronicNoticeHours: 24,
 };
 
 const SETTINGS_FILE = path.join(process.cwd(), 'data/settings.json');
@@ -114,11 +140,35 @@ export class AdminService {
       ...(input.defaultRenewNoticeDays === undefined
         ? {}
         : { defaultRenewNoticeDays: input.defaultRenewNoticeDays }),
+      ...this.pickDefined(input, [
+        'payeeName',
+        'waterFeeRule',
+        'electricityFeeRule',
+        'gasFeeRule',
+        'otherFeeRule',
+        'defaultItemChecklist',
+        'continuousStayDays',
+        'cumulativeStayDays',
+        'abandonedPropertyDays',
+        'nonRenewalNoticeDays',
+        'earlyTerminationNoticeDays',
+        'depositRefundWorkDays',
+        'electronicNoticeHours',
+      ]),
     };
 
     return existing
       ? this.prisma.contractSettings.update({ where: { id: existing.id }, data })
       : this.prisma.contractSettings.create({ data });
+  }
+
+  private pickDefined(input: object, keys: string[]) {
+    const result: Record<string, unknown> = {};
+    const record = input as Record<string, unknown>;
+    for (const key of keys) {
+      if (record[key] !== undefined) result[key] = record[key];
+    }
+    return result;
   }
 
   // === 收款码图片上传 ===

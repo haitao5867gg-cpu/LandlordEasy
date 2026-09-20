@@ -15,6 +15,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
 import {
+  IsArray,
   IsBoolean,
   IsInt,
   IsNotEmpty,
@@ -22,8 +23,11 @@ import {
   IsOptional,
   IsString,
   Matches,
+  MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { AdminService } from './admin.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { JwtPayload } from '../auth/auth.service';
@@ -94,6 +98,87 @@ class UpdateContractSettingsDto {
   @IsInt()
   @Min(0)
   defaultRenewNoticeDays?: number;
+
+  // ===== M22 新合同模板全局配置 =====
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(30)
+  payeeName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  waterFeeRule?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  electricityFeeRule?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  gasFeeRule?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  otherFeeRule?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ChecklistItemDto)
+  defaultItemChecklist?: ChecklistItemDto[];
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  continuousStayDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  cumulativeStayDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  abandonedPropertyDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  nonRenewalNoticeDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  earlyTerminationNoticeDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  depositRefundWorkDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  electronicNoticeHours?: number;
+}
+
+class ChecklistItemDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(30)
+  item!: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  quantity?: number;
 }
 
 @Controller('admin')

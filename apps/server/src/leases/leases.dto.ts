@@ -7,6 +7,8 @@ import {
   IsArray,
   IsBoolean,
   IsIn,
+  IsNotEmpty,
+  Length,
   ValidateNested,
   Min,
   Matches,
@@ -241,4 +243,38 @@ export class CreateContractSigningTaskDto {
   @IsInt()
   @Min(0)
   renewalNoticeDays?: number;
+}
+
+// ===== 共同居住人(M22,备案性质) =====
+
+export class CreateCoOccupantDto {
+  @IsString()
+  @IsNotEmpty()
+  @Length(1, 30)
+  name!: string;
+
+  @IsString()
+  @Length(4, 4)
+  idNumberLast4!: string;
+
+  @IsOptional()
+  @Matches(/^1[3-9]\d{9}$/)
+  phone?: string;
+}
+
+export class UpdateCoOccupantDto {
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @Length(1, 30)
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(4, 4)
+  idNumberLast4?: string;
+
+  @IsOptional()
+  @Matches(/^1[3-9]\d{9}$/)
+  phone?: string;
 }

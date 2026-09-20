@@ -57,14 +57,18 @@ describe('LeasesService 退租违约/换租申请', () => {
       sendTemplateMessage: jest.fn(),
     };
 
-    service = new LeasesService(
+    service = (() => {
+      const adminService = { getSettings: () => ({ reminderPreDays: 3 }) } as never;
+      return new LeasesService(
       prisma,
       wechatQrcode,
       contractPdf,
       weiqian,
       wechatCustomer,
       wechatNotify,
+      adminService,
     );
+    })();
   });
 
   afterEach(() => jest.restoreAllMocks());

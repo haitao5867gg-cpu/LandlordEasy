@@ -3,6 +3,8 @@ import {
   Controller,
   Get,
   Post,
+  Put,
+  Delete,
   Param,
   Body,
   Query,
@@ -17,6 +19,8 @@ import { LeasesService } from './leases.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import {
   ApproveTerminationRequestDto,
+  CreateCoOccupantDto,
+  UpdateCoOccupantDto,
   ApproveTransferRequestDto,
   CreateContractSigningTaskDto,
   CreateLeaseDto,
@@ -61,6 +65,34 @@ export class LeasesController {
   create(@Body() dto: CreateLeaseDto, @Req() req: Request) {
     const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
     return this.leasesService.create(dto, user.sub);
+  }
+
+  // ===== 共同居住人(M22) =====
+
+  @Get(':id/co-occupants')
+  listCoOccupants(@Param('id', ParseIntPipe) id: number) {
+    return this.leasesService.listCoOccupants(id);
+  }
+
+  @Post(':id/co-occupants')
+  addCoOccupant(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateCoOccupantDto,
+  ) {
+    return this.leasesService.addCoOccupant(id, dto);
+  }
+
+  @Put('co-occupants/:coOccupantId')
+  updateCoOccupant(
+    @Param('coOccupantId', ParseIntPipe) coOccupantId: number,
+    @Body() dto: UpdateCoOccupantDto,
+  ) {
+    return this.leasesService.updateCoOccupant(coOccupantId, dto);
+  }
+
+  @Delete('co-occupants/:coOccupantId')
+  removeCoOccupant(@Param('coOccupantId', ParseIntPipe) coOccupantId: number) {
+    return this.leasesService.removeCoOccupant(coOccupantId);
   }
 
   @Post(':id/contract-signing-tasks')

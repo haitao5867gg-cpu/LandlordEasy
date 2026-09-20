@@ -80,8 +80,13 @@ describe('SEC-001 authenticated contract HTTP boundary', () => {
     // Use a separate private file so the genuine downloadable fixture stays single-linked.
     fs.writeFileSync(path.join(temp, 'secret.pdf'), pdf);
     fs.linkSync(path.join(temp, 'secret.pdf'), path.join(uploads, 'hardlinked.jpg'));
-    const service = new LeasesService(prisma as any, {} as any, {} as any,
-      provider as any, {} as any, {} as any);
+    const service = (() => {
+      const adminService = { getSettings: () => ({ reminderPreDays: 3 }) } as never;
+      return new LeasesService(prisma as any, {} as any, {} as any,
+      provider as any, {} as any, {} as any,
+      adminService,
+    );
+    })();
     class FixtureModule {}
     Module({
       imports: [ServeStaticModule.forRoot({ rootPath: uploads, serveRoot: '/uploads' })],

@@ -46,6 +46,7 @@ describe('LeasesService contract signing tasks', () => {
     weiqianBId: null,
     lease: {
       id: 1,
+      coOccupants: [],
       startDate: new Date('2026-09-01'),
       endDate: new Date('2027-08-31'),
       rent: new Prisma.Decimal(1800),
@@ -90,6 +91,26 @@ describe('LeasesService contract signing tasks', () => {
         update: jest.fn(),
         updateMany: jest.fn(),
       },
+      // M22:生成签约强制要求已有 CHECKIN 交接记录,合同附件三从交接单取数
+      handoverRecord: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 1,
+          leaseId: 1,
+          type: 'CHECKIN',
+          checklist: [
+            { item: '空调', quantity: 1, condition: '完好' },
+            { item: '床', quantity: 1, condition: '完好' },
+          ],
+          createdAt: new Date('2026-09-20T02:00:00Z'),
+        }),
+      },
+      coOccupant: {
+        findMany: jest.fn(),
+        findUnique: jest.fn(),
+        create: jest.fn(),
+        update: jest.fn(),
+        delete: jest.fn(),
+      },
     } as unknown as jest.Mocked<PrismaService>;
     wechatQrcode = { createSceneQrcode: jest.fn() };
     contractPdf = { generate: jest.fn() } as unknown as jest.Mocked<ContractPdfService>;
@@ -100,14 +121,18 @@ describe('LeasesService contract signing tasks', () => {
     };
     wechatCustomer = { sendTextMessage: jest.fn() };
     wechatNotify = { sendTemplateMessage: jest.fn().mockResolvedValue(true) };
-    service = new LeasesService(
+    service = (() => {
+      const adminService = { getSettings: () => ({ reminderPreDays: 3 }) } as never;
+      return new LeasesService(
       prisma,
       wechatQrcode,
       contractPdf,
       weiqian,
       wechatCustomer,
       wechatNotify,
+      adminService,
     );
+    })();
     process.env.SERVER_PUBLIC_BASE_URL = 'https://landlordeasy.cn/api/v1';
     process.env.WEIQIAN_SIGN_BASE_URL = 'https://sign.weiqian.example';
   });
@@ -340,15 +365,18 @@ describe('LeasesService contract signing tasks', () => {
         landlordName: '李房东',
         tenantName: '张三',
         propertyAddress: '阳光公寓2号楼301室',
-        paymentCycle: '季付',
+        paymentCycle: 'QUARTERLY',
         penaltyMonths: 2,
         overdueToleranceDays: 7,
         cleaningFee: 150,
         renewalNoticeDays: 45,
-        facilities: expect.objectContaining({
-          airConditioner: true,
-          refrigerator: false,
-        }),
+        payeeName: '占秀英',
+        advancePaymentDays: 3,
+        checklist: [
+          { item: '空调', quantity: 1, condition: '完好' },
+          { item: '床', quantity: 1, condition: '完好' },
+        ],
+        coOccupants: [],
         extraTerms: '不得饲养大型宠物',
       }),
     );
@@ -662,6 +690,49 @@ describe('LeasesService contract signing tasks', () => {
       });
       expect(prisma.tenant.update).not.toHaveBeenCalled();
       expect(wechatQrcode.createSceneQrcode).toHaveBeenCalledWith(555444);
+    });
+  });
+
+  describe('M22 共同居住人与交接前置校验', () => {
+    it('无 CHECKIN 交接记录时禁止生成电子签约', async () => {
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+        id: 1,
+        tenant: { openid: null },
+      });
+      (prisma.handoverRecord.findFirst as jest.Mock).mockResolvedValueOnce(null);
+
+      await expect(
+        service.createContractSigningTask(1, { type: 'NEW' } as never),
+      ).rejects.toThrow('请先在租约详情页填写"入住交接记录"');
+    });
+
+    it('新增共同居住人:校验租约存在后创建', async () => {
+      (prisma.lease.findUnique as jest.Mock).mockResolvedValue({ id: 1 });
+      (prisma.coOccupant.create as jest.Mock).mockResolvedValue({
+        id: 5, leaseId: 1, name: '张同住', idNumberLast4: '1234', phone: null,
+      });
+
+      await expect(
+        service.addCoOccupant(1, { name: '张同住', idNumberLast4: '1234' } as never),
+      ).resolves.toEqual({ id: 5, leaseId: 1, name: '张同住', idNumberLast4: '1234', phone: null });
+      expect(prisma.coOccupant.create).toHaveBeenCalledWith({
+        data: { leaseId: 1, name: '张同住', idNumberLast4: '1234' },
+      });
+    });
+
+    it('更新/删除共同居住人:不存在时404', async () => {
+      (prisma.coOccupant.findUnique as jest.Mock).mockResolvedValue(null);
+      await expect(
+        service.updateCoOccupant(99, { name: 'x' } as never),
+      ).rejects.toThrow('共同居住人不存在');
+      await expect(service.removeCoOccupant(99)).rejects.toThrow('共同居住人不存在');
+    });
+
+    it('删除共同居住人成功', async () => {
+      (prisma.coOccupant.findUnique as jest.Mock).mockResolvedValue({ id: 5, leaseId: 1 });
+      (prisma.coOccupant.delete as jest.Mock).mockResolvedValue({ id: 5 });
+      await expect(service.removeCoOccupant(5)).resolves.toEqual({ deleted: true });
+      expect(prisma.coOccupant.delete).toHaveBeenCalledWith({ where: { id: 5 } });
     });
   });
 });

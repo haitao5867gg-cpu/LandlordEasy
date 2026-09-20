@@ -6,9 +6,10 @@ import { AuthModule } from '../auth/auth.module';
 import { WechatModule } from '../wechat/wechat.module';
 import { WeiqianModule } from '../weiqian/weiqian.module';
 import { ContractPdfModule } from '../contract-pdf/contract-pdf.module';
+import { AdminModule } from '../admin/admin.module';
 
 @Module({
-  imports: [AuthModule, WechatModule, WeiqianModule, ContractPdfModule],
+  imports: [AuthModule, WechatModule, WeiqianModule, ContractPdfModule, AdminModule],
   controllers: [LeasesController, WechatController],
   providers: [LeasesService],
   exports: [LeasesService],

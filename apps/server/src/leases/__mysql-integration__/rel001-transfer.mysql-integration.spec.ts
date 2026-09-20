@@ -35,6 +35,7 @@ import {
  */
 
 function buildService(client: PrismaClient): LeasesService {
+  const adminService = { getSettings: () => ({ reminderPreDays: 3 }) } as never;
   return new LeasesService(
     client as unknown as PrismaService,
     createFakeWechatQrcode(),
@@ -42,7 +43,8 @@ function buildService(client: PrismaClient): LeasesService {
     createFakeWeiqian(),
     createFakeWechatCustomerService(),
     createFakeWechatNotify(),
-  );
+      adminService,
+    );
 }
 
 async function captureSnapshot(client: PrismaClient, fixture: TransferFixture) {
