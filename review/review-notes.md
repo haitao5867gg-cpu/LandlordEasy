@@ -554,3 +554,23 @@ GasCan 确认部署后,连服务器发现 `/opt/landlord-easy` 的 git HEAD 停�
 **结论**:明天上线的最低范围(新租客入住+电子签)在dev当前代码上端到端可用,未发现阻断性缺陷;问题#1建议上线后排期修复,#2/#3小修,#4仅影响dev环境测试体验。SEC-001(私有目录+鉴权下载)与47a6bd0(不可猜测回调token)两项安全修复经真实请求验证生效。
 
 
+
+## Review 16(2026-09-21凌晨,GasCan指令:上线前全盘代码质量审查——Claude强模型评审+ZCode落地)
+
+状态: 已处理——7条精选修复当晚落地(bbc38d0),其余9项列入上线后清理队列
+
+**审查方式**:Claude(opus)通读上线全量diff(9100行产品代码,排除测试/文档),按上帝文件/死代码/重复/模式不一致/类型逃逸/配置散乱六维逐条实地核验引用(非凭diff猜测);ZCode独立复核死代码论断后落地。
+
+**当晚修复(全部行为零变化,275测试+两端tsc全过,已部署dev)**:删generateContractPdf平行实现与barrel死导出、删两个死方法、身份证/手机号正则前后端各抽共享常量(共13处字面量归一)、Applications.vue状态函数收拢utils/status.ts、admin设置更新统一pickDefined。
+
+### 上线后清理队列(按价值排序,均不阻塞上线)
+
+1. **leases.service.ts(1395行/45方法/6个业务域)拆分**——最大收益:抽ContractSigningService(电子签约全流程约600行,最独立);CoOccupantsService;退租+换租申请合并LeaseRequestsService(已有独立spec文件);lockRow/createInTransaction/endLeaseInTransaction下沉为共享领域方法
+2. **LeaseDetail.vue(661行)拆组件**——ContractSigningPanel/CoOccupantsPanel/HandoverRecordsPanel/TenantBindPanel四块,父组件只做数据编排
+3. **日期格式化统一**——后端toISOString().split('T')散布15处、前端20处,统一common/utils/date-format + 前端各app utils(注意时区语义:dt类需本地时区)
+4. **@CurrentUser()参数装饰器**——替代散布各controller的(req as unknown as Record)['user']强转
+5. **行锁SELECT...FOR UPDATE抽公共工具**——LeasesService.lockRow与MaintenanceService各一份
+6. **TenantApiService访问模式统一**——纯转发与直调LeasesService并存
+7. **PDF固定清单行(CHECKLIST_ROWS)与ContractSettings.defaultItemChecklist联动**——两份清单名需手动一致,改名会落入"其他"栏(有兜底非bug)
+8. **前端any类型治理**——新页面沿用ref<any[]>风格,新代码起应定义响应interface
+9. **schema历史列清理**——gasFeeRule/gasMeterReading/waterFeeRule/electricityFeeRule/facilities/水表电表底数等已无读取方的列(上线稳定后一次迁移)
