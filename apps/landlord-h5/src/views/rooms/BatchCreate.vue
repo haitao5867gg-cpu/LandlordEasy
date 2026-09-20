@@ -37,7 +37,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../../utils/http';
@@ -57,10 +57,17 @@ const selectedBuildingText = computed(
   () => buildings.value.find((building) => building.id === form.buildingId)?.name || '',
 );
 
-onMounted(async () => {
+async function fetchBuildings() {
   const params: Record<string, string> = {};
   if (propertyStore.currentPropertyId) params.propertyId = String(propertyStore.currentPropertyId);
   buildings.value = await http.get('/buildings', { params }) as any;
+}
+
+onMounted(fetchBuildings);
+
+watch(() => propertyStore.currentPropertyId, async () => {
+  form.buildingId = 0;
+  await fetchBuildings();
 });
 
 function onBuildingConfirm({ selectedOptions }: any) {
