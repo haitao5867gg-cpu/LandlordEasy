@@ -24,8 +24,6 @@ describe('LeasesService contract signing tasks', () => {
 
   const dto = {
     type: 'NEW' as const,
-    waterMeterReading: 12.5,
-    electricityMeterReading: 34.5,
     facilities: [{ name: '空调', has: true }],
   };
 
@@ -36,8 +34,6 @@ describe('LeasesService contract signing tasks', () => {
     sceneValue: 123456,
     status: 'FOLLOWED',
     followerOpenid: 'openid-tenant',
-    waterMeterReading: 12.5,
-    electricityMeterReading: 34.5,
     facilities: [
       { name: '空调', has: true },
       { name: '冰箱', has: false },
@@ -193,8 +189,6 @@ describe('LeasesService contract signing tasks', () => {
         leaseId: 1,
         type: 'NEW',
         sceneValue: expect.any(Number),
-        waterMeterReading: 12.5,
-        electricityMeterReading: 34.5,
         facilities: [{ name: '空调', has: true }],
         status: 'PENDING_SCAN',
       },

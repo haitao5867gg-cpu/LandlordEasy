@@ -167,6 +167,16 @@ class UpdateContractSettingsDto {
   @IsInt()
   @Min(1)
   electronicNoticeHours?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  waterPrice?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  electricityPrice?: number;
 }
 
 class ChecklistItemDto {

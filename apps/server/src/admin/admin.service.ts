@@ -32,6 +32,8 @@ export interface ContractSettingsInput {
   earlyTerminationNoticeDays?: number;
   depositRefundWorkDays?: number;
   electronicNoticeHours?: number;
+  waterPrice?: number;
+  electricityPrice?: number;
 }
 
 const DEFAULT_CONTRACT_SETTINGS = {
@@ -154,6 +156,8 @@ export class AdminService {
         'earlyTerminationNoticeDays',
         'depositRefundWorkDays',
         'electronicNoticeHours',
+        'waterPrice',
+        'electricityPrice',
       ]),
     };
 

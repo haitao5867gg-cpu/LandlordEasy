@@ -251,8 +251,6 @@ export class LeasesService {
             leaseId,
             type: dto.type,
             sceneValue: randomInt(1, 2 ** 31),
-            waterMeterReading: dto.waterMeterReading,
-            electricityMeterReading: dto.electricityMeterReading,
             facilities: dto.facilities
               ? JSON.parse(JSON.stringify(dto.facilities))
               : [],
@@ -379,14 +377,6 @@ export class LeasesService {
       payeeName: settings.payeeName ?? '占秀英',
       advancePaymentDays: systemSettings.reminderPreDays,
       handoverDate: checkinHandover?.createdAt ?? null,
-      waterMeterReading:
-        task.waterMeterReading === null
-          ? undefined
-          : Number(task.waterMeterReading),
-      electricityMeterReading:
-        task.electricityMeterReading === null
-          ? undefined
-          : Number(task.electricityMeterReading),
       checklist,
       coOccupants: task.lease.coOccupants.map((c) => ({
         name: c.name,
@@ -413,8 +403,8 @@ export class LeasesService {
       earlyTerminationNoticeDays: settings.earlyTerminationNoticeDays ?? 30,
       depositRefundWorkDays: settings.depositRefundWorkDays ?? 3,
       electronicNoticeHours: settings.electronicNoticeHours ?? 24,
-      waterFeeRule: settings.waterFeeRule ?? '以实际发生为准',
-      electricityFeeRule: settings.electricityFeeRule ?? '以实际发生为准',
+      waterFeeRule: this.formatUtilityRule(settings.waterPrice, '吨'),
+      electricityFeeRule: this.formatUtilityRule(settings.electricityPrice, '度'),
       otherFeeRule: settings.otherFeeRule ?? '以实际发生为准',
       launchDate: new Date(),
       extraTerms: task.extraTerms ?? undefined,
@@ -556,6 +546,14 @@ ${signUrl}
   }
 
   /** 拼装"R栋205"这样的房间标识,用于客服消息区分多套房源。 */
+  /** 水电单价拼合同附件五文案:配置了数值→"8元/吨,租客自行充值使用";未配置→"以实际发生为准" */
+  private formatUtilityRule(price: unknown, unit: string): string {
+    const value = Number(price);
+    return Number.isFinite(value) && value > 0
+      ? `${value}元/${unit},租客自行充值使用`
+      : '以实际发生为准';
+  }
+
   /** 微信模板消息time字段用的本地日期(yyyy-MM-dd) */
   private formatLocalDate(value: Date): string {
     const pad = (n: number) => String(n).padStart(2, '0');

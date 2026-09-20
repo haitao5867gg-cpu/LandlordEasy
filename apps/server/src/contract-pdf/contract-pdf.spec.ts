@@ -23,8 +23,6 @@ function baseData(): Data {
     payeeName: '占秀英',
     advancePaymentDays: 3,
     handoverDate: '2026-09-21',
-    waterMeterReading: 56.7,
-    electricityMeterReading: 123.4,
     checklist: [],
     coOccupants: [],
     penaltyMonths: 1,

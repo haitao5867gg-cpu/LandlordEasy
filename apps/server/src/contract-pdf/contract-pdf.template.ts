@@ -246,7 +246,7 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   <h2>附件三　房屋及物品交接单</h2>
   <div class="meters">
     <div class="meter-row">交付日期及时间：${field(handoverDate, '40mm')}</div>
-    <div class="meter-row">水表底数：${field(meter(data.waterMeterReading), '30mm')}　　电表底数：${field(meter(data.electricityMeterReading), '30mm')}</div>
+    <div class="meter-row">水电为租客自行充值使用(即充即用),入住时表读数自动清零,无需登记表底数。</div>
   </div>
   <table class="checklist">
     <tr><th style="width:52mm;">物品名称</th><th style="width:26mm;">数量</th><th>完好情况／备注</th></tr>

@@ -202,13 +202,7 @@ export class CreateContractSigningTaskDto {
   @IsIn(['NEW', 'RENEW'])
   type!: 'NEW' | 'RENEW';
 
-  @IsOptional()
-  @IsNumber()
-  waterMeterReading?: number;
 
-  @IsOptional()
-  @IsNumber()
-  electricityMeterReading?: number;
 
   @IsOptional()
   @IsArray()

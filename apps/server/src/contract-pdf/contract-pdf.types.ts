@@ -35,8 +35,6 @@ export interface ContractPdfData {
   advancePaymentDays: number;
   // 附件三:入住交接(取该租约 CHECKIN HandoverRecord)
   handoverDate: Date | string | null;
-  waterMeterReading?: number;
-  electricityMeterReading?: number;
   checklist: ChecklistEntry[];
   // 附件二:共同居住人(Lease.coOccupants,超8人截断)
   coOccupants: CoOccupantInfo[];

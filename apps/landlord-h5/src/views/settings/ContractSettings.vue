@@ -35,8 +35,8 @@
 
       <van-cell-group inset title="收款与费用">
         <van-field v-model.trim="form.payeeName" label="收款人姓名" placeholder="合同第二条收款人,如占秀英" />
-        <van-field v-model.trim="form.waterFeeRule" label="水费规则" placeholder="默认:以实际发生为准" />
-        <van-field v-model.trim="form.electricityFeeRule" label="电费规则" placeholder="默认:以实际发生为准" />
+        <van-field v-model="form.waterPrice" label="水费单价(元/吨)" type="number" placeholder="默认8" />
+        <van-field v-model="form.electricityPrice" label="电费单价(元/度)" type="number" placeholder="默认1.3" />
         <van-field v-model.trim="form.otherFeeRule" label="网络物业等" placeholder="默认:以实际发生为准" />
       </van-cell-group>
 
@@ -90,12 +90,12 @@ const form = reactive({
   landlordIdCard: '',
   landlordPhone: '',
   payeeName: '',
-  waterFeeRule: '',
-  electricityFeeRule: '',
   otherFeeRule: '',
   defaultPenaltyMonths: '',
   defaultOverdueDays: '',
   defaultCleaningFee: '',
+  waterPrice: '',
+  electricityPrice: '',
   defaultRenewNoticeDays: '',
   continuousStayDays: '',
   cumulativeStayDays: '',
@@ -116,12 +116,12 @@ onMounted(async () => {
   form.landlordIdCard = settings.landlordIdCard || '';
   form.landlordPhone = settings.landlordPhone || '';
   form.payeeName = settings.payeeName || '';
-  form.waterFeeRule = settings.waterFeeRule || '';
-  form.electricityFeeRule = settings.electricityFeeRule || '';
   form.otherFeeRule = settings.otherFeeRule || '';
   form.defaultPenaltyMonths = String(settings.defaultPenaltyMonths ?? '');
   form.defaultOverdueDays = String(settings.defaultOverdueDays ?? '');
   form.defaultCleaningFee = String(settings.defaultCleaningFee ?? '');
+  form.waterPrice = settings.waterPrice === null || settings.waterPrice === undefined ? '' : String(settings.waterPrice);
+  form.electricityPrice = settings.electricityPrice === null || settings.electricityPrice === undefined ? '' : String(settings.electricityPrice);
   form.defaultRenewNoticeDays = String(settings.defaultRenewNoticeDays ?? '');
   form.continuousStayDays = String(settings.continuousStayDays ?? '');
   form.cumulativeStayDays = String(settings.cumulativeStayDays ?? '');
@@ -158,12 +158,12 @@ async function saveSettings() {
       landlordIdCard: form.landlordIdCard,
       landlordPhone: form.landlordPhone,
       payeeName: form.payeeName || undefined,
-      waterFeeRule: form.waterFeeRule || undefined,
-      electricityFeeRule: form.electricityFeeRule || undefined,
       otherFeeRule: form.otherFeeRule || undefined,
       defaultPenaltyMonths: optionalNumber(form.defaultPenaltyMonths),
       defaultOverdueDays: optionalNumber(form.defaultOverdueDays),
       defaultCleaningFee: optionalNumber(form.defaultCleaningFee),
+      waterPrice: optionalNumber(form.waterPrice),
+      electricityPrice: optionalNumber(form.electricityPrice),
       defaultRenewNoticeDays: optionalNumber(form.defaultRenewNoticeDays),
       continuousStayDays: optionalNumber(form.continuousStayDays),
       cumulativeStayDays: optionalNumber(form.cumulativeStayDays),
