@@ -311,6 +311,21 @@ describe('WechatController contract signing events', () => {
     });
   });
 
+  describe('contractSignCallback (微签落地页,2026-09-20改为不再自动confirm)', () => {
+    it('不查库、不调用tryConfirmSigned,只渲染静态提示页', () => {
+      const res = response();
+
+      controller.contractSignCallback(res.value);
+
+      expect(prisma.contractSigningTask.findUnique).not.toHaveBeenCalled();
+      expect(leasesService.tryConfirmSigned).not.toHaveBeenCalled();
+      expect(res.value.status).toHaveBeenCalledWith(200);
+      expect(res.send).toHaveBeenCalledWith(
+        expect.stringContaining('房东会在系统里核实签署结果后确认'),
+      );
+    });
+  });
+
   describe('verifyUrl (微信服务器URL接入验证)', () => {
     it('签名正确时原样回显echostr', () => {
       const res = response();

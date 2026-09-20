@@ -229,38 +229,33 @@ export class WechatController {
     return true;
   }
 
-  /** 微签完成签署后的公开浏览器落地页，不使用房东 Guard。 */
+  /**
+   * 微签完成签署后的公开浏览器落地页，不使用房东 Guard。
+   *
+   * 不在这里自动调用 tryConfirmSigned。原实现只要 CREATED 状态的任务能从
+   * downloadSignedFile 拿到非空文件就直接标记 SIGNED——2026-09-20用真实微签
+   * 账号实测证实,这个下载接口在任务仍是 CREATED、租客完全没有打开过签署
+   * 链接、没有做任何实名认证/签字的情况下,同样会返回一份完整可读的PDF
+   * (预览态文件)。这意味着任何人只要能猜到/拿到这个公开GET的parm(task主
+   * 键自增id,不是密钥),就能把一份没人真正签过字的合同标成"已签署"并
+   * 归档、当作有法律效力的文件发给租客,这对以法律效力为核心卖点的电子签约
+   * 功能是不可接受的。
+   *
+   * 在微签开放"任务真实签署状态"查询接口之前,唯一可信的确认方式是房东
+   * 人工核实(LeaseDetail.vue 里"下载查看签署进度"+"确认已签署"这一组已有
+   * 的人工兜底按钮,LandlordGuard保护)。这里只做落地页展示,不修改任何
+   * 任务状态、不触发下载、不做归档判定。
+   */
   @Get('contract-sign-callback')
-  async contractSignCallback(
-    @Query('parm') parm: string | undefined,
-    @Res() response: Response,
-  ): Promise<void> {
-    let message = '签约已完成,可以关闭此页面';
-
-    try {
-      const taskId = Number(parm);
-      if (Number.isSafeInteger(taskId) && taskId > 0) {
-        const task = await this.prisma.contractSigningTask.findUnique({
-          where: { id: taskId },
-          select: { status: true },
-        });
-        if (task?.status === 'CREATED') {
-          const confirmed = await this.leasesService.tryConfirmSigned(taskId);
-          message = confirmed
-            ? '签约成功,可以关闭此页面'
-            : '签约正在处理中,请稍后查看';
-        }
-      }
-    } catch (error) {
-      this.logger.error(
-        `处理签署落地页失败: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+  contractSignCallback(@Res() response: Response): void {
+    response
+      .status(200)
+      .type('html')
+      .send(
+        this.renderResultPage(
+          '签约流程已完成,请稍候(可以关闭此页面)。房东会在系统里核实签署结果后确认。',
+        ),
       );
-      message = '签约正在处理中,请稍后查看';
-    }
-
-    response.status(200).type('html').send(this.renderResultPage(message));
   }
 
   private renderResultPage(message: string): string {
