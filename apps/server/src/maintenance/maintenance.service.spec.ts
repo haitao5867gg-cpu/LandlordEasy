@@ -8,6 +8,8 @@ describe('MaintenanceService 租客在线报修', () => {
 
   beforeEach(() => {
     prisma = {
+      $transaction: jest.fn((callback) => callback(prisma)),
+      $queryRaw: jest.fn(),
       lease: { findUnique: jest.fn() },
       repairRequest: {
         create: jest.fn(),
@@ -68,6 +70,59 @@ describe('MaintenanceService 租客在线报修', () => {
           data: expect.objectContaining({ roomId: 5, cost: 200, operatorId: 1 }),
         }),
       );
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('维修记录写入失败时事务整体失败,不会返回已完成结果', async () => {
+      (prisma.repairRequest.findUnique as jest.Mock).mockResolvedValue({
+        id: 1,
+        status: 'IN_PROGRESS',
+        roomId: 5,
+        description: '空调不制冷',
+      });
+      (prisma.repairRequest.update as jest.Mock).mockResolvedValue({
+        id: 1,
+        status: 'RESOLVED',
+      });
+      (prisma.maintenanceRecord.create as jest.Mock).mockRejectedValue(
+        new Error('injected maintenance record failure'),
+      );
+
+      await expect(
+        service.updateRepairRequest(1, { status: 'RESOLVED', resolvedCost: 200 }, 1),
+      ).rejects.toThrow('injected maintenance record failure');
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.repairRequest.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('并发完成同一报修时行锁确保只生成一条维修记录', async () => {
+      let status = 'IN_PROGRESS';
+      let tail = Promise.resolve<unknown>(undefined);
+      (prisma.$transaction as jest.Mock).mockImplementation((callback) => {
+        const run = tail.then(() => callback(prisma));
+        tail = run.catch(() => undefined);
+        return run;
+      });
+      (prisma.repairRequest.findUnique as jest.Mock).mockImplementation(async () => ({
+        id: 1,
+        status,
+        roomId: 5,
+        description: '空调不制冷',
+      }));
+      (prisma.repairRequest.update as jest.Mock).mockImplementation(async ({ data }) => {
+        status = data.status;
+        return { id: 1, ...data };
+      });
+      (prisma.maintenanceRecord.create as jest.Mock).mockResolvedValue({ id: 9 });
+
+      const results = await Promise.allSettled([
+        service.updateRepairRequest(1, { status: 'RESOLVED', resolvedCost: 200 }, 1),
+        service.updateRepairRequest(1, { status: 'RESOLVED', resolvedCost: 200 }, 1),
+      ]);
+
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+      expect(prisma.maintenanceRecord.create).toHaveBeenCalledTimes(1);
     });
 
     it('标记完成但没有费用时,不生成维修记录', async () => {

@@ -220,6 +220,7 @@ describe('LeasesService contract signing tasks', () => {
     (prisma.contractSigningTask.create as jest.Mock).mockResolvedValue(createdTask);
     (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
     (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
     contractPdf.generate.mockResolvedValue(Buffer.from('%PDF-test'));
     weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
     weiqian.createEachSignTask.mockResolvedValue({
@@ -257,7 +258,7 @@ describe('LeasesService contract signing tasks', () => {
     );
   });
 
-  it('租客已有 openid 但自动发起失败时返回 FOLLOWED 任务供人工重试', async () => {
+  it('租客已有 openid 但 provider 结果不确定时保留任务且不自动重试', async () => {
     const createdTask = { ...followedTask };
     (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
       id: 1,
@@ -266,6 +267,7 @@ describe('LeasesService contract signing tasks', () => {
     (prisma.contractSigningTask.create as jest.Mock).mockResolvedValue(createdTask);
     (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
     (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
     contractPdf.generate.mockResolvedValue(Buffer.from('%PDF-test'));
     weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
     weiqian.createEachSignTask.mockRejectedValue(new Error('微签暂不可用'));
@@ -277,9 +279,11 @@ describe('LeasesService contract signing tasks', () => {
     expect(createdTask.status).toBe('FOLLOWED');
     expect(wechatQrcode.createSceneQrcode).not.toHaveBeenCalled();
     expect(prisma.contractSigningTask.update).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(
-      expect.stringContaining('自动发起失败,任务保留在 FOLLOWED'),
-    );
+    expect(prisma.contractSigningTask.updateMany).toHaveBeenCalledWith({
+      where: { id: 10, status: 'FOLLOWED' },
+      data: { status: 'LAUNCHING' },
+    });
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('自动发起失败'));
   });
 
   it('非 FOLLOWED 状态拒绝发起签署', async () => {
@@ -310,6 +314,7 @@ describe('LeasesService contract signing tasks', () => {
     const updatedTask = { ...followedTask, status: 'CREATED' };
     (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
     (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
     contractPdf.generate.mockResolvedValue(pdf);
     weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
     weiqian.createEachSignTask.mockResolvedValue({
@@ -374,6 +379,98 @@ describe('LeasesService contract signing tasks', () => {
         'https://sign.weiqian.example/q/short-code\n' +
         '链接7天内有效,请尽快完成',
     );
+  });
+
+  it('并发发起签约只有取得持久化 claim 的请求可调用 provider', async () => {
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
+    (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    (prisma.contractSigningTask.updateMany as jest.Mock)
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    contractPdf.generate.mockResolvedValue(Buffer.from('%PDF-test'));
+    weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
+    weiqian.createEachSignTask.mockResolvedValue({ bId: 'task-bid', shortCode: 'short-code' });
+    (prisma.contractSigningTask.update as jest.Mock).mockResolvedValue({
+      ...followedTask,
+      status: 'CREATED',
+    });
+    wechatCustomer.sendTextMessage.mockResolvedValue(true);
+
+    const results = await Promise.allSettled([
+      service.launchContractSigningTask(10, {}),
+      service.launchContractSigningTask(10, {}),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(weiqian.uploadFile).toHaveBeenCalledTimes(1);
+    expect(weiqian.createEachSignTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('PDF 生成失败发生在 provider 调用前并释放 claim 供安全重试', async () => {
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
+    (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    (prisma.contractSigningTask.updateMany as jest.Mock)
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 1 });
+    contractPdf.generate.mockRejectedValue(new Error('injected PDF failure'));
+
+    await expect(service.launchContractSigningTask(10, {})).rejects.toThrow(
+      'injected PDF failure',
+    );
+    expect(weiqian.uploadFile).not.toHaveBeenCalled();
+    expect(prisma.contractSigningTask.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 10, status: 'LAUNCHING' },
+      data: { status: 'FOLLOWED' },
+    });
+  });
+
+  it('provider 成功后客服消息失败仍返回 CREATED,且不会再次调用 provider', async () => {
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
+    (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    contractPdf.generate.mockResolvedValue(Buffer.from('%PDF-test'));
+    weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
+    weiqian.createEachSignTask.mockResolvedValue({ bId: 'task-bid', shortCode: 'short-code' });
+    (prisma.contractSigningTask.update as jest.Mock).mockResolvedValue({
+      ...followedTask,
+      status: 'CREATED',
+      weiqianBId: 'task-bid',
+    });
+    wechatCustomer.sendTextMessage.mockRejectedValue(new Error('injected message failure'));
+
+    await expect(service.launchContractSigningTask(10, {})).resolves.toEqual(
+      expect.objectContaining({ status: 'CREATED', weiqianBId: 'task-bid' }),
+    );
+    expect(prisma.contractSigningTask.update).toHaveBeenCalledWith({
+      where: { id: 10 },
+      data: {
+        status: 'CREATED',
+        weiqianBId: 'task-bid',
+        weiqianShortCode: 'short-code',
+      },
+    });
+    expect(weiqian.uploadFile).toHaveBeenCalledTimes(1);
+    expect(weiqian.createEachSignTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('provider 成功后的本地写入只重试数据库,不会重复调用 provider', async () => {
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
+    (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    contractPdf.generate.mockResolvedValue(Buffer.from('%PDF-test'));
+    weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
+    weiqian.createEachSignTask.mockResolvedValue({ bId: 'task-bid', shortCode: 'short-code' });
+    (prisma.contractSigningTask.update as jest.Mock)
+      .mockRejectedValueOnce(new Error('transient database failure'))
+      .mockResolvedValue({ ...followedTask, status: 'CREATED', weiqianBId: 'task-bid' });
+    wechatCustomer.sendTextMessage.mockResolvedValue(true);
+
+    await expect(service.launchContractSigningTask(10, {})).resolves.toEqual(
+      expect.objectContaining({ status: 'CREATED', weiqianBId: 'task-bid' }),
+    );
+    expect(prisma.contractSigningTask.update).toHaveBeenCalledTimes(2);
+    expect(weiqian.uploadFile).toHaveBeenCalledTimes(1);
+    expect(weiqian.createEachSignTask).toHaveBeenCalledTimes(1);
   });
 
   it('tryConfirmSigned 对非 CREATED 状态幂等跳过', async () => {

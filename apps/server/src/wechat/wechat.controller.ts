@@ -115,7 +115,7 @@ export class WechatController {
               await this.leasesService.launchContractSigningTask(task.id, {});
             } catch (error) {
               this.logger.warn(
-                `签约任务 ${task.id} 关注后自动发起失败,任务保留在 FOLLOWED: ${
+                `签约任务 ${task.id} 关注后自动发起失败,请按当前任务状态恢复: ${
                   error instanceof Error ? error.message : String(error)
                 }`,
               );
