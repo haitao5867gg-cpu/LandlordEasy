@@ -350,7 +350,15 @@ export class LeasesService {
       where: { leaseId: task.leaseId, type: 'CHECKIN' },
       orderBy: { createdAt: 'desc' },
     });
-    const checklist = this.toChecklistEntries(checkinHandover?.checklist);
+    // 创建任务时校验过,但等待租客关注期间交接记录可能被删除/清空——发起签署
+    // (消耗真实微签额度)前必须复核,否则会签出附件三全空白的正式合同。
+    // 2026-09-20 Claude独立评审P1#1。
+    if (!checkinHandover) {
+      throw new BadRequestException(
+        '该租约的入住交接记录已被删除,请先到租约详情页重新填写,再发起签署',
+      );
+    }
+    const checklist = this.toChecklistEntries(checkinHandover.checklist);
     const systemSettings = this.admin.getSettings();
 
     const pdfData: ContractPdfData = {

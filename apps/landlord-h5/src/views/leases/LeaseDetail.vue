@@ -217,7 +217,7 @@
     <!-- 同住人新增/编辑弹窗 -->
     <van-dialog v-model:show="showCoOccupantDialog" :title="editingCoOccupantId ? '编辑同住人' : '新增同住人'" show-cancel-button @confirm="handleSaveCoOccupant">
       <van-field v-model.trim="coOccupantForm.name" label="姓名" placeholder="同住人姓名" :rules="[{ required: true, message: '请填写姓名' }]" />
-      <van-field v-model.trim="coOccupantForm.idNumberLast4" label="证件后四位" maxlength="4" placeholder="身份证号后4位数字" :rules="[{ required: true, message: '请填写证件后四位' }, { pattern: /^\d{4}$/, message: '请输入4位数字' }]" />
+      <van-field v-model.trim="coOccupantForm.idNumberLast4" label="证件后四位" maxlength="4" placeholder="身份证号后4位数字" :rules="[{ required: true, message: '请填写证件后四位' }, { pattern: /^[0-9Xx]{4}$/, message: '请输入4位(数字或含X)' }]" />
       <van-field v-model.trim="coOccupantForm.phone" label="联系方式" type="tel" placeholder="可选,11位手机号" />
     </van-dialog>
 
@@ -500,7 +500,8 @@ async function prefillDefaultChecklist() {
     handoverForm.checklist = checklist.map((entry) => ({
       item: entry.item,
       quantity: entry.quantity === undefined || entry.quantity === null ? '' : String(entry.quantity),
-      condition: '',
+      // 默认"完好"而不是留空:提交过滤条件要求 condition 非空,留空会被整行静默丢弃(评审P2#5)
+      condition: '完好',
     }));
   } finally {
     prefilling.value = false;
@@ -516,7 +517,7 @@ function openCoOccupantDialog(co?: { id: number; name: string; idNumberLast4: st
 }
 
 async function handleSaveCoOccupant() {
-  if (!coOccupantForm.name || !/^\d{4}$/.test(coOccupantForm.idNumberLast4)) {
+  if (!coOccupantForm.name || !/^[0-9Xx]{4}$/.test(coOccupantForm.idNumberLast4)) {
     showToast('请填写姓名和4位证件后四位');
     return;
   }

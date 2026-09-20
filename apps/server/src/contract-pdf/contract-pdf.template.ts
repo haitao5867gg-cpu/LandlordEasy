@@ -56,30 +56,23 @@ function field(value: unknown, width: string): string {
   return `<span class="field" style="width:${width}">${escapeHtml(value)}</span>`;
 }
 
-/** 把交接记录的 checklist 映射到固定 12 行:标准行按名称匹配(互相包含),未匹配项汇总进"其他"行 */
+/** 把交接记录的 checklist 映射到固定 12 行:标准行按名称匹配(互相包含),
+ * 命中即消费;未消费条目(含同名重复的第2条、自定义物品)全部汇总进"其他"行,
+ * 不允许任何条目从PDF里静默消失(2026-09-20 Claude评审P2#3)。 */
 function mapChecklist(checklist: ChecklistEntry[]): Array<{ quantity: string; condition: string }> {
+  const consumed = new Set<ChecklistEntry>();
+  const matches = (label: string, item: string) =>
+    item.trim() === label || label.includes(item.trim()) || item.trim().includes(label.replace('／', ''));
   const rows = CHECKLIST_ROWS.map((label) => {
-    const hit = checklist.find(
-      (entry) =>
-        entry.item.trim() === label ||
-        label.includes(entry.item.trim()) ||
-        entry.item.trim().includes(label.replace('／', '')),
-    );
+    const hit = checklist.find((entry) => !consumed.has(entry) && matches(label, entry.item));
     if (!hit) return { quantity: '—', condition: '—' };
+    consumed.add(hit);
     return {
       quantity: hit.quantity === null || hit.quantity === undefined ? '有' : String(hit.quantity),
       condition: hit.condition ? hit.condition : '完好',
     };
   });
-  const others = checklist.filter(
-    (entry) =>
-      !CHECKLIST_ROWS.some(
-        (label) =>
-          entry.item.trim() === label ||
-          label.includes(entry.item.trim()) ||
-          entry.item.trim().includes(label.replace('／', '')),
-      ),
-  );
+  const others = checklist.filter((entry) => !consumed.has(entry));
   const otherText = others.map((o) => `${o.item}×${o.quantity ?? 1}`).join('；');
   rows.push({ quantity: '—', condition: otherText ? escapeHtml(otherText.slice(0, 60)) : '—' });
   return rows;
@@ -103,9 +96,11 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   const meter = (value: number | undefined) =>
     value === undefined || value === null ? '未抄见' : formatAmount(value);
   const rows = mapChecklist(data.checklist ?? []);
-  const coOccupants = (data.coOccupants ?? []).slice(0, CO_OCCUPANT_ROWS);
+  const allCoOccupants = data.coOccupants ?? [];
+  // 截断进附件二,但正文摘要必须用真实人数——否则合同文本给出错误事实(评审P2#3)
+  const coOccupants = allCoOccupants.slice(0, CO_OCCUPANT_ROWS);
   const coOccupantHeadline =
-    coOccupants.length === 0 ? '无' : `共${coOccupants.length}人，详见附件二`;
+    allCoOccupants.length === 0 ? '无' : `共${allCoOccupants.length}人，详见附件二`;
   const coRows = Array.from({ length: CO_OCCUPANT_ROWS }, (_, i) => {
     const c = coOccupants[i];
     return `<tr><td class="idx">${i + 1}</td><td>${c ? escapeHtml(c.name) : ''}</td><td>${c ? escapeHtml(c.idNumberLast4) : ''}</td><td>${c && c.phone ? escapeHtml(c.phone) : ''}</td></tr>`;

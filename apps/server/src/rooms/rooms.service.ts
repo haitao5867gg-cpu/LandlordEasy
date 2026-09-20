@@ -50,7 +50,12 @@ export class RoomsService {
     // 覆盖历史明文行（对已脱敏的新行是幂等的）
     const auditLogs = (
       await this.prisma.auditLog.findMany({
-        where: { entityType: 'rooms', entityId: id },
+        where: {
+          OR: [
+            { entityType: 'rooms', entityId: id },
+            { entityType: 'leases', entityId: { in: room.leases.map((lease) => lease.id) } },
+          ],
+        },
         orderBy: { createdAt: 'desc' },
         take: 50,
       })

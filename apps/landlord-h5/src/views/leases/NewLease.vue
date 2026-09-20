@@ -269,7 +269,10 @@ async function handleSubmit() {
     newLeaseId.value = res.id;
     // 同住人登记(备案信息,失败不阻断租约创建主流程)
     for (const co of coOccupants.value) {
-      if (!co.name || !/^\d{4}$/.test(co.idNumberLast4)) continue;
+      if (!co.name || !/^[0-9Xx]{4}$/.test(co.idNumberLast4)) {
+        if (co.name || co.idNumberLast4) showToast(`同住人「${co.name || co.idNumberLast4}」信息不完整(姓名+4位证件后四位必填),已跳过`);
+        continue;
+      }
       try {
         const body: Record<string, unknown> = { name: co.name, idNumberLast4: co.idNumberLast4 };
         if (co.phone) body.phone = co.phone;

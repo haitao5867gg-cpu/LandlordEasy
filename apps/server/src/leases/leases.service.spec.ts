@@ -694,6 +694,19 @@ describe('LeasesService contract signing tasks', () => {
   });
 
   describe('M22 共同居住人与交接前置校验', () => {
+    it('发起签署时CHECKIN交接记录已被删除→400拦截(评审P1#1)', async () => {
+      (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue({
+        ...followedTask,
+      });
+      (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+      (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      (prisma.handoverRecord.findFirst as jest.Mock).mockResolvedValueOnce(null);
+
+      await expect(
+        service.launchContractSigningTask(10, {}),
+      ).rejects.toThrow('入住交接记录已被删除');
+    });
+
     it('无 CHECKIN 交接记录时禁止生成电子签约', async () => {
       (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
         id: 1,

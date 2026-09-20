@@ -68,6 +68,34 @@ describe('numberToChineseUppercase', () => {
 });
 
 describe('ContractPdfService(M22 新模板)', () => {
+  it('同住人超8人:附件二截断但正文摘要用真实人数(评审P2#3)', () => {
+    const data = {
+      ...baseData(),
+      coOccupants: Array.from({ length: 12 }, (_, i) => ({
+        name: `同住人${i + 1}号`,
+        idNumberLast4: String(1000 + i),
+        phone: null,
+      })),
+    };
+    const html = buildContractHtml(data, numberToChineseUppercase(data.monthlyRent));
+    expect(html).toContain('共12人，详见附件二');
+    expect(html).not.toContain('共8人');
+  });
+
+  it('同名重复物品:第一条进标准行,第二条不丢失进"其他"(评审P2#3)', () => {
+    const data = {
+      ...baseData(),
+      checklist: [
+        { item: '空调', quantity: 1, condition: '完好' },
+        { item: '空调', quantity: 1, condition: '卧室另一台' },
+        { item: '智能门锁', quantity: 1, condition: '完好' },
+      ],
+    };
+    const html = buildContractHtml(data, numberToChineseUppercase(data.monthlyRent));
+    // 第一条空调被标准行消费;第二条必须出现在"其他"汇总里,不允许静默消失
+    expect(html).toContain('空调×1；智能门锁×1');
+  });
+
   it('生成带 PDF 文件头的非空 Buffer', async () => {
     const pdf = await new ContractPdfService().generate(baseData());
     expect(Buffer.isBuffer(pdf)).toBe(true);
