@@ -788,3 +788,50 @@ M9~M18全部完成（18.8支付宝仍阻塞资质）。M19全部完成。M20全�
 ### 一个待确认的git操作决策（新会话开工前先跟GasCan过一遍，不要单方面执行）
 
 这份文档更新本身已经提交并推送到了`claude/m19-contract-signing-integration-634fbe`分支（commit`16e1e02`，基于`d58097e`），**没有碰`origin/dev`**。`origin/dev`目前还停在`94af363`（带着78个commander基础设施commit）。新会话实际开始改SEC-001代码之前，需要跟GasCan明确一下：接下来的真实开发工作，是把`dev`分支的指针重置回`d58097e`这条干净的产品代码历史线（推荐，`project-commander-kit`等基础设施代码不会丢，仍然可以通过`release/v1-rehearsal-candidate`等分支名访问，只是不再是`dev`的历史），还是要保留`origin/dev`现在的78个commit历史、把新改动叠加在它上面（会让`dev`分支永久带着这些跟产品无关的基础设施目录）。**这是一次会重写共享`dev`分支历史的操作，按项目规则不能单方面决定，必须先获得GasCan明确确认再执行。**
+
+---
+
+## 最新状态：2026-09-20（当晚接续会话，SEC-001~REL-002全部完成并真实验证+额外发现修复3个新问题+新合同模板需求梳理进行中——这是当前最新的交接快照，因为额度耗尽被迫中断，新会话/新平台直接看这一节）
+
+> 本节覆盖上方所有更早的状态。**这次交接是因为当次会话Claude额度耗尽被迫中断，不是任务完成**，所以比平时的交接快照更详细，尽量做到任何AI工具接手都能无缝衔接。
+
+### 分支与提交现状（最重要，先看这个）
+
+- 工作分支：`claude/landlord-easy-sec-001-verify-469878`，**已推送到`origin`**，跟远程完全同步，工作树干净，没有任何未提交改动。
+- 基线：从`claude/m19-contract-signing-integration-634fbe`分支的`7c72853`（即`d58097e`+文档提交，包含完整的M9~M21产品代码）reset而来，**没有碰`origin/dev`**。
+- 本分支最新commit（从旧到新）：
+  1. `b7ef50f` SEC-001：合同PDF从公开uploads目录改存私有目录+鉴权下载接口
+  2. `ac162e7` REL-001：换租/退租审批事务安全（含真实MySQL测出的2个并发bug修复：房间原子认领、跨类型审批竞态）
+  3. `1cba2e3` SEC-002+REL-002：删除越权支付上报接口+生产启动配置fail-fast校验
+  4. `0172d91` 新发现修复：微信事件webhook补签名校验（原来完全无鉴权，可伪造关注事件）
+  5. `27cd893` 新发现修复：租客绑定改原子认领，失败时不再误报"绑定成功"
+  6. `8de30af` 新发现修复：新签/换租补`endDate>startDate`校验，续签补"只能延长"校验
+  7. `d19a22e`→`47a6bd0` **今晚最重要的发现**：微签落地页(`contract-sign-callback`)原来自动confirm签署，用真实微签测试合同实测证实——任务还没被任何人签署时，微签的download接口照样返回完整PDF，导致这个公开GET路由（parm是可枚举的任务自增id）任何人访问都能把没签的合同标记"已签署"并归档。**最终方案（`47a6bd0`）**：改成用发起签署时随机生成的不可猜测token(`ContractSigningTask.signCallbackToken`，新增的Prisma字段，已经`prisma db push`到`landlordeasy_dev`)当作回调凭证，猜测token或用旧的数字任务id都不能触发确认，只有真实微签重定向带回来的token才行；同时保留房东手动"下载查看签署进度"+"确认已签署"这条已有的人工兜底路径，两条路径并存（这是GasCan亲自拍板的方案，不是我单方面简化）。
+  8. `a14fe89` 审计日志PII脱敏修复——**这条不是我自己实现的**，是GasCan用另一个工具"ZCode"（一个基于智谱GLM的独立桌面Agent应用，他自己装的）跑出来的，我审查代码后独立跑了`tsc`+`jest`（256例全过）cherry-pick过来的。**需要注意**：ZCode在完成这个任务时，未经协调地在我们共用的dev环境/数据库/微签额度池里做了一次完整的浏览器端到端测试（新建了公寓/楼栋/房间/租约又删除），我事后独立查库确认它的清理是干净的、没有残留，但**这种"多个agent不协调地同时操作同一个共享环境"的模式本身有风险**（这次算运气好+当晚的REL-001并发安全修复兜底了，换个场景不一定这么幸运），接手的人如果要继续用ZCode/其他并行agent，务必要求它们不要碰共享的dev环境，环境验证类工作应该收拢到一个地方做。
+
+- **上述全部改动都已经过独立验证**：每次改动后都真实跑了`pnpm --filter server exec tsc --noEmit`（Node20 hop，本机Node26跟`@nestjs/cli`不兼容，命令是`PATH="/opt/homebrew/opt/node@20/bin:$PATH" node node_modules/typescript/bin/tsc --noEmit`）和`pnpm --filter server exec jest --runInBand`（最终238→256个测试全过，随着改动增加逐步递增），每次都部署到`dev.landlordeasy.cn`（`/opt/landlord-easy-dev`）真实验证，不是只看代码审查。
+
+### 今晚做过的真实浏览器/真实微签端到端验证（不是纸面推测）
+
+用GasCan申请到的微签测试额度（原来耗尽过一次，后来他找平台要了10份，当晚用掉了2份，剩8份左右，具体数字不完全确定，接手后如果要用建议先跟GasCan确认剩余额度），完整走通过一次"新签租约(真实浏览器点击表单)→生成电子签约→模拟微信关注(SSH到服务器用`WECHAT_TOKEN`算真实sha1签名再POST webhook，不是绕过校验)→真实调用微签自动发起→CREATED状态→预览不误改状态→人工确认签署→SIGNED+租客openid自动绑定→租客端真实登录下载合同(200，522KB真实PDF，headers全部正确)→无token/错误token/旧式数字id访问回调都不会误触发（401/无操作）"，全链路验证通过。**测试数据已经清理干净**（数据库记录+私有存储的测试PDF文件），不影响真实业务数据。
+
+### 部署状态
+
+- `dev.landlordeasy.cn`（`/opt/landlord-easy-dev`）：已经是本分支最新commit `a14fe89`，`prisma db push`已执行（新增了`signCallbackToken`字段），后端已重启，健康检查正常。
+- **生产环境`landlordeasy.cn`（`/opt/landlord-easy`）完全没动**，还是`main`分支的`c3b5b2d`（M18基线），本分支从未合并到`main`，也从未部署到生产。**这是符合规则的**——必须等全部验证通过+GasCan明确说"推"才能合并部署，这条硬规则全程遵守，没有跳过。
+- **生产环境部署前必须做的准备**（GasCan已知晓，还没给我）：生产`.env`目前完全没有配置任何`WEIQIAN_*`变量（因为电子签约功能从未上过生产），REL-002的新校验会让服务器在`WEIQIAN_MODE=real`但缺配置时直接拒绝启动（这是好事，不是bug）——部署前必须把微签真实凭证（`WEIQIAN_APP_ID`/`WEIQIAN_APP_SECRET`/`WEIQIAN_COMPANY_ID`/`WEIQIAN_SEAL_ID`/`WEIQIAN_API_BASE_URL`/`WEIQIAN_SIGN_BASE_URL`/`SERVER_PUBLIC_BASE_URL`，具体要求见`apps/server/src/config/startup-config.ts`和`deploy/CONFIGURATION.md`）加进生产`.env`。GasCan原话是"如果今天测试通过了，我就会要配置变量的信息，并且发给你"——接手时先问他要没要。
+
+### 还没做完、优先级排在最前面的事
+
+1. **确认weiqian真实完整签约流程**：目前只验证过"人工确认"这条路径（房东点确认，backend调download接口拿PDF），**没有真正让一个真人走完weiqian自己的实名认证+签字流程**，也就是说`downloadSignedFile`对"真正签完字"的任务返回什么、跟对"未签"任务返回的527KB文件是否真的有实质区别，**这个问题今晚没有彻底验证清楚**（详见commit`d19a22e`的commit message，这是GLM review发现、我复测confirm过存在但没能力进一步验证根因的问题）。如果微签额度还有剩余，接手后建议优先做这个真实测试。
+2. **新合同模板（M22，进行中，见下一节）**——GasCan要求明天上线就要用这份新合同，工作量很大，还没写一行代码，只完成了业务决策梳理。
+
+### 新合同模板需求（M22）——详见 `specs/contract-template/DECISIONS.md`
+
+GasCan今晚发来一份《住房租赁合同正式标准模板.docx》（已保存到`specs/contract-template/original-template.docx`），要求**明天上线就要换成这份新模板**，比现在系统的简版合同（`apps/server/src/contract-pdf/contract-pdf.template.ts`，6条正文2页）详细得多（9条正文+5个附件）。
+
+**已经通过一问一答确认了绝大部分业务口径**，完整记录在 `specs/contract-template/DECISIONS.md`，包括：收款人信息、出租权利依据固定文案、出租范围简化、共同居住人新功能设计、违约条款简化（去掉甲方违约赔偿、合并两个补救期限概念）、提前退租跟现有退租申请功能挂钩（不用改违约金计算逻辑）、逾期占用费固定文案、通知送达渠道简化（不新增采集字段）、房屋物品交接单跟现有HandoverRecord功能打通的设计方案。**这份文档是接手后第一个必读文件**，里面详细标注了哪些是GasCan已确认的、哪些是我的建议还需要他点头、哪些完全没讨论到。
+
+`specs/contract-template/wip-edited-template.docx` 是应用了部分文本编辑的半成品docx（对话在编辑签署页"送达地址"占位符时被中断），**还没有走完通读检查**，也**完全没有开始转成系统代码**（Prisma schema新增字段、`contract-pdf.template.ts`重写、同住人管理UI、交接记录checklist加数量字段、默认物品清单预填逻辑，一行代码都没写）。`DECISIONS.md`文末列了完整的代码工作清单和优先级建议。
+
+**建议接手会话的第一个动作**：读完`specs/contract-template/DECISIONS.md`，跟GasCan确认文档里标注的几个悬而未决的点（附件三品牌型号信息是否需要、几个新占位符的默认天数、通知渠道简化方案是否认可），然后再评估这份新模板的工作量是否真的能在上线前做完，如果做不完要跟GasCan明确沟通、协商是否可以先用现有简版合同上线、新模板作为立即跟进的下一个版本——**这个取舍不要替GasCan做主，要让他知情决策**。
