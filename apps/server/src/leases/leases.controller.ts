@@ -133,6 +133,12 @@ export class LeasesController {
     return this.leasesService.previewSignedFile(id);
   }
 
+  /** M22:CREATED状态任务的"直接签署二维码"——房东保存/转发给租客,扫码即签,无需公众号通知。 */
+  @Get('contract-signing-tasks/:id/sign-qrcode')
+  getSignQrcode(@Param('id', ParseIntPipe) id: number) {
+    return this.leasesService.getSignQrcode(id);
+  }
+
   /** 房东肉眼核实乙方签字属实后手动确认已签署,跳转触发失效时的人工兜底第二步。 */
   @Post('contract-signing-tasks/:id/confirm-signed')
   async confirmSignedTask(@Param('id', ParseIntPipe) id: number) {

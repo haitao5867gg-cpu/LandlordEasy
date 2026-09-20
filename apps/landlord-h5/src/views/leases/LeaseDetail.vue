@@ -102,6 +102,10 @@
                 确认已签署
               </van-button>
             </div>
+            <div v-if="signQrcode" class="contract-status-content">
+              <p class="contract-hint">或把下方「直接签署二维码」截图/长按保存后转发给租客,微信扫码打开即可签署,无需关注公众号:</p>
+              <van-image :src="signQrcode.qrcodeImage" width="220" height="220" fit="contain" />
+            </div>
           </div>
           <div v-else-if="currentSigningTask.status === 'SIGNED'" class="contract-status-content">
             <p>已签署完成</p>
@@ -243,7 +247,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showToast, showConfirmDialog } from 'vant';
 import http from '../../utils/http';
@@ -290,6 +294,16 @@ const contractForm = reactive({
   renewalNoticeDays: '',
 });
 const currentSigningTask = computed(() => lease.value?.contractSigningTasks?.[0] ?? null);
+const signQrcode = ref<{ qrcodeImage: string; signUrl: string } | null>(null);
+// 任务进入CREATED即拉取"直接签署二维码"(GasCan 2026-09-20要求,扫码直签免关注)
+watch(currentSigningTask, async (task) => {
+  if (!task || task.status !== 'CREATED') { signQrcode.value = null; return; }
+  try {
+    signQrcode.value = await http.get(`/leases/contract-signing-tasks/${task.id}/sign-qrcode`) as any;
+  } catch {
+    signQrcode.value = null;
+  }
+}, { immediate: true });
 
 function d(s: string) { return s?.split('T')[0] || ''; }
 function dt(s: string) {

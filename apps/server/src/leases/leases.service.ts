@@ -1,4 +1,5 @@
 import { randomBytes, randomInt } from 'crypto';
+import QRCode from 'qrcode';
 import {
   BadRequestException,
   Inject,
@@ -617,6 +618,31 @@ ${signUrl}
    * 只是把微签当前能下载到的文件存一份给房东看,绝不代表签署已确认——
    * 不修改任务状态、signedPdfUrl、signedAt,也不做 openid 绑定。
    */
+  /**
+   * M22(GasCan 2026-09-20 要求):已发起(CREATED)的签约任务生成"直接签署二维码",
+   * 房东保存/转发给租客,微信扫码打开签署页,无需经过公众号通知或关注流程。
+   * 二维码按需生成不落库(shortCode 已持久化,二维码内容只是它的URL)。
+   */
+  async getSignQrcode(taskId: number): Promise<{ qrcodeImage: string; signUrl: string }> {
+    const task = await this.prisma.contractSigningTask.findUnique({
+      where: { id: taskId },
+      select: { id: true, status: true, weiqianShortCode: true },
+    });
+    if (!task) throw new NotFoundException('电子签约任务不存在');
+    if (task.status !== 'CREATED') {
+      throw new BadRequestException('仅"等待租客签署"状态的任务可生成签署二维码');
+    }
+    if (!task.weiqianShortCode) {
+      throw new BadRequestException('该任务没有签署短链,无法生成二维码');
+    }
+    const signBaseUrl = (
+      process.env.WEIQIAN_SIGN_BASE_URL || DEFAULT_WEIQIAN_SIGN_BASE_URL
+    ).replace(/\/+$/, '');
+    const signUrl = `${signBaseUrl}/q/${task.weiqianShortCode}`;
+    const qrcodeImage = await QRCode.toDataURL(signUrl, { width: 440, margin: 2 });
+    return { qrcodeImage, signUrl };
+  }
+
   async previewSignedFile(taskId: number): Promise<{ previewUrl: string }> {
     await this.previewContractPdf(taskId);
     return { previewUrl: `/api/v1/leases/contract-signing-tasks/${taskId}/preview` };
