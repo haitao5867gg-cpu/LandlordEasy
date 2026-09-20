@@ -3,6 +3,7 @@ import { ValidationPipe, BadRequestException } from '@nestjs/common';
 import { ValidationError } from 'class-validator';
 import { text } from 'express';
 import { AppModule } from './app.module';
+import { blockContractUploads } from './common/middleware/contract-uploads.middleware';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 
@@ -43,6 +44,8 @@ function translateValidationError(error: ValidationError): string {
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  // Register before init/static serving, outside the API prefix, to protect legacy uploads.
+  app.use(blockContractUploads);
   app.setGlobalPrefix('api/v1');
   // 微信公众号事件推送用 text/xml,NestJS 内置的 json/urlencoded parser 不认这个
   // content-type,rawBody:true 全局开关对它不生效,req.rawBody 会一直是 undefined。

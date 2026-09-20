@@ -100,13 +100,9 @@
           <div v-else-if="currentSigningTask.status === 'SIGNED'" class="contract-status-content">
             <p>已签署完成</p>
             <p class="contract-time">签署时间: {{ dt(currentSigningTask.signedAt) }}</p>
-            <a
-              v-if="currentSigningTask.signedPdfUrl"
-              class="contract-link"
-              :href="absoluteFileUrl(currentSigningTask.signedPdfUrl)"
-              target="_blank"
-              rel="noopener"
-            >查看/下载合同</a>
+            <van-button plain type="primary" size="small" :loading="downloading" @click="handleDownloadContract">
+              查看/下载合同
+            </van-button>
           </div>
         </template>
       </van-cell-group>
@@ -220,6 +216,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showToast, showConfirmDialog } from 'vant';
 import http from '../../utils/http';
+import { downloadContract } from '../../utils/contracts';
 import { billStatusMap } from '../../utils/status';
 
 const route = useRoute();
@@ -234,6 +231,7 @@ const showContractDialog = ref(false);
 const generating = ref(false);
 const launching = ref(false);
 const previewing = ref(false);
+const downloading = ref(false);
 const confirming = ref(false);
 const bindQrcodeImage = ref('');
 const bindQrcodeLoading = ref(false);
@@ -284,9 +282,6 @@ function contractStatusType(status: string): 'primary' | 'success' | 'warning' |
   if (status === 'FOLLOWED') return 'primary';
   if (status === 'PENDING_SCAN' || status === 'CREATED') return 'warning';
   return 'default';
-}
-function absoluteFileUrl(url: string) {
-  return new URL(url, window.location.origin).toString();
 }
 function optionalNumber(value: string): number | undefined {
   return value === '' ? undefined : Number(value);
@@ -378,17 +373,27 @@ async function handleLaunchSigning() {
 
 async function handlePreviewSignedFile() {
   const task = currentSigningTask.value;
-  if (!task) return;
-
+  if (!task || previewing.value) return;
   previewing.value = true;
   try {
-    const result = (await http.post(
-      `/leases/contract-signing-tasks/${task.id}/preview-signed-file`,
-      {},
-    )) as { previewUrl: string };
-    window.open(absoluteFileUrl(result.previewUrl), '_blank');
+    await downloadContract(task.id, true);
+  } catch {
+    showToast('签署进度下载失败，请稍后重试');
   } finally {
     previewing.value = false;
+  }
+}
+
+async function handleDownloadContract() {
+  const task = currentSigningTask.value;
+  if (!task || downloading.value) return;
+  downloading.value = true;
+  try {
+    await downloadContract(task.id);
+  } catch {
+    showToast('合同下载失败，请稍后重试');
+  } finally {
+    downloading.value = false;
   }
 }
 

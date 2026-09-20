@@ -9,8 +9,10 @@ import {
   UseGuards,
   ParseIntPipe,
   Req,
+  Res,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
+import { sendContractPdf } from './send-contract-pdf';
 import { LeasesService } from './leases.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import {
@@ -81,6 +83,16 @@ export class LeasesController {
     @Body() dto: LaunchContractSigningTaskDto,
   ) {
     return this.leasesService.launchContractSigningTask(id, dto);
+  }
+
+  @Get('contract-signing-tasks/:id/pdf')
+  async downloadContract(@Param('id', ParseIntPipe) id: number, @Res() res: Response) {
+    sendContractPdf(res, await this.leasesService.downloadSignedContract(id), id, 'signed');
+  }
+
+  @Get('contract-signing-tasks/:id/preview')
+  async downloadPreview(@Param('id', ParseIntPipe) id: number, @Res() res: Response) {
+    sendContractPdf(res, await this.leasesService.previewContractPdf(id), id, 'preview');
   }
 
   /** 房东手动预览当前微签文件,跳转触发失效时的人工兜底第一步(仅预览,不确认)。 */
