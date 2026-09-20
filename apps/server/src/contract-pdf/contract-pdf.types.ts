@@ -37,7 +37,6 @@ export interface ContractPdfData {
   handoverDate: Date | string | null;
   waterMeterReading?: number;
   electricityMeterReading?: number;
-  gasMeterReading?: number;
   checklist: ChecklistEntry[];
   // 附件二:共同居住人(Lease.coOccupants,超8人截断)
   coOccupants: CoOccupantInfo[];
@@ -56,7 +55,6 @@ export interface ContractPdfData {
   // 附件五:费用规则文本(ContractSettings,默认"以实际发生为准")
   waterFeeRule: string;
   electricityFeeRule: string;
-  gasFeeRule: string;
   otherFeeRule: string;
   // 甲方发起签署日期(签署页展示)
   launchDate: Date | string;

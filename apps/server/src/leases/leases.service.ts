@@ -253,7 +253,6 @@ export class LeasesService {
             sceneValue: randomInt(1, 2 ** 31),
             waterMeterReading: dto.waterMeterReading,
             electricityMeterReading: dto.electricityMeterReading,
-            gasMeterReading: dto.gasMeterReading,
             facilities: dto.facilities
               ? JSON.parse(JSON.stringify(dto.facilities))
               : [],
@@ -388,8 +387,6 @@ export class LeasesService {
         task.electricityMeterReading === null
           ? undefined
           : Number(task.electricityMeterReading),
-      gasMeterReading:
-        task.gasMeterReading === null ? undefined : Number(task.gasMeterReading),
       checklist,
       coOccupants: task.lease.coOccupants.map((c) => ({
         name: c.name,
@@ -418,7 +415,6 @@ export class LeasesService {
       electronicNoticeHours: settings.electronicNoticeHours ?? 24,
       waterFeeRule: settings.waterFeeRule ?? '以实际发生为准',
       electricityFeeRule: settings.electricityFeeRule ?? '以实际发生为准',
-      gasFeeRule: settings.gasFeeRule ?? '以实际发生为准',
       otherFeeRule: settings.otherFeeRule ?? '以实际发生为准',
       launchDate: new Date(),
       extraTerms: task.extraTerms ?? undefined,

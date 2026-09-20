@@ -37,7 +37,6 @@
         <van-field v-model.trim="form.payeeName" label="收款人姓名" placeholder="合同第二条收款人,如占秀英" />
         <van-field v-model.trim="form.waterFeeRule" label="水费规则" placeholder="默认:以实际发生为准" />
         <van-field v-model.trim="form.electricityFeeRule" label="电费规则" placeholder="默认:以实际发生为准" />
-        <van-field v-model.trim="form.gasFeeRule" label="燃气费规则" placeholder="默认:以实际发生为准" />
         <van-field v-model.trim="form.otherFeeRule" label="网络物业等" placeholder="默认:以实际发生为准" />
       </van-cell-group>
 
@@ -93,7 +92,6 @@ const form = reactive({
   payeeName: '',
   waterFeeRule: '',
   electricityFeeRule: '',
-  gasFeeRule: '',
   otherFeeRule: '',
   defaultPenaltyMonths: '',
   defaultOverdueDays: '',
@@ -120,7 +118,6 @@ onMounted(async () => {
   form.payeeName = settings.payeeName || '';
   form.waterFeeRule = settings.waterFeeRule || '';
   form.electricityFeeRule = settings.electricityFeeRule || '';
-  form.gasFeeRule = settings.gasFeeRule || '';
   form.otherFeeRule = settings.otherFeeRule || '';
   form.defaultPenaltyMonths = String(settings.defaultPenaltyMonths ?? '');
   form.defaultOverdueDays = String(settings.defaultOverdueDays ?? '');
@@ -163,7 +160,6 @@ async function saveSettings() {
       payeeName: form.payeeName || undefined,
       waterFeeRule: form.waterFeeRule || undefined,
       electricityFeeRule: form.electricityFeeRule || undefined,
-      gasFeeRule: form.gasFeeRule || undefined,
       otherFeeRule: form.otherFeeRule || undefined,
       defaultPenaltyMonths: optionalNumber(form.defaultPenaltyMonths),
       defaultOverdueDays: optionalNumber(form.defaultOverdueDays),

@@ -26,7 +26,6 @@ describe('LeasesService contract signing tasks', () => {
     type: 'NEW' as const,
     waterMeterReading: 12.5,
     electricityMeterReading: 34.5,
-    gasMeterReading: 6.5,
     facilities: [{ name: '空调', has: true }],
   };
 
@@ -39,7 +38,6 @@ describe('LeasesService contract signing tasks', () => {
     followerOpenid: 'openid-tenant',
     waterMeterReading: 12.5,
     electricityMeterReading: 34.5,
-    gasMeterReading: 6.5,
     facilities: [
       { name: '空调', has: true },
       { name: '冰箱', has: false },
@@ -197,7 +195,6 @@ describe('LeasesService contract signing tasks', () => {
         sceneValue: expect.any(Number),
         waterMeterReading: 12.5,
         electricityMeterReading: 34.5,
-        gasMeterReading: 6.5,
         facilities: [{ name: '空调', has: true }],
         status: 'PENDING_SCAN',
       },

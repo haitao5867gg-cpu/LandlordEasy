@@ -211,10 +211,6 @@ export class CreateContractSigningTaskDto {
   electricityMeterReading?: number;
 
   @IsOptional()
-  @IsNumber()
-  gasMeterReading?: number;
-
-  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ContractSigningFacilityDto)

@@ -16,7 +16,7 @@ const CHECKLIST_ROWS = [
   '冰箱',
   '洗衣机',
   '热水器',
-  '燃气灶／电磁炉',
+  '电磁炉',
   '油烟机',
   '电视',
   '床及床垫',
@@ -175,11 +175,11 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   </div>
   <div class="clause"><span class="clause-title">第三条　押金 费用与结算</span>
     <p>1. 乙方应于${field(startDate, '26mm')}前支付租赁保证金人民币￥${field(deposit, '20mm')}元。保证金不计利息，不当然抵作最后一期租金。</p>
-    <p>2. 水、电、燃气、网络、物业、卫生及其他费用的承担项目、计价方式、结算周期和表底，以附件五为准。甲方应提供合理的结算依据或账单记录。</p>
+    <p>2. 水、电、网络、物业、卫生及其他费用的承担项目、计价方式、结算周期，以附件五为准。甲方应提供合理的结算依据或账单记录。</p>
     <p>3. 乙方完成退房交接且双方费用结清后，甲方应于${field(n(data.depositRefundWorkDays), '9mm')}个工作日内退还剩余保证金。甲方仅可就本合同明确约定且实际发生的下列项目扣减：未付租金或费用、约定违约金、乙方原因造成的修复费用、约定或实际发生的清洁费用、按本合同处理遗留物的合理费用。甲方应向乙方提供结算明细；余额退至乙方指定账户。</p>
   </div>
   <div class="clause"><span class="clause-title">第四条　使用 维修与安全管理</span>
-    <p>1. 乙方应安全、合理使用房屋及附属设施，遵守物业管理规约和消防、燃气、治安等规定。乙方不得私拉乱接水、电、燃气线路；不得在室内、楼道及公共区域为电动车或其电池充电；不得损坏、拆除或停用消防设施。</p>
+    <p>1. 乙方应安全、合理使用房屋及附属设施，遵守物业管理规约和消防、治安等规定。乙方不得私拉乱接水、电线路；不得在室内、楼道及公共区域为电动车或其电池充电；不得损坏、拆除或停用消防设施。</p>
     <p>2. 未经甲方书面同意，乙方不得改变房屋用途、拆改室内设施、改动承重结构或其他结构、增设隔断、违法增设卫浴、将房屋转租、转借或变相交由他人长期使用。</p>
     <p>3. 除本合同列明共同居住人外，乙方不得擅自增加长期共同居住人。连续居住超过${field(n(data.continuousStayDays), '9mm')}日或累计超过${field(n(data.cumulativeStayDays), '9mm')}日者，视为长期共同居住人，但经甲方同意的正常短期访客除外。</p>
     <p>4. 甲方负责非因乙方原因产生的房屋主体、固有设施及依法应由出租人承担的维修；乙方应及时通知甲方。乙方因使用、保管不当造成损坏或人身、财产损失的，应承担相应修复、赔偿责任。</p>
@@ -246,7 +246,7 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   <h2>附件三　房屋及物品交接单</h2>
   <div class="meters">
     <div class="meter-row">交付日期及时间：${field(handoverDate, '40mm')}</div>
-    <div class="meter-row">水表底数：${field(meter(data.waterMeterReading), '30mm')}　　电表底数：${field(meter(data.electricityMeterReading), '30mm')}　　燃气表底数：${field(meter(data.gasMeterReading), '30mm')}</div>
+    <div class="meter-row">水表底数：${field(meter(data.waterMeterReading), '30mm')}　　电表底数：${field(meter(data.electricityMeterReading), '30mm')}</div>
   </div>
   <table class="checklist">
     <tr><th style="width:52mm;">物品名称</th><th style="width:26mm;">数量</th><th>完好情况／备注</th></tr>
@@ -267,12 +267,11 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   <p style="text-indent:2em;">1. 遵守房屋租赁合同、物业管理规约和依法进行的安全检查，发现隐患及时告知并配合整改。</p>
   <p style="text-indent:2em;">2. 安全、节约用水，不擅自改装供水管线和设施；因使用不当造成漏水、浸水等损失的，承担相应责任。</p>
   <p style="text-indent:2em;">3. 安全用电，不私拉乱接，不超负荷使用电器；严禁在室内、楼道及公共区域为电动车或电池充电。</p>
-  <p style="text-indent:2em;">4. 安全用气，正确使用燃气设施，发现泄漏立即关闭阀门、开窗通风并联系专业人员，严禁动用明火。</p>
-  <p style="text-indent:2em;">5. 不在楼道及公共区域堆放杂物，不占用或堵塞消防通道、安全出口。</p>
-  <p style="text-indent:2em;">6. 爱护房屋结构、装修和配套设施，发现故障或隐患及时告知甲方。</p>
-  <p style="text-indent:2em;">7. 文明居住，不实施扰民、违章搭建、高空抛物、侵占公共通道等行为。</p>
-  <p style="text-indent:2em;">8. 妥善照看未成年人及其他需照护人员，防止坠落等安全事故。</p>
-  <p style="text-indent:2em;">9. 不存放易燃易爆、有毒或法律法规禁止的物品，不利用房屋从事违法犯罪活动。</p>
+  <p style="text-indent:2em;">4. 不在楼道及公共区域堆放杂物，不占用或堵塞消防通道、安全出口。</p>
+  <p style="text-indent:2em;">5. 爱护房屋结构、装修和配套设施，发现故障或隐患及时告知甲方。</p>
+  <p style="text-indent:2em;">6. 文明居住，不实施扰民、违章搭建、高空抛物、侵占公共通道等行为。</p>
+  <p style="text-indent:2em;">7. 妥善照看未成年人及其他需照护人员，防止坠落等安全事故。</p>
+  <p style="text-indent:2em;">8. 不存放易燃易爆、有毒或法律法规禁止的物品，不利用房屋从事违法犯罪活动。</p>
   <div class="confirm-line">承诺人：（随主合同电子签署一并确认）</div>
 </section>
 
@@ -284,7 +283,6 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
     <div class="info-row"><span class="info-label">保证金</span>${field(deposit, '22mm')}元；退还期限：${field(n(data.depositRefundWorkDays), '9mm')}个工作日</div>
     <div class="info-row"><span class="info-label">水费</span>${field(data.waterFeeRule, '90mm')}</div>
     <div class="info-row"><span class="info-label">电费</span>${field(data.electricityFeeRule, '90mm')}</div>
-    <div class="info-row"><span class="info-label">燃气费</span>${field(data.gasFeeRule, '90mm')}</div>
     <div class="info-row"><span class="info-label">网络及物业等</span>${field(data.otherFeeRule, '90mm')}</div>
     <div class="info-row"><span class="info-label">清洁费</span>${field(cleaningFee, '18mm')}元；适用条件：乙方退租交接时</div>
     <div class="info-row"><span class="info-label">扣减明细</span>通过本合同第八条约定的通知渠道发送</div>

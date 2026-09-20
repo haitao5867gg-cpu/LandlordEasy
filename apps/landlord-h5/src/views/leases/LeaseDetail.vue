@@ -186,10 +186,9 @@
     <van-popup v-model:show="showContractDialog" position="bottom" round class="contract-popup">
       <div class="contract-popup-header">生成电子签约</div>
       <van-form @submit="handleGenerateContract">
-        <van-cell-group title="水电气表底数">
+        <van-cell-group title="水电表底数">
           <van-field v-model="contractForm.waterMeterReading" label="水表底数" type="number" placeholder="可选" />
           <van-field v-model="contractForm.electricityMeterReading" label="电表底数" type="number" placeholder="可选" />
-          <van-field v-model="contractForm.gasMeterReading" label="燃气表底数" type="number" placeholder="可选" />
         </van-cell-group>
         <van-cell-group title="物品清单(自动取自交接单)">
           <div class="contract-hint" style="padding:8px 16px;">
@@ -291,7 +290,6 @@ const handoverForm = reactive({
 const contractForm = reactive({
   waterMeterReading: '',
   electricityMeterReading: '',
-  gasMeterReading: '',
   extraTerms: '',
   penaltyMonths: '',
   overdueToleranceDays: '',
@@ -361,7 +359,6 @@ function openContractDialog() {
   Object.assign(contractForm, {
     waterMeterReading: '',
     electricityMeterReading: '',
-    gasMeterReading: '',
     extraTerms: '',
     penaltyMonths: '',
     overdueToleranceDays: '',
@@ -386,10 +383,8 @@ async function handleGenerateContract() {
     const payload: Record<string, unknown> = { type: 'NEW' };
     const waterMeterReading = optionalNumber(contractForm.waterMeterReading);
     const electricityMeterReading = optionalNumber(contractForm.electricityMeterReading);
-    const gasMeterReading = optionalNumber(contractForm.gasMeterReading);
     if (waterMeterReading !== undefined) payload.waterMeterReading = waterMeterReading;
     if (electricityMeterReading !== undefined) payload.electricityMeterReading = electricityMeterReading;
-    if (gasMeterReading !== undefined) payload.gasMeterReading = gasMeterReading;
     if (contractForm.extraTerms.trim()) payload.extraTerms = contractForm.extraTerms.trim();
     const overrides = getLaunchOverrides();
     if (overrides.penaltyMonths !== undefined) payload.penaltyMonths = overrides.penaltyMonths;
