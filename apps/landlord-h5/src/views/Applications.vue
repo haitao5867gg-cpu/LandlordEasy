@@ -168,6 +168,7 @@
 import { ref, reactive, computed, onMounted } from 'vue';
 import { showToast, showConfirmDialog } from 'vant';
 import http from '../utils/http';
+import { repairStatusText, repairStatusType, requestStatusText, requestStatusType } from '../utils/status';
 
 const activeTab = ref(0);
 
@@ -216,21 +217,6 @@ onMounted(() => {
   fetchTermination();
   fetchTransfer();
 });
-
-type TagType = 'danger' | 'warning' | 'success' | 'default';
-
-function repairStatusText(s: string) {
-  return ({ SUBMITTED: '待处理', IN_PROGRESS: '处理中', RESOLVED: '已完成' } as Record<string, string>)[s] || s;
-}
-function repairStatusType(s: string): TagType {
-  return ({ SUBMITTED: 'danger', IN_PROGRESS: 'warning', RESOLVED: 'success' } as Record<string, TagType>)[s] || 'default';
-}
-function requestStatusText(s: string) {
-  return ({ PENDING: '待处理', APPROVED: '已批准', REJECTED: '已驳回' } as Record<string, string>)[s] || s;
-}
-function requestStatusType(s: string): TagType {
-  return ({ PENDING: 'danger', APPROVED: 'success', REJECTED: 'default' } as Record<string, TagType>)[s] || 'default';
-}
 
 // ---- 报修 ----
 const showRepairDialog = ref(false);

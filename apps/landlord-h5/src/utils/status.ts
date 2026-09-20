@@ -37,3 +37,19 @@ export const payCycleMap: Record<string, string> = {
   QUARTERLY: '季付',
   YEARLY: '年付',
 };
+
+// ---- 报修/申请状态映射(2026-09-21 从 Applications.vue 收拢到此) ----
+export type TagType = 'danger' | 'warning' | 'success' | 'default';
+
+export function repairStatusText(s: string) {
+  return ({ SUBMITTED: '待处理', IN_PROGRESS: '处理中', RESOLVED: '已完成' } as Record<string, string>)[s] || s;
+}
+export function repairStatusType(s: string): TagType {
+  return ({ SUBMITTED: 'danger', IN_PROGRESS: 'warning', RESOLVED: 'success' } as Record<string, TagType>)[s] || 'default';
+}
+export function requestStatusText(s: string) {
+  return ({ PENDING: '待处理', APPROVED: '已批准', REJECTED: '已驳回' } as Record<string, string>)[s] || s;
+}
+export function requestStatusType(s: string): TagType {
+  return ({ PENDING: 'danger', APPROVED: 'success', REJECTED: 'default' } as Record<string, TagType>)[s] || 'default';
+}

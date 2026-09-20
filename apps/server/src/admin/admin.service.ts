@@ -130,19 +130,11 @@ export class AdminService {
       landlordName: input.landlordName,
       landlordIdCard: input.landlordIdCard,
       landlordPhone: input.landlordPhone,
-      ...(input.defaultPenaltyMonths === undefined
-        ? {}
-        : { defaultPenaltyMonths: input.defaultPenaltyMonths }),
-      ...(input.defaultOverdueDays === undefined
-        ? {}
-        : { defaultOverdueDays: input.defaultOverdueDays }),
-      ...(input.defaultCleaningFee === undefined
-        ? {}
-        : { defaultCleaningFee: input.defaultCleaningFee }),
-      ...(input.defaultRenewNoticeDays === undefined
-        ? {}
-        : { defaultRenewNoticeDays: input.defaultRenewNoticeDays }),
       ...this.pickDefined(input, [
+        'defaultPenaltyMonths',
+        'defaultOverdueDays',
+        'defaultCleaningFee',
+        'defaultRenewNoticeDays',
         'payeeName',
         'waterFeeRule',
         'electricityFeeRule',

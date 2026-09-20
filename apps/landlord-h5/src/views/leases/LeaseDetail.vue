@@ -221,8 +221,8 @@
     <!-- 同住人新增/编辑弹窗 -->
     <van-dialog v-model:show="showCoOccupantDialog" :title="editingCoOccupantId ? '编辑同住人' : '新增同住人'" show-cancel-button :before-close="beforeCloseCoOccupant">
       <van-field v-model.trim="coOccupantForm.name" label="姓名" placeholder="同住人姓名" :rules="[{ required: true, message: '请填写姓名' }]" />
-      <van-field v-model.trim="coOccupantForm.idCard" label="身份证号" maxlength="18" placeholder="15或18位身份证号" :rules="[{ required: true, message: '请填写完整身份证号' }, { pattern: /^\d{17}[\dXx]$|^\d{15}$/, message: '身份证号格式不正确' }]" />
-      <van-field v-model.trim="coOccupantForm.phone" label="手机号" type="tel" maxlength="11" placeholder="11位手机号" :rules="[{ required: true, message: '请填写手机号' }, { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确' }]" />
+      <van-field v-model.trim="coOccupantForm.idCard" label="身份证号" maxlength="18" placeholder="15或18位身份证号" :rules="[{ required: true, message: '请填写完整身份证号' }, { pattern: ID_CARD_PATTERN, message: '身份证号格式不正确' }]" />
+      <van-field v-model.trim="coOccupantForm.phone" label="手机号" type="tel" maxlength="11" placeholder="11位手机号" :rules="[{ required: true, message: '请填写手机号' }, { pattern: PHONE_PATTERN, message: '手机号格式不正确' }]" />
     </van-dialog>
 
     <!-- 新增/编辑交接记录弹窗 -->
@@ -257,6 +257,7 @@ import { showToast, showConfirmDialog } from 'vant';
 import http from '../../utils/http';
 import { downloadContract } from '../../utils/contracts';
 import { billStatusMap } from '../../utils/status';
+import { ID_CARD_PATTERN, PHONE_PATTERN } from '../../utils/validators';
 
 const route = useRoute();
 const router = useRouter();
@@ -582,8 +583,8 @@ function openCoOccupantDialog(co?: { id: number; name: string; idCard?: string |
 }
 
 async function handleSaveCoOccupant(): Promise<boolean> {
-  const idCardOk = /^\d{17}[\dXx]$|^\d{15}$/.test(coOccupantForm.idCard);
-  const phoneOk = /^1[3-9]\d{9}$/.test(coOccupantForm.phone);
+  const idCardOk = ID_CARD_PATTERN.test(coOccupantForm.idCard);
+  const phoneOk = PHONE_PATTERN.test(coOccupantForm.phone);
   if (!coOccupantForm.name || !idCardOk || !phoneOk) {
     showToast('请填写姓名、完整身份证号和手机号');
     return false; // 校验不过不关窗,避免用户重新打开重填

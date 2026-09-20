@@ -10,7 +10,7 @@
           placeholder="手机号"
           :rules="[
             { required: true, message: '请填写手机号' },
-            { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确' },
+            { pattern: PHONE_PATTERN, message: '手机号格式不正确' },
           ]"
         />
         <van-field
@@ -19,7 +19,7 @@
           placeholder="身份证号"
           :rules="[
             { required: true, message: '请填写身份证号' },
-            { pattern: /^\d{17}[\dXx]$|^\d{15}$/, message: '身份证号格式不正确' },
+            { pattern: ID_CARD_PATTERN, message: '身份证号格式不正确' },
           ]"
         />
       </van-cell-group>
@@ -183,6 +183,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../../utils/http';
+import { ID_CARD_PATTERN, PHONE_PATTERN } from '../../utils/validators';
 
 const route = useRoute();
 const router = useRouter();
@@ -346,8 +347,8 @@ async function handleSubmit() {
     newLeaseId.value = res.id;
     // 同住人登记(备案信息,失败不阻断租约创建主流程)
     for (const co of coOccupants.value) {
-      const idCardOk = /^\d{17}[\dXx]$|^\d{15}$/.test(co.idCard);
-      const phoneOk = /^1[3-9]\d{9}$/.test(co.phone);
+      const idCardOk = ID_CARD_PATTERN.test(co.idCard);
+      const phoneOk = PHONE_PATTERN.test(co.phone);
       if (!co.name || !idCardOk || !phoneOk) {
         if (co.name || co.idCard || co.phone) showToast(`同住人「${co.name || '未填姓名'}」信息不完整(姓名/完整身份证号/手机号均必填),已跳过`);
         continue;

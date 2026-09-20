@@ -27,6 +27,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { ID_CARD_PATTERN } from '../common/constants/validation-patterns';
 import { Type } from 'class-transformer';
 import { AdminService } from './admin.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
@@ -71,7 +72,7 @@ class UpdateContractSettingsDto {
 
   @IsString()
   @IsNotEmpty()
-  @Matches(/^\d{17}[\dXx]$|^\d{15}$/)
+  @Matches(ID_CARD_PATTERN)
   landlordIdCard!: string;
 
   @IsString()

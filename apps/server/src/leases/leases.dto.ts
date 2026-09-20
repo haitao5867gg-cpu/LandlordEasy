@@ -13,6 +13,7 @@ import {
   Min,
   Matches,
 } from 'class-validator';
+import { ID_CARD_PATTERN, PHONE_PATTERN } from '../common/constants/validation-patterns';
 import { Type } from 'class-transformer';
 
 class FeeItemDto {
@@ -33,11 +34,11 @@ export class CreateLeaseDto {
   tenantName!: string;
 
   @IsString()
-  @Matches(/^1[3-9]\d{9}$/, { message: '手机号格式不正确' })
+  @Matches(PHONE_PATTERN, { message: '手机号格式不正确' })
   tenantPhone!: string;
 
   @IsString()
-  @Matches(/^\d{17}[\dXx]$|^\d{15}$/, { message: '身份证号格式不正确' })
+  @Matches(ID_CARD_PATTERN, { message: '身份证号格式不正确' })
   tenantIdCard!: string;
 
   @IsDateString()
@@ -185,7 +186,7 @@ export class ApproveTransferRequestDto {
 
   @IsOptional()
   @IsString()
-  @Matches(/^\d{17}[\dXx]$|^\d{15}$/, { message: '身份证号格式不正确' })
+  @Matches(ID_CARD_PATTERN, { message: '身份证号格式不正确' })
   tenantIdCard?: string;
 
   @IsOptional()
@@ -245,11 +246,11 @@ export class CreateCoOccupantDto {
 
   // GasCan 2026-09-20晚追加:身份证必须填完整号码(15或18位含X),手机号必填
   @IsString()
-  @Matches(/^\d{17}[\dXx]$|^\d{15}$/)
+  @Matches(ID_CARD_PATTERN)
   idCard!: string;
 
   @IsString()
-  @Matches(/^1[3-9]\d{9}$/)
+  @Matches(PHONE_PATTERN)
   phone!: string;
 }
 
@@ -261,10 +262,10 @@ export class UpdateCoOccupantDto {
   name?: string;
 
   @IsOptional()
-  @Matches(/^\d{17}[\dXx]$|^\d{15}$/)
+  @Matches(ID_CARD_PATTERN)
   idCard?: string;
 
   @IsOptional()
-  @Matches(/^1[3-9]\d{9}$/)
+  @Matches(PHONE_PATTERN)
   phone?: string;
 }

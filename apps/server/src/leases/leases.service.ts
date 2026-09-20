@@ -560,11 +560,6 @@ ${signUrl}
     return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
   }
 
-  /** 微信模板消息time字段用的本地时间(yyyy-MM-dd HH:mm),toISOString会是UTC差8小时 */
-  private formatLocalDateTime(date: Date): string {
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  }
 
   private formatRoomLabel(room: { roomNo: string; building: { name: string } }): string {
     return `${room.building.name}${room.roomNo}`;
@@ -819,9 +814,6 @@ ${signUrl}
     return `${room.building.property.name}${room.building.name}${room.roomNo}室`;
   }
 
-  private formatPaymentCycle(payCycle: string): string {
-    return { MONTHLY: '月付', QUARTERLY: '季付', YEARLY: '年付' }[payCycle] ?? payCycle;
-  }
 
   /** HandoverRecord.checklist JSON → 附件三 ChecklistEntry;兼容旧的 {item,condition} 与新的 {item,quantity,condition} 两种形状 */
   private toChecklistEntries(value: unknown): ChecklistEntry[] {

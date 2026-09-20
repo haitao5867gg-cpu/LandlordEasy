@@ -1,8 +1,5 @@
 import { existsSync } from 'fs';
 import puppeteer from 'puppeteer-core';
-import { buildContractHtml } from './contract-pdf.template';
-import { ContractPdfData } from './contract-pdf.types';
-import { numberToChineseUppercase } from './number-to-chinese-uppercase';
 
 /**
  * puppeteer-core 不自带下载浏览器,需要指向系统已安装的 Chrome/Chromium。
@@ -68,11 +65,5 @@ export async function renderContractHtmlToPdf(html: string): Promise<Buffer> {
   }
 }
 
-/** 独立入口：把合同数据组装为固定版式 HTML 并生成真实 PDF 字节。 */
-export async function generateContractPdf(data: ContractPdfData): Promise<Buffer> {
-  const html = buildContractHtml(
-    data,
-    numberToChineseUppercase(data.monthlyRent),
-  );
-  return renderContractHtmlToPdf(html);
-}
+/* 注:曾有一套与 ContractPdfService.generate 平行的独立入口 generateContractPdf,
+   全仓库零调用方,2026-09-21 质量审查时删除,避免双实现漂移。 */

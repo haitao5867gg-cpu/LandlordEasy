@@ -80,9 +80,10 @@
 import { onMounted, reactive, ref } from 'vue';
 import { showToast } from 'vant';
 import http from '../../utils/http';
+import { ID_CARD_PATTERN, PHONE_PATTERN } from '../../utils/validators';
 
-const idCardPattern = /^\d{17}[\dXx]$|^\d{15}$/;
-const phonePattern = /^1[3-9]\d{9}$/;
+const idCardPattern = ID_CARD_PATTERN;
+const phonePattern = PHONE_PATTERN;
 const configured = ref(false);
 const saving = ref(false);
 const form = reactive({
