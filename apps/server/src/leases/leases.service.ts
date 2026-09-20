@@ -506,10 +506,12 @@ ${signUrl}
           templateId: launchTemplateId,
           url: signUrl,
           data: {
-            thing1: { value: roomLabel },
+            // 字段清单以GasCan 2026-09-20申请的模板为准(thing1房屋地址/
+            // character_string2合同编号/time3发起时间/thing4温馨提示≤20字)
+            thing1: { value: roomLabel.slice(0, 20) },
             character_string2: { value: `LE-${task.id}` },
-            time3: { value: new Date().toISOString().replace('T', ' ').slice(0, 16) },
-            thing4: { value: '您的租房合同可以签署了,请点击本消息完成签署' },
+            time3: { value: this.formatLocalDateTime(new Date()) },
+            thing4: { value: '您的租房合同可以签署了,请点击签署' },
           },
         });
       } catch (error) {
@@ -553,6 +555,12 @@ ${signUrl}
   }
 
   /** 拼装"R栋205"这样的房间标识,用于客服消息区分多套房源。 */
+  /** 微信模板消息time字段用的本地时间(yyyy-MM-dd HH:mm),toISOString会是UTC差8小时 */
+  private formatLocalDateTime(date: Date): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
   private formatRoomLabel(room: { roomNo: string; building: { name: string } }): string {
     return `${room.building.name}${room.roomNo}`;
   }
