@@ -7,6 +7,7 @@ import { ContractPdfService } from '../contract-pdf/contract-pdf.service';
 import { IWeiQianService } from '../weiqian/weiqian.interface';
 import { IWechatCustomerServiceService } from '../wechat/wechat-customer-service.interface';
 import { IWechatNotifyService } from '../wechat/wechat-notify.interface';
+import { BillEngineService } from '../bills/bill-engine.service';
 
 describe('LeasesService contract signing tasks', () => {
   let service: LeasesService;
@@ -16,6 +17,7 @@ describe('LeasesService contract signing tasks', () => {
   let weiqian: jest.Mocked<IWeiQianService>;
   let wechatCustomer: jest.Mocked<IWechatCustomerServiceService>;
   let wechatNotify: jest.Mocked<IWechatNotifyService>;
+  let billEngine: jest.Mocked<BillEngineService>;
 
   const originalPublicBaseUrl = process.env.SERVER_PUBLIC_BASE_URL;
   const originalSignBaseUrl = process.env.WEIQIAN_SIGN_BASE_URL;
@@ -91,6 +93,7 @@ describe('LeasesService contract signing tasks', () => {
         update: jest.fn(),
         updateMany: jest.fn(),
       },
+      bill: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
       // M22:生成签约强制要求已有 CHECKIN 交接记录,合同附件三从交接单取数
       handoverRecord: {
         findFirst: jest.fn().mockResolvedValue({
@@ -121,6 +124,9 @@ describe('LeasesService contract signing tasks', () => {
     };
     wechatCustomer = { sendTextMessage: jest.fn() };
     wechatNotify = { sendTemplateMessage: jest.fn().mockResolvedValue(true) };
+    billEngine = {
+      generateBillsForLease: jest.fn().mockResolvedValue(0),
+    } as unknown as jest.Mocked<BillEngineService>;
     service = (() => {
       const adminService = { getSettings: () => ({ reminderPreDays: 3 }) } as never;
       return new LeasesService(
@@ -131,6 +137,7 @@ describe('LeasesService contract signing tasks', () => {
       wechatCustomer,
       wechatNotify,
       adminService,
+      billEngine,
     );
     })();
     process.env.SERVER_PUBLIC_BASE_URL = 'https://landlordeasy.cn/api/v1';
@@ -555,6 +562,10 @@ describe('LeasesService contract signing tasks', () => {
           signedAt: expect.any(Date),
         },
       });
+      expect(billEngine.generateBillsForLease).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 1, deposit: new Prisma.Decimal(1800) }),
+        { includeDeposit: true },
+      );
       expect(prisma.tenant.update).toHaveBeenCalledWith({
         where: { id: 7 },
         data: { openid: 'openid-tenant' },
@@ -577,6 +588,72 @@ describe('LeasesService contract signing tasks', () => {
     } finally {
       if (originalTemplateId === undefined) delete process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED;
       else process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED = originalTemplateId;
+    }
+  });
+
+  it('首期账单生成失败时记录错误但签署确认仍成功', async () => {
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue({
+      ...followedTask,
+      status: 'CREATED',
+      weiqianBId: 'task-bid',
+    });
+    weiqian.downloadSignedFile.mockResolvedValue(Buffer.from('%PDF-signed'));
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (prisma.tenant.update as jest.Mock).mockResolvedValue({});
+    billEngine.generateBillsForLease.mockRejectedValue(new Error('bill failed'));
+    jest
+      .spyOn(service as unknown as { saveSignedPdf: (id: number, pdf: Buffer) => string }, 'saveSignedPdf')
+      .mockReturnValue('/uploads/contract-10-signed.pdf');
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+
+    await expect(service.tryConfirmSigned(10)).resolves.toBe(true);
+    expect(prisma.tenant.update).toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('首期账单生成失败: bill failed'),
+    );
+  });
+
+  it('首期账单生成后发送带付款跳转的催缴模板消息', async () => {
+    const originalTemplateId = process.env.WECHAT_TEMPLATE_RENT_REMINDER;
+    process.env.WECHAT_TEMPLATE_RENT_REMINDER = 'tpl-rent-reminder';
+    (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue({
+      ...followedTask,
+      status: 'CREATED',
+      weiqianBId: 'task-bid',
+    });
+    weiqian.downloadSignedFile.mockResolvedValue(Buffer.from('%PDF-signed'));
+    (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (prisma.tenant.update as jest.Mock).mockResolvedValue({});
+    billEngine.generateBillsForLease.mockResolvedValue(1);
+    (prisma.bill.findFirst as jest.Mock).mockResolvedValue({
+      id: 88,
+      totalAmount: new Prisma.Decimal(3030),
+      periodStart: new Date('2026-09-01T00:00:00.000Z'),
+      periodEnd: new Date('2026-11-30T00:00:00.000Z'),
+      dueDate: new Date('2026-09-01T00:00:00.000Z'),
+      lease: { room: followedTask.lease.room },
+    });
+    jest
+      .spyOn(service as unknown as { saveSignedPdf: (id: number, pdf: Buffer) => string }, 'saveSignedPdf')
+      .mockReturnValue('/uploads/contract-10-signed.pdf');
+
+    try {
+      await expect(service.tryConfirmSigned(10)).resolves.toBe(true);
+      expect(wechatNotify.sendTemplateMessage).toHaveBeenCalledWith({
+        openid: 'openid-tenant',
+        templateId: 'tpl-rent-reminder',
+        url: 'https://landlordeasy.cn/tenant/bills/88/pay',
+        data: {
+          amount3: { value: '3030' },
+          time4: { value: '2026-09-01~2026-11-30' },
+          thing5: { value: '房租账单' },
+          thing7: { value: '阳光公寓2号楼301' },
+          time10: { value: '2026-09-01' },
+        },
+      });
+    } finally {
+      if (originalTemplateId === undefined) delete process.env.WECHAT_TEMPLATE_RENT_REMINDER;
+      else process.env.WECHAT_TEMPLATE_RENT_REMINDER = originalTemplateId;
     }
   });
 

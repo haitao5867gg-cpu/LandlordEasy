@@ -67,6 +67,7 @@ describe('LeasesService 退租违约/换租申请', () => {
       wechatCustomer,
       wechatNotify,
       adminService,
+      { generateBillsForLease: jest.fn() } as never,
     );
     })();
   });

@@ -48,6 +48,8 @@ import {
 } from '../weiqian/weiqian.interface';
 
 import { readContractPdf, writeContractPdf } from './contract-storage';
+import { BillEngineService } from '../bills/bill-engine.service';
+import { buildRentReminderMessage } from '../reminders/rent-reminder-message';
 const DEFAULT_WEIQIAN_SIGN_BASE_URL = 'http://forwave.picp.net:8888';
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 type DbClient = Prisma.TransactionClient | PrismaService;
@@ -72,6 +74,7 @@ export class LeasesService {
     @Inject(WECHAT_NOTIFY_SERVICE)
     private readonly wechatNotify: IWechatNotifyService,
     private readonly admin: AdminService,
+    private readonly billEngine: BillEngineService,
   ) {}
 
   async findAll(roomId?: number, status?: string) {
@@ -616,6 +619,45 @@ ${signUrl}
     });
     if (updateResult.count === 0) return true;
 
+    try {
+      const existingBills = await this.prisma.bill.findMany({
+        where: { leaseId: task.lease.id },
+        select: { id: true },
+      });
+      const generated = await this.billEngine.generateBillsForLease(task.lease, {
+        includeDeposit: true,
+      });
+      if (generated > 0) {
+        const firstBill = await this.prisma.bill.findFirst({
+          where: {
+            leaseId: task.lease.id,
+            ...(existingBills.length > 0
+              ? { id: { notIn: existingBills.map((bill) => bill.id) } }
+              : {}),
+          },
+          orderBy: { periodStart: 'asc' },
+          include: {
+            lease: {
+              include: {
+                room: { include: { building: { include: { property: true } } } },
+              },
+            },
+          },
+        });
+        if (firstBill) {
+          await this.sendInitialBillReminder(task.followerOpenid, firstBill);
+        } else {
+          this.logger.error(`签约任务 ${task.id} 已生成账单,但未查询到新账单`);
+        }
+      }
+    } catch (error) {
+      this.logger.error(
+        `签约任务 ${task.id} 已确认,但首期账单生成失败: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
     if (task.followerOpenid) {
       const roomLabel = this.formatRoomLabel(task.lease.room);
       await this.wechatCustomerService.sendTextMessage(
@@ -663,6 +705,41 @@ ${signUrl}
     }
 
     return true;
+  }
+
+  private async sendInitialBillReminder(
+    followerOpenid: string | null,
+    bill: {
+      id: number;
+      totalAmount: unknown;
+      periodStart: Date;
+      periodEnd: Date;
+      dueDate: Date;
+      lease: {
+        room: {
+          roomNo: string;
+          building: { name: string; property: { name: string } };
+        };
+      };
+    },
+  ): Promise<void> {
+    const templateId = process.env.WECHAT_TEMPLATE_RENT_REMINDER;
+    if (!followerOpenid || !templateId) return;
+
+    try {
+      const success = await this.wechatNotify.sendTemplateMessage(
+        buildRentReminderMessage(bill, followerOpenid, templateId),
+      );
+      if (!success) {
+        this.logger.error(`首期账单 ${bill.id} 提醒发送失败`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `首期账单 ${bill.id} 提醒发送失败: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**

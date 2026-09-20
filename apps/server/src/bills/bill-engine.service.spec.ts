@@ -1,5 +1,6 @@
 import { BillEngineService } from './bill-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
 
 describe('BillEngineService', () => {
   let service: BillEngineService;
@@ -8,7 +9,12 @@ describe('BillEngineService', () => {
   beforeEach(() => {
     prisma = {
       lease: { findMany: jest.fn() },
-      bill: { findUnique: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
+      bill: {
+        count: jest.fn(),
+        findUnique: jest.fn(),
+        create: jest.fn(),
+        updateMany: jest.fn(),
+      },
       billItem: { create: jest.fn() },
     } as unknown as jest.Mocked<PrismaService>;
 
@@ -22,6 +28,7 @@ describe('BillEngineService', () => {
         startDate: new Date('2026-01-01'),
         endDate: new Date('2027-01-01'),
         rent: 1000,
+        deposit: 1000,
         payCycle: 'MONTHLY',
         feeItems: [{ name: '卫生费', amount: 30 }],
       };
@@ -44,6 +51,7 @@ describe('BillEngineService', () => {
         startDate,
         endDate: new Date('2027-06-01'),
         rent: 1200,
+        deposit: 1200,
         payCycle: 'MONTHLY',
         feeItems: [{ name: '卫生费', amount: 30 }, { name: '停车费', amount: 100 }],
       };
@@ -62,6 +70,79 @@ describe('BillEngineService', () => {
           }),
         }),
       );
+      expect(prisma.billItem.create).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ type: 'DEPOSIT' }) }),
+      );
+      expect(prisma.bill.count).not.toHaveBeenCalled();
+    });
+
+    it('显式包含押金且租约无账单时,首期账单包含押金项和押金金额', async () => {
+      const today = new Date();
+      const lease = {
+        id: 6,
+        startDate: today,
+        endDate: new Date(today.getFullYear() + 1, today.getMonth(), today.getDate()),
+        rent: new Prisma.Decimal(1200),
+        deposit: new Prisma.Decimal(1800),
+        payCycle: 'MONTHLY',
+        feeItems: [{ name: '卫生费', amount: 30 }],
+      };
+
+      (prisma.bill.count as jest.Mock).mockResolvedValue(0);
+      (prisma.bill.findUnique as jest.Mock).mockResolvedValue(null);
+      (prisma.bill.create as jest.Mock).mockResolvedValue({ id: 601 });
+      (prisma.billItem.create as jest.Mock).mockResolvedValue({});
+
+      await expect(
+        service.generateBillsForLease(lease, { includeDeposit: true }),
+      ).resolves.toBe(1);
+      expect(prisma.bill.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ totalAmount: 3030 }),
+        }),
+      );
+      expect(prisma.billItem.create).toHaveBeenCalledWith({
+        data: {
+          billId: 601,
+          type: 'DEPOSIT',
+          name: '押金',
+          amount: 1800,
+        },
+      });
+    });
+
+    it('显式包含押金但租约已有账单时,后续新账单不包含押金', async () => {
+      const today = new Date();
+      const startDate = new Date(today);
+      startDate.setMonth(startDate.getMonth() - 1);
+      const lease = {
+        id: 7,
+        startDate,
+        endDate: new Date(today.getFullYear() + 1, today.getMonth(), today.getDate()),
+        rent: 1200,
+        deposit: 1800,
+        payCycle: 'MONTHLY',
+        feeItems: [{ name: '卫生费', amount: 30 }],
+      };
+
+      (prisma.bill.count as jest.Mock).mockResolvedValue(1);
+      (prisma.bill.findUnique as jest.Mock)
+        .mockResolvedValueOnce({ id: 700 })
+        .mockResolvedValueOnce(null);
+      (prisma.bill.create as jest.Mock).mockResolvedValue({ id: 701 });
+      (prisma.billItem.create as jest.Mock).mockResolvedValue({});
+
+      await expect(
+        service.generateBillsForLease(lease, { includeDeposit: true }),
+      ).resolves.toBe(1);
+      expect(prisma.bill.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ totalAmount: 1230 }),
+        }),
+      );
+      expect(prisma.billItem.create).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ type: 'DEPOSIT' }) }),
+      );
     });
 
     it('月末边界:1月31日起租,下一期应为2月28/29日', async () => {
@@ -72,6 +153,7 @@ describe('BillEngineService', () => {
         startDate,
         endDate: new Date('2027-01-31'),
         rent: 800,
+        deposit: 800,
         payCycle: 'MONTHLY',
         feeItems: [],
       };
@@ -101,6 +183,7 @@ describe('BillEngineService', () => {
         startDate,
         endDate: new Date('2027-12-15'),
         rent: 1500,
+        deposit: 1500,
         payCycle: 'MONTHLY',
         feeItems: [],
       };
@@ -133,6 +216,7 @@ describe('BillEngineService', () => {
         startDate,
         endDate: new Date('2028-01-01'),
         rent: 3000,
+        deposit: 3000,
         payCycle: 'QUARTERLY',
         feeItems: [],
       };

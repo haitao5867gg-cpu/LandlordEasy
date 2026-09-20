@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
@@ -54,16 +55,20 @@ export class BillEngineService {
     id: number;
     startDate: Date;
     endDate: Date;
-    rent: unknown;
+    rent: number | Prisma.Decimal;
+    deposit: number | Prisma.Decimal;
     payCycle: string;
     feeItems: unknown;
-  }): Promise<number> {
+  }, opts?: { includeDeposit?: boolean }): Promise<number> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const lookAhead = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
 
     let generated = 0;
     let periodStart = new Date(lease.startDate);
+    let shouldIncludeDeposit =
+      opts?.includeDeposit === true &&
+      (await this.prisma.bill.count({ where: { leaseId: lease.id } })) === 0;
 
     while (periodStart <= lookAhead && periodStart < new Date(lease.endDate)) {
       const periodEnd = this.getNextPeriodEnd(periodStart, lease.payCycle);
@@ -78,7 +83,8 @@ export class BillEngineService {
         const rent = Number(lease.rent);
         const feeItems = (lease.feeItems as Array<{ name: string; amount: number }>) || [];
         const feeTotal = feeItems.reduce((sum, item) => sum + item.amount, 0);
-        const totalAmount = rent + feeTotal;
+        const deposit = shouldIncludeDeposit ? Number(lease.deposit) : 0;
+        const totalAmount = rent + feeTotal + deposit;
 
         const bill = await this.prisma.bill.create({
           data: {
@@ -99,8 +105,17 @@ export class BillEngineService {
             data: { billId: bill.id, type: 'FEE', name: fee.name, amount: fee.amount },
           });
         }
+        if (shouldIncludeDeposit) {
+          await this.prisma.billItem.create({
+            data: { billId: bill.id, type: 'DEPOSIT', name: '押金', amount: deposit },
+          });
+          shouldIncludeDeposit = false;
+        }
 
         generated++;
+      } else if (existing && shouldIncludeDeposit) {
+        // 并发生成已抢先写入首期账单时,不能把押金错误加到后续账期。
+        shouldIncludeDeposit = false;
       }
 
       // 下一个账期

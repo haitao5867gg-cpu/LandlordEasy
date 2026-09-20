@@ -85,6 +85,7 @@ describe('SEC-001 authenticated contract HTTP boundary', () => {
       return new LeasesService(prisma as any, {} as any, {} as any,
       provider as any, {} as any, {} as any,
       adminService,
+      { generateBillsForLease: jest.fn() } as any,
     );
     })();
     class FixtureModule {}

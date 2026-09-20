@@ -36,6 +36,7 @@ function buildService(client: PrismaClient): LeasesService {
     createFakeWechatCustomerService(),
     createFakeWechatNotify(),
       adminService,
+      { generateBillsForLease: jest.fn() } as never,
     );
 }
 
