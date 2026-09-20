@@ -36,6 +36,7 @@ describe('WechatController contract signing events', () => {
       tenant: {
         findFirst: jest.fn().mockResolvedValue(null),
         update: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     } as unknown as jest.Mocked<PrismaService>;
     process.env.SERVER_PUBLIC_BASE_URL = 'https://dev.landlordeasy.cn/api/v1';
@@ -193,8 +194,8 @@ describe('WechatController contract signing events', () => {
       where: { bindSceneValue: 321 },
       select: { id: true, openid: true },
     });
-    expect(prisma.tenant.update).toHaveBeenCalledWith({
-      where: { id: 5 },
+    expect(prisma.tenant.updateMany).toHaveBeenCalledWith({
+      where: { id: 5, openid: null },
       data: { openid: 'openid-tenant' },
     });
     expect(customerService.sendTextMessage).toHaveBeenCalledWith(
@@ -220,10 +221,34 @@ describe('WechatController contract signing events', () => {
       res.value,
     );
 
-    expect(prisma.tenant.update).not.toHaveBeenCalled();
+    expect(prisma.tenant.updateMany).not.toHaveBeenCalled();
     expect(customerService.sendTextMessage).toHaveBeenCalledWith(
       'openid-other',
+      expect.stringContaining('已绑定其他微信'),
+    );
+    expect(customerService.sendTextMessage).not.toHaveBeenCalledWith(
+      'openid-other',
       expect.stringContaining('绑定成功'),
+    );
+  });
+
+  it('租客绑定场景值原子认领竞态失败(count=0)时按已绑定处理,不误报成功', async () => {
+    (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue(null);
+    (prisma.tenant.findFirst as jest.Mock).mockResolvedValue({ id: 5, openid: null });
+    (prisma.tenant.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+    customerService.sendTextMessage.mockResolvedValue(true);
+    const res = response();
+
+    await postEvent(
+      '<xml><FromUserName><![CDATA[openid-loser]]></FromUserName>' +
+        '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[scan]]></Event>' +
+        '<EventKey><![CDATA[321]]></EventKey></xml>',
+      res.value,
+    );
+
+    expect(customerService.sendTextMessage).toHaveBeenCalledWith(
+      'openid-loser',
+      expect.stringContaining('已绑定其他微信'),
     );
   });
 

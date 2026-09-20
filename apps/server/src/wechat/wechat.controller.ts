@@ -190,15 +190,29 @@ export class WechatController {
     });
     if (!tenant) return false;
 
-    if (!tenant.openid) {
-      await this.prisma.tenant.update({
-        where: { id: tenant.id },
+    // 原子认领:只有当前仍未绑定才写入,避免"先查后写"下两个 openid 并发扫码时
+    // 后写覆盖前写(findFirst 读到的 openid:null 可能已经过期)。已绑定本人视为
+    // 重复关注,直接当作成功处理。
+    let bound = tenant.openid === openid;
+    if (!bound && !tenant.openid) {
+      const claimed = await this.prisma.tenant.updateMany({
+        where: { id: tenant.id, openid: null },
         data: { openid },
       });
-    } else if (tenant.openid !== openid) {
+      bound = claimed.count === 1;
+    }
+
+    if (!bound) {
       this.logger.warn(
         `租客 ${tenant.id} 的绑定场景值被另一个 openid 扫描,已绑定 openid 未被覆盖`,
       );
+      // 没有真的绑上,不能告诉扫描者"绑定成功"——那等于确认这个场景值有效,
+      // 是在给探测者提供信号。
+      await this.wechatCustomerService.sendTextMessage(
+        openid,
+        '该账号已绑定其他微信,如需变更请联系房东',
+      );
+      return true;
     }
 
     const publicBaseUrl = process.env.SERVER_PUBLIC_BASE_URL?.replace(
