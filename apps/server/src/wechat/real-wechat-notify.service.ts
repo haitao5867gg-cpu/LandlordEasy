@@ -29,6 +29,10 @@ export class RealWechatNotifyService implements IWechatNotifyService {
         touser: payload.openid,
         template_id: payload.templateId,
         data: payload.data,
+        // 模板消息点击跳转(如发起签署提醒直接跳签署页);微信要求http/https
+        ...(payload.url && /^https?:\/\//.test(payload.url)
+          ? { url: payload.url }
+          : {}),
       };
 
       const response = await fetch(url, {

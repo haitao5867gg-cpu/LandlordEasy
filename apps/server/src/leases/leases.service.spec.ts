@@ -694,6 +694,40 @@ describe('LeasesService contract signing tasks', () => {
   });
 
   describe('M22 共同居住人与交接前置校验', () => {
+    it('配置了发起签署模板ID时,CREATED后并行发送模板消息且带签署链接', async () => {
+      process.env.WECHAT_TEMPLATE_CONTRACT_LAUNCH = 'tpl-launch-test';
+      try {
+        (prisma.lease.findUnique as jest.Mock).mockResolvedValue({
+          id: 1,
+          tenant: { openid: 'openid-tenant' },
+        });
+        (prisma.handoverRecord.findFirst as jest.Mock).mockResolvedValue({
+          id: 1, leaseId: 1, type: 'CHECKIN', checklist: [], createdAt: new Date(),
+        });
+        (prisma.contractSigningTask.create as jest.Mock).mockResolvedValue(followedTask);
+        (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue(followedTask);
+        (prisma.contractSettings.findFirst as jest.Mock).mockResolvedValue(settings);
+        (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+        contractPdf.generate.mockResolvedValue(Buffer.from('%PDF-test'));
+        weiqian.uploadFile.mockResolvedValue({ bId: 'file-bid' });
+        weiqian.createEachSignTask.mockResolvedValue({ bId: 'task-bid', shortCode: 'SC-1' });
+        (prisma.contractSigningTask.update as jest.Mock).mockResolvedValue({ ...followedTask, status: 'CREATED' });
+        wechatCustomer.sendTextMessage.mockResolvedValue(true);
+        wechatNotify.sendTemplateMessage.mockResolvedValue(true);
+
+        await service.createContractSigningTask(1, { type: 'NEW' } as never);
+
+        expect(wechatNotify.sendTemplateMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            templateId: 'tpl-launch-test',
+            url: expect.stringContaining('/q/SC-1'),
+          }),
+        );
+      } finally {
+        delete process.env.WECHAT_TEMPLATE_CONTRACT_LAUNCH;
+      }
+    });
+
     it('发起签署时CHECKIN交接记录已被删除→400拦截(评审P1#1)', async () => {
       (prisma.contractSigningTask.findUnique as jest.Mock).mockResolvedValue({
         ...followedTask,

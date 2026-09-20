@@ -493,6 +493,34 @@ ${signUrl}
       );
     }
 
+    // M22(GasCan 2026-09-20要求):发起签署也走模板消息——客服消息受48小时
+    // 互动窗口限制经常发不出去,模板消息不受限且支持点击直接跳签署页。
+    // 仅当 WECHAT_TEMPLATE_CONTRACT_LAUNCH 配置时发送,与客服消息并行,互为补充。
+    // ⚠️ data字段名当前是占位猜测,必须等GasCan在公众号后台添加模板后,按真实
+    // 字段清单(如thing1.DATA/character_string2.DATA)对齐才能配置env启用!
+    const launchTemplateId = process.env.WECHAT_TEMPLATE_CONTRACT_LAUNCH;
+    if (launchTemplateId) {
+      try {
+        await this.wechatNotify.sendTemplateMessage({
+          openid: task.followerOpenid,
+          templateId: launchTemplateId,
+          url: signUrl,
+          data: {
+            thing1: { value: roomLabel },
+            character_string2: { value: `LE-${task.id}` },
+            time3: { value: new Date().toISOString().replace('T', ' ').slice(0, 16) },
+            thing4: { value: '您的租房合同可以签署了,请点击本消息完成签署' },
+          },
+        });
+      } catch (error) {
+        this.logger.warn(
+          `签约任务 ${task.id} 发起签署模板消息发送失败: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
     return updatedTask;
   }
 
