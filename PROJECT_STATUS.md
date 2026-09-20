@@ -731,3 +731,49 @@ GasCan深夜表态"剩下的额度尽可能多完善系统，把它做成标准�
 ### 当前 `specs/tasks.md` 状态
 
 M9~M18全部完成（18.8支付宝仍阻塞资质）。M19全部完成。M20全部完成。20.8已完成。**M21全部完成（21.1~21.7）**：退租违约、换租（含自动电子签约）、在线报修、房东群发通知四个新功能均已实现、测试、部署dev验证通过。没有其他已知的未完成任务或新发现的问题。**全程仍只在`dev`分支/dev环境，一行代码未合并main、未部署生产**，何时推生产、以及是否需要现在开始补微信模板消息，等GasCan醒来决定。
+
+---
+
+## 最新状态：2026-09-20（两周GPT"指挥官框架"实验后重新接手；明天必须上线，最低范围=新租客入住+电子签合同——这是当前最新的交接快照，新会话直接看这一节，上面的历史章节均已过时，本节末尾有明确的下一步行动清单）
+
+> **新会话（不管是Claude Code还是其他工具）打开这份文件，直接从这一节开始看，不用往上翻**。这一节记录的是2026-09-20晚上紧急重新介入时的完整现状核查结果和决策，是当前唯一权威的状态来源。
+
+### 背景（GasCan原话整理）
+
+2026-09-05晚我（Claude Code）完成M21交接后，GasCan把项目转交给GPT，让GPT尝试当"总指挥"去调度本机其他AI工具协同开发，跑了两周，几乎没有推进。GasCan现在要求**明天（2026-09-21）必须上线**，最低范围是**新租客入住 + 电子签合同**，且**必须dev/生产环境隔离，生产不能停**。GasCan晚上会一直守在电脑前配合。
+
+### 两周发生了什么（完整git考古结果，不要相信任何自述，以下是我直接查证的事实）
+
+- **`main`分支完全没动**，还是`c3b5b2d`（M18-era基线），生产服务器`landlordeasy.cn`跟这个commit完全一致，健康检查正常。**生产环境两周来没有被这次实验碰过，是安全的。**
+- **`dev`服务器（`/opt/landlord-easy-dev`）也没被碰**，还停在`281be61`——就是我2026-09-05收工时部署的那个commit（M19+M20+M21全部在内），健康检查正常，`WECHAT_MODE`/`WEIQIAN_MODE`仍是`real`没有漂移。唯一的异常是根目录多了一个`apps/server/cleanup-final-tmp.js`（GPT那边"OPS-001连通dev环境演练"任务留下的测试数据清理脚本残留，已核实脚本瞄准的`buildingId=5`房间887/888/889在库里已经不存在，说明清理已经跑过，不影响现状，可以直接删掉这个文件不用纠结）。
+- **`origin/dev`的远程分支领先本地部署的`281be61`共78个commit**，但用`git diff --dirstat`查了一遍，**这78个commit里没有一行碰`apps/`（真正的产品代码）**，全部是`project-commander-kit/`、`project-brain/`、`tools/commander-runner/`、`.github/workflows/`这类"指挥官"调度框架自身的基础设施代码，以及`specs/`目录下新增的一批`SEC-*.md`/`REL-*.md`/`ORG-*.md`/`OPS-*.md`/`QA-*.md`流程文档（不是`specs/requirements.md`/`design.md`/`tasks.md`这些正式项目文档，那三个文件完全没被动过）。
+- **但有一个独立分支`release/v1-rehearsal-candidate`（HEAD `a9927fb`）确实做了4项真实有价值的产品代码修复**，2026-09-05~09-06完成，写得很详细（`specs/SEC-001.md`/`SEC-002.md`/`REL-001.md`/`REL-002.md`）：
+  1. **SEC-001（P0，必须修）**：`leases.service.ts`生成的合同PDF一直是通过可预测/公开的静态URL直接暴露的，`app.module.ts`的uploads静态目录没做任何鉴权，`deploy/nginx.conf`两处server块也是直接对外暴露——**任何人拿到/猜到URL就能读到别人的已签合同（含真实身份证号）**，跟M19电子签约功能强相关，明天要真实上线电子签约，这个必须堵上。修复方案：合同文件存到非公开静态目录之外，改成走鉴权的二进制下载接口，房东/租客各自权限校验（租客只能下载自己名下已签署合同，房东预览/下载全部走鉴权），旧的公开URL在Nest和Nginx两层都要拦截。**状态：只在隔离环境里`LOCAL_VERIFIED`，从未在dev/生产服务器上真实部署验证过，Nginx层拦截、真实微信WebView下载行为都没验证过。**
+  2. **SEC-002（P1）**：`POST /payments/report`这个租客手动上报付款的旧接口没做归属校验，任何登录租客可以冒充上报别人的billId。经排查确认这个接口现在完全没有真实调用方（M18已经改用在线支付，历史遗留），直接整个删除（含DTO和service方法）。有HTTP级别jest测试验证。**状态：`REVIEWED`，同样从未部署验证。**
+  3. **REL-001（P1）**：我写的M21`approveTerminationRequest`/`approveTransferRequest`（换租/退租审批）原本没有用显式数据库事务包裹多个写操作，理论上存在部分写入失败导致数据不一致、或并发审批产生竞态（比如两个申请同时抢一个空置房间）的风险。修复方案是把整条编排链路包进Prisma interactive transaction+行锁，微签/短信这类不可回滚的外部调用放到事务提交之后。**状态：一开始因为沙盒没有真实MySQL被`MYSQL_INTEGRATION_BLOCKED`，后来（`release/v1-rehearsal-candidate`分支2026-09-10的PR#27）补上了"在真实MySQL上验证过"的证据，是这4项里唯一后续有真正推进的。仍然从未部署到我们的dev/生产服务器验证过。**
+  4. **REL-002（P1）**：给`main.ts`启动流程加了一道前置校验——生产环境如果JWT密钥是默认值/为空、或者哪个第三方服务模式意外配成了mock，直接拒绝启动并报出具体是哪个变量的问题（不打印真实值）。是很务实的防呆设计，跟项目一直以来"生产环境重大状态变化不能是隐藏副作用"的原则完全一致。**状态：`REVIEWED`，从未实际针对我们生产服务器的真实配置跑过启动演练。**
+  - **这4项工作全部只字未动过我们真实的dev/生产服务器，`release/v1-rehearsal-candidate`也从未合并进`dev`或`main`**——都是GPT在自己的隔离sandbox worktree里做的，用的是它自己临时起的沙盒MySQL/沙盒Chromium，从来没碰过真实环境。
+- **2026-09-10之后，这个仓库（包括`dev`和`release/v1-rehearsal-candidate`两个分支）完全停止更新，10天零提交**——查了所有远程分支的最后提交时间，最新的都停在9/10当天，没有例外。真正的原因大概率是GPT后期把主要精力投入到搭一套"指挥官自动唤醒调度其他AI CLI"的框架本身（`ORG-001`~`ORG-004`），这套框架本身在9/10之后就没再往前推进，SEC/REL四项修复也就一直卡在"本地验证完成，没人去做部署验证"这一步，没有人推着它往下走。
+
+### 今晚已经处理的运维风险
+
+- GasCan确认那套"指挥官"框架依赖的一台专用Mac mini**目前还开着**，其中`ORG-004`模块专门设计成监听GitHub PR事件自动唤醒（不需要人工对话触发）执行任务，理论上今晚我们在`dev`分支上的操作可能被它感知并做出反应，造成冲突。
+- 排查确认：仓库层面**没有配置webhook**（GasCan截图确认，API二次确认为空）、**没有注册self-hosted Actions runner**（`gh api .../actions/runners`返回0个）、仓库唯一的GitHub Actions workflow(`ci-quality-gate.yml`)明确是`permissions: contents: read`的纯只读CI检查，没有部署/推送能力。
+- **GasCan已经把"Executor"身份的协作者账号`haitao5867`从仓库协作者列表移除**（`gh api repos/.../collaborators`确认现在只剩GasCan自己的主账号`haitao5867gg-cpu`）——这大概率已经切断了那个Mac mini上的常驻进程（不管它具体是靠LaunchAgent轮询还是别的机制）继续读写这个仓库的能力，即使那个进程本身还在跑，它现在用来操作GitHub的账号已经对仓库没有任何权限了。**唯一没排查到的残余可能性是GitHub App级别的安装**（需要GasCan自己去`github.com/settings/installations`确认，我这边`gh`的token权限查不了这个），但评估下来不认为是阻塞项，可以直接开工。
+
+### 今晚的工具/会话安排
+
+- **本轮所有调查都在这个已经跨越9/4~9/20、装了大量历史上下文的Claude Code会话里完成**——GasCan明确表达了对长对话被动触发压缩导致质量下降/跑偏的担忧。**约定：把这份文档写完（也就是现在这次更新）之后，实际动手改代码这部分工作转到一个全新的Claude Code会话里做**，由Claude Code主动告知GasCan"现在可以开新会话了"，不是GasCan自己判断时机。新会话开工时按标准顺序重新读一遍`COLLABORATION.md`→本文件→`specs/`→`review-notes.md`→`questions.md`即可完整恢复上下文，不依赖这个旧会话的对话记忆。
+- **当前可用AI工具**：Claude（这个工具，5小时+每周额度限制）、Codex（5小时额度限制，此刻正在重置中，预计13:00恢复）、Kiro CLI（月度额度已超，只作为前两者都不可用时的最后备选）。
+- **GasCan决定购买智谱GLM的Coding Plan**作为第二条独立额度通道——GLM对外提供跟Claude Code完全兼容的API端点，用法是把`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`指向智谱的地址和key，就能让同一个`claude`命令行工具换后端跑。**已经跟GasCan对齐：不需要他开一个额外窗口来回传话，可以由Claude Code直接在Bash里把它当成无头子进程调用**（`ANTHROPIC_BASE_URL=... ANTHROPIC_AUTH_TOKEN=... claude --print "任务描述" > 日志文件`），跟这个项目里一直用`kiro-cli chat --no-interactive`的模式完全一样——独立验证、不采信自述这条铁律同样适用于GLM产出的代码，不能因为换了个牌子就降低审查标准。GLM的key还没拿到，等GasCan购买后提供（可以直接贴在对话里，也可以写本机一个文件由Claude Code自己读，跟处理其他密钥一样不会回显/落盘到仓库）。
+
+### 下一步行动清单（新会话直接从这里开始，按顺序做）
+
+1. **确认GLM key是否已经到手**，如果到手了先花几分钟验证一下`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`这套无头调用方式真的能跑通（一个只读的小任务試一下），避免后面大规模依赖它的时候才发现调用方式不对。
+2. **SEC-001是今晚最高优先级**，GasCan已经明确要求必须在明天上线前修好。具体做法：不要直接合并`release/v1-rehearsal-candidate`这个分支（它是从`d58097e`往前的独立历史，还带着一堆`project-commander-kit`之类跟这次修复无关的东西），应该只看这个分支里`apps/server/src/leases/`、`app.module.ts`、`deploy/nginx.conf`这几个文件相对`d58097e`的实际diff，把这部分改动**独立摘出来、逐行审查、按这个项目一贯的标准重新走一遍验证**（`tsc`+`jest`+真实部署到dev+真实浏览器下载合同+确认旧公开URL在Nginx和Nest两层都被真的拦住），当成全新工作对待，不要因为spec文档写得detailed就默认它是对的。`specs/SEC-001.md`里的"Required behavior"和"Acceptance and evidence"两节写得很具体，可以直接当验收清单用，但验收动作要自己重新做一遍。
+3. **REL-001（换租/退租审批事务安全）、REL-002（生产配置启动校验）优先级其次**，同样只摘取`apps/`目录下的实际代码diff独立审查+重新验证，不合并整个分支历史。这两项都不像SEC-001那样是"不修就不能上线"的硬阻塞，但都是低成本高价值的加固，时间允许就一起做。
+4. **SEC-002（删除废弃的payments/report接口）优先级最低**，明天的最低上线范围不含在线支付新增功能，这项可做可不做，时间紧张可以往后放。
+5. 全部改完后，**用`specs/QA-001-M19-M21-E2E.md`里列的"Contract"这条journey matrix（preview/follow绑定前置/发起/LAUNCHING中间态/provider失败/人工确认/租客与房东各自鉴权下载/禁止越权访问）作为真实浏览器验收清单**——这份清单本身写得有价值，可以直接拿来用，即使不信任它标注的完成状态。
+6. **重新部署到dev、真实浏览器走一遍"新签租约→电子签约"完整流程**（复用9/5晚上M21验证时"新建隔离测试房源/测试租客，测完清理"的操作模式，不要碰真实业务数据），确认没有回归。
+7. **只有全部验证通过、GasCan真人确认无误后，才合并`dev`到`main`并执行`deploy.sh prod`**——这是硬性规则，不能因为时间紧就跳过GasCan的明确确认这一步。
+8. 部署生产后按老规矩：SSH核对服务器`git log -1`的commit hash跟本地一致，不能只看健康检查200就认为生效。
