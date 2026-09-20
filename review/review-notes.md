@@ -523,3 +523,34 @@ GasCan 确认部署后,连服务器发现 `/opt/landlord-easy` 的 git HEAD 停�
 ---
 
 > **说明(2026-08-27补记)**:本文件的独立 Review 记录停在 Review 14(2026-08-10)。此后 M12~M17 的所有改动审查,都改为直接写进 `specs/tasks.md` 对应任务下的 `> 完成说明:`(每条包含改了什么/如何验证/验证结果),不再单独写 Review 编号——这是 Claude Code 完全接手后的正常演进,不代表 2026-08-10 之后的工作没有被审查。**新会话如果想了解最近的审查细节,应该去看 `specs/tasks.md` 里 M12 及以后各任务的完成说明,以及 `PROJECT_STATUS.md` 文末各"最新状态"章节,而不是只看这个文件的最后一条 Review。**
+
+---
+
+## Review 15(2026-09-20,GasCan指令:dev环境真实浏览器E2E预演"新租客入住+线上电子签"——明天上线最低范围的验收测试,由独立ZCode会话执行并记录)
+
+状态: 测试完成,流程全链路通过;发现4个问题(1中3低)+旁路观察,均已定性;测试数据已零残留清理
+
+**测试方式**:真实浏览器GUI操作(真实点击/输入/表单提交,模拟手机视口390×844),登录用dev当前`WECHAT_MODE=mock`的`?mock_openid=mock_landlord_001`。租客侧两个浏览器产生不了的动作用服务端模拟代替并如实标注:①微信扫码关注事件(在dev服务器上读`.env.dev`的`WECHAT_TOKEN`算sha1签名后POST `/api/v1/wechat/event`,token未打印)②租客短信签署(假手机号收不到,按既定设计走房东"确认已签署"人工兜底路径,taskId=6先例)。
+
+**环境基线**:dev服务器`/opt/landlord-easy-dev`已由主session于今天13:52部署到`47a6bd0`(安全修复链全部就绪,含webhook签名校验/signCallbackToken机制),`WECHAT_MODE=mock`、`WEIQIAN_MODE=real`;`signCallbackToken`列已迁移(注:测试中一度误报"列缺失",系本人information_schema查询姿势错误,运行时探测证实列存在且可查,已纠正)。**PII脱敏分支`744bc5e`未部署**。
+
+**全链路验证通过的环节**(真实浏览器逐项):
+- 新建隔离测试数据:公寓→楼栋→房间101(全自动GUI创建)
+- 新签租约990:表单体验3项全过(押金随租金自动同步2000/车牌yuea12345自动转YUEA12345/附加费金额默认空值);起租日默认今天+1年租期自动算到期日正确;"完成"按钮正确跳转租约详情(19.11修复未回归)
+- 电子签约task18状态机:PENDING_SCAN(二维码+提示文案)→模拟关注→FOLLOWED(followerOpenid正确记录)→**自动发起签署(真实消耗1份微签额度,真实weiqianBId/shortCode,请求体带新的parm=signCallbackToken随机token,finishSignJumpPage指向正确)**→CREATED(UI展示"等待租客签署"+发起时间+两个操作按钮)
+- "下载查看签署进度":真实从微签download 696KB PDF,落盘SEC-001私有目录`data/private/contracts/contract-18-preview.pdf`(权限600),**状态保持CREATED未误触发确认**
+- "确认已签署":二次确认弹窗文案正确(明确提醒"仅甲方盖章不代表签署完成")→toast已确认签署完成→状态转SIGNED+签署时间+"查看/下载合同"
+- 结果核验(非UI自述,独立API/查库):task.status=SIGNED、signedAt落库、**租客openid自动绑定=followerOpenid**、带token下载合同200(522KB真实PDF 2页)、**无token下载401**(SEC-001鉴权生效)、signedPdfUrl为鉴权接口路径
+- 清理:9项测试实体(公寓7/楼栋16/房间796/租约990/租客982/押金/任务18/2个PDF/5条审计行)按断言式脚本删除,taskId=4/5证据记录完好,复核property=3/room=185/审计行无测试标识,零残留。微签平台侧1份额度已消耗无法撤回(今日额度池剩余约8份)
+
+**发现的问题**:
+
+1. **【中】房间详情"日志"tab几乎永远为空**——`rooms.service.ts findOne`只查`entityType='rooms' AND entityId=房间id`,而租约创建/签约等操作记在`entityType='leases'`名下(且创建类POST的entityId解析为0),房间状态流转也不留痕。违反需求§3.9"房间详情聚合该房间关键操作留痕(状态变更、租约操作、收款确认等)"。实测:刚在新房间上建了租约+走完电子签,房间日志tab显示"暂无日志"。建议:房间详情聚合该房间全部租约的审计日志,或拦截器对rooms关联操作补记roomId。
+2. **【低】登录前请求抢跑,冷启动必现"缺少认证令牌"toast**——`App.vue onMounted`无条件`propertyStore.fetchProperties()`,未登录(登录页)时该请求401,http拦截器弹错误toast。mock自动登录和真实登录首次进入都会闪现。建议:有token才拉公寓列表,或该请求的401静默处理。
+3. **【低】租约详情时间UTC直出差8小时**——`LeaseDetail.vue`的`dt()`是`s.replace('T',' ').slice(0,16)`纯字符串切片,不做时区转换。实测发起时间显示06:52(实际14:52)、签署时间显示06:55(实际14:55)。建议统一本地时区格式化。
+4. **【低,mock环境专属】mock二维码返回非法PNG**——`MockWechatQrcodeService`返回`base64("mock-qr-code")`伪装data:image/png,浏览器无法解码,签约成功弹窗/签约二维码在mock模式显示破图图标,而文案仍说"转发下方二维码"。生产real模式不受影响(真实PNG,2026-09-02验证过)。建议:mock返回1×1合法PNG占位+前端van-image失败降级提示,否则dev环境无法目测二维码链路。
+5. **【旁路观察,未处理】**①dev库有历史脏数据:名为"111"的公寓(下属楼栋"A")——某次测试残留,建议GasCan决定是否清理;②dev服务器`/opt/landlord-easy-dev`有两个`.env.dev.bak-2026092*`(主session今天切WECHAT_MODE的备份)和GPT遗留的`cleanup-final-tmp.js`,均非本次产生、未动;③dev审计日志确认PII明文落库(租约创建body含tenantName/phone/idCard明文,entityId=0)——合并`744bc5e`后写入侧+展示侧即脱敏,历史行需另策。
+
+**结论**:明天上线的最低范围(新租客入住+电子签)在dev当前代码上端到端可用,未发现阻断性缺陷;问题#1建议上线后排期修复,#2/#3小修,#4仅影响dev环境测试体验。SEC-001(私有目录+鉴权下载)与47a6bd0(不可猜测回调token)两项安全修复经真实请求验证生效。
+
+
