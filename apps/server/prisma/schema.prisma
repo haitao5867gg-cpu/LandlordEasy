@@ -192,6 +192,9 @@ model ContractSigningTask {
   followerOpenid          String?
   weiqianBId              String?
   weiqianShortCode        String?
+  // 落地页callback用的不可猜测token,取代原来直接用task自增id当parm——task.id
+  // 是可枚举的,不能作为"这个回调请求真的来自微签重定向"的判断依据。
+  signCallbackToken       String?   @unique
   signedPdfUrl            String?   @db.Text
   signedAt                DateTime?
   createdAt               DateTime  @default(now())

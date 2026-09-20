@@ -248,6 +248,7 @@ describe('LeasesService contract signing tasks', () => {
         status: 'CREATED',
         weiqianBId: 'task-bid',
         weiqianShortCode: 'short-code',
+        signCallbackToken: expect.any(String),
       },
     });
     expect(wechatCustomer.sendTextMessage).toHaveBeenCalledWith(
@@ -363,7 +364,7 @@ describe('LeasesService contract signing tasks', () => {
       sendSmsToReceiver: true,
       finishSignJumpPage:
         'https://landlordeasy.cn/api/v1/wechat/contract-sign-callback',
-      parm: '10',
+      parm: expect.any(String),
     });
     expect(prisma.contractSigningTask.update).toHaveBeenCalledWith({
       where: { id: 10 },
@@ -371,6 +372,7 @@ describe('LeasesService contract signing tasks', () => {
         status: 'CREATED',
         weiqianBId: 'task-bid',
         weiqianShortCode: 'short-code',
+        signCallbackToken: expect.any(String),
       },
     });
     expect(wechatCustomer.sendTextMessage).toHaveBeenCalledWith(
@@ -447,6 +449,7 @@ describe('LeasesService contract signing tasks', () => {
         status: 'CREATED',
         weiqianBId: 'task-bid',
         weiqianShortCode: 'short-code',
+        signCallbackToken: expect.any(String),
       },
     });
     expect(weiqian.uploadFile).toHaveBeenCalledTimes(1);

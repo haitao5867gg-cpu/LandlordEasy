@@ -1,4 +1,4 @@
-import { randomInt } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 import {
   BadRequestException,
   Inject,
@@ -350,6 +350,10 @@ export class LeasesService {
       throw error;
     }
 
+    // 落地页callback依赖这个token判断"这次重定向真的对应这个任务",不能用
+    // task.id(自增、可枚举)本身当parm,否则任何人访问这个公开GET路由都能
+    // 触发confirm(2026-09-20用真实微签账号实测确认过这个问题)。
+    const callbackToken = randomBytes(24).toString('hex');
     let createdTask: { bId: string; shortCode: string };
     try {
       const uploadedFile = await this.weiqian.uploadFile(pdfBuffer, fileName);
@@ -363,7 +367,7 @@ export class LeasesService {
         expiresTime: Date.now() + SEVEN_DAYS_MS,
         sendSmsToReceiver: true,
         finishSignJumpPage: `${publicBaseUrl}/wechat/contract-sign-callback`,
-        parm: String(task.id),
+        parm: callbackToken,
       });
     } catch (error) {
       this.logger.error(
@@ -377,7 +381,11 @@ export class LeasesService {
     // The provider must never be called again merely because persisting its
     // successful response hit a transient database error. Retry only the local
     // write and retain the provider bId in the final log for manual recovery.
-    const updatedTask = await this.persistLaunchedSigningTask(task.id, createdTask);
+    const updatedTask = await this.persistLaunchedSigningTask(
+      task.id,
+      createdTask,
+      callbackToken,
+    );
     const signBaseUrl = (
       process.env.WEIQIAN_SIGN_BASE_URL || DEFAULT_WEIQIAN_SIGN_BASE_URL
     ).replace(/\/+$/, '');
@@ -406,6 +414,7 @@ ${signUrl}
   private async persistLaunchedSigningTask(
     taskId: number,
     createdTask: { bId: string; shortCode: string },
+    callbackToken: string,
   ) {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -416,6 +425,7 @@ ${signUrl}
             status: 'CREATED',
             weiqianBId: createdTask.bId,
             weiqianShortCode: createdTask.shortCode,
+            signCallbackToken: callbackToken,
           },
         });
       } catch (error) {
@@ -432,6 +442,23 @@ ${signUrl}
   /** 拼装"R栋205"这样的房间标识,用于客服消息区分多套房源。 */
   private formatRoomLabel(room: { roomNo: string; building: { name: string } }): string {
     return `${room.building.name}${room.roomNo}`;
+  }
+
+  /**
+   * 微签落地页回调入口。token是发起签署时生成的不可猜测随机值(见
+   * launchContractSigningTaskInternal),不是task自增id——落地页这个GET路由
+   * 完全公开,不能用可枚举的id判断"这次重定向真的对应这个任务"。找不到
+   * 匹配token的CREATED任务时返回false,调用方不应据此暴露"token是否存在"
+   * 之外的任何信息。
+   */
+  async confirmSignedByCallbackToken(token: string): Promise<boolean> {
+    if (!token) return false;
+    const task = await this.prisma.contractSigningTask.findFirst({
+      where: { signCallbackToken: token, status: 'CREATED' },
+      select: { id: true },
+    });
+    if (!task) return false;
+    return this.tryConfirmSigned(task.id);
   }
 
   /** 核实微签已签文件并完成本地归档、状态更新和租客 openid 绑定 */

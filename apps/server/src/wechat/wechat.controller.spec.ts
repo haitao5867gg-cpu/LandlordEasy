@@ -44,6 +44,7 @@ describe('WechatController contract signing events', () => {
     leasesService = {
       launchContractSigningTask: jest.fn(),
       tryConfirmSigned: jest.fn(),
+      confirmSignedByCallbackToken: jest.fn(),
     } as unknown as jest.Mocked<LeasesService>;
     controller = new WechatController(
       prisma,
@@ -311,14 +312,39 @@ describe('WechatController contract signing events', () => {
     });
   });
 
-  describe('contractSignCallback (微签落地页,2026-09-20改为不再自动confirm)', () => {
-    it('不查库、不调用tryConfirmSigned,只渲染静态提示页', () => {
+  describe('contractSignCallback (微签落地页,2026-09-20改为按不可猜测token confirm)', () => {
+    it('带上正确token时通过token(不是task id)调用confirmSignedByCallbackToken', async () => {
+      leasesService.confirmSignedByCallbackToken.mockResolvedValue(true);
       const res = response();
 
-      controller.contractSignCallback(res.value);
+      await controller.contractSignCallback('real-random-token-value', res.value);
 
-      expect(prisma.contractSigningTask.findUnique).not.toHaveBeenCalled();
-      expect(leasesService.tryConfirmSigned).not.toHaveBeenCalled();
+      expect(leasesService.confirmSignedByCallbackToken).toHaveBeenCalledWith(
+        'real-random-token-value',
+      );
+      expect(res.value.status).toHaveBeenCalledWith(200);
+      expect(res.send).toHaveBeenCalledWith(
+        expect.stringContaining('房东会在系统里核实签署结果后确认'),
+      );
+    });
+
+    it('缺少parm时不调用confirm,仍正常渲染落地页', async () => {
+      const res = response();
+
+      await controller.contractSignCallback(undefined, res.value);
+
+      expect(leasesService.confirmSignedByCallbackToken).not.toHaveBeenCalled();
+      expect(res.value.status).toHaveBeenCalledWith(200);
+    });
+
+    it('token不匹配/内部异常时不影响落地页正常展示', async () => {
+      leasesService.confirmSignedByCallbackToken.mockRejectedValue(new Error('db error'));
+      const res = response();
+
+      await expect(
+        controller.contractSignCallback('guessed-token', res.value),
+      ).resolves.toBeUndefined();
+
       expect(res.value.status).toHaveBeenCalledWith(200);
       expect(res.send).toHaveBeenCalledWith(
         expect.stringContaining('房东会在系统里核实签署结果后确认'),

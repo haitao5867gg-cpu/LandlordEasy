@@ -232,22 +232,33 @@ export class WechatController {
   /**
    * 微签完成签署后的公开浏览器落地页，不使用房东 Guard。
    *
-   * 不在这里自动调用 tryConfirmSigned。原实现只要 CREATED 状态的任务能从
-   * downloadSignedFile 拿到非空文件就直接标记 SIGNED——2026-09-20用真实微签
-   * 账号实测证实,这个下载接口在任务仍是 CREATED、租客完全没有打开过签署
-   * 链接、没有做任何实名认证/签字的情况下,同样会返回一份完整可读的PDF
-   * (预览态文件)。这意味着任何人只要能猜到/拿到这个公开GET的parm(task主
-   * 键自增id,不是密钥),就能把一份没人真正签过字的合同标成"已签署"并
-   * 归档、当作有法律效力的文件发给租客,这对以法律效力为核心卖点的电子签约
-   * 功能是不可接受的。
+   * 原实现直接把task自增id当parm——2026-09-20用真实微签账号实测证实:这个
+   * 下载接口在任务仍是CREATED、租客完全没打开过签署链接、没做任何实名
+   * 认证/签字的情况下,同样会返回一份完整可读的PDF(应为预览态文件)。task
+   * 自增id是可枚举的,任何人访问这个公开GET路由都能把没人真正签过字的合同
+   * 标成"已签署"并归档,对以法律效力为卖点的功能不可接受。
    *
-   * 在微签开放"任务真实签署状态"查询接口之前,唯一可信的确认方式是房东
-   * 人工核实(LeaseDetail.vue 里"下载查看签署进度"+"确认已签署"这一组已有
-   * 的人工兜底按钮,LandlordGuard保护)。这里只做落地页展示,不修改任何
-   * 任务状态、不触发下载、不做归档判定。
+   * 修复:parm现在是发起签署时生成的不可猜测随机token(见
+   * LeasesService.launchContractSigningTaskInternal),只有真的从微签重定向
+   * 回来、带着这个token的请求才会触发confirm。找不到匹配token时不暴露
+   * 任何信息,统一展示同一句提示。另外仍保留房东手动核实的兜底路径
+   * (LeaseDetail.vue"下载查看签署进度"+"确认已签署",LandlordGuard保护),
+   * 两条路径互不依赖。
    */
   @Get('contract-sign-callback')
-  contractSignCallback(@Res() response: Response): void {
+  async contractSignCallback(
+    @Query('parm') parm: string | undefined,
+    @Res() response: Response,
+  ): Promise<void> {
+    try {
+      if (parm) await this.leasesService.confirmSignedByCallbackToken(parm);
+    } catch (error) {
+      this.logger.error(
+        `处理签署落地页失败: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     response
       .status(200)
       .type('html')
