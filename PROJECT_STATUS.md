@@ -765,11 +765,18 @@ M9~M18全部完成（18.8支付宝仍阻塞资质）。M19全部完成。M20全�
 
 - **本轮所有调查都在这个已经跨越9/4~9/20、装了大量历史上下文的Claude Code会话里完成**——GasCan明确表达了对长对话被动触发压缩导致质量下降/跑偏的担忧。**约定：把这份文档写完（也就是现在这次更新）之后，实际动手改代码这部分工作转到一个全新的Claude Code会话里做**，由Claude Code主动告知GasCan"现在可以开新会话了"，不是GasCan自己判断时机。新会话开工时按标准顺序重新读一遍`COLLABORATION.md`→本文件→`specs/`→`review-notes.md`→`questions.md`即可完整恢复上下文，不依赖这个旧会话的对话记忆。
 - **当前可用AI工具**：Claude（这个工具，5小时+每周额度限制）、Codex（5小时额度限制，此刻正在重置中，预计13:00恢复）、Kiro CLI（月度额度已超，只作为前两者都不可用时的最后备选）。
-- **GasCan决定购买智谱GLM的Coding Plan**作为第二条独立额度通道——GLM对外提供跟Claude Code完全兼容的API端点，用法是把`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`指向智谱的地址和key，就能让同一个`claude`命令行工具换后端跑。**已经跟GasCan对齐：不需要他开一个额外窗口来回传话，可以由Claude Code直接在Bash里把它当成无头子进程调用**（`ANTHROPIC_BASE_URL=... ANTHROPIC_AUTH_TOKEN=... claude --print "任务描述" > 日志文件`），跟这个项目里一直用`kiro-cli chat --no-interactive`的模式完全一样——独立验证、不采信自述这条铁律同样适用于GLM产出的代码，不能因为换了个牌子就降低审查标准。GLM的key还没拿到，等GasCan购买后提供（可以直接贴在对话里，也可以写本机一个文件由Claude Code自己读，跟处理其他密钥一样不会回显/落盘到仓库）。
+- **GasCan已经购买智谱GLM的Coding Plan并提供了API key**，作为第二条独立额度通道——由Claude Code直接在Bash里把它当成无头子进程调用，不需要GasCan开额外窗口来回传话，跟这个项目里一直用`kiro-cli chat --no-interactive`的模式完全一样——独立验证、不采信自述这条铁律同样适用于GLM产出的代码，不能因为换了个牌子就降低审查标准。
+  - **key已保存在本机`/Users/gascan/.glm_api_key`（权限600，不在仓库里，不要打印/提交）**。
+  - **踩过的坑，已解决**：直接用`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`（或`ANTHROPIC_API_KEY`）调`claude --print`会报`401 令牌已过期或验证不正确`——不是key的问题（同一个key直接curl打`https://open.bigmodel.cn/api/anthropic/v1/messages`带`x-api-key`请求头返回200完全正常），是因为`claude`命令行默认会读本机已登录的Anthropic OAuth/keychain凭证，会跟环境变量注入的key打架。**解决方式是加`--bare`参数**（`claude --help`原话："Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper via --settings (OAuth and keychain are never read)"），确认可用的完整调用方式：
+    ```
+    ANTHROPIC_API_KEY="$(cat /Users/gascan/.glm_api_key)" ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic" claude --bare --print "任务描述" > 日志文件 2>&1
+    ```
+    `--bare`还会跳过hooks/CLAUDE.md自动加载/plugin同步等，所以交给它的任务prompt要把必要背景信息写全，不能指望它自己去读项目规则文档——这点也跟给Kiro CLI写任务的要求一致。
+  - **另外发现GasCan本机还装了一个第三方工具"Coding Helper"**（TUI菜单，用来管理切换Claude Code的后端配置），它有一个"配置装载"选项会**修改`~/.claude/settings.json`全局配置、影响所有工作区**——已经建议GasCan不要用这个，因为会导致"开一个新的Claude Code会话"这个操作本身默认后端也被切换成GLM，打乱"新会话继续用Claude账号本身额度做SEC-001"的计划。GLM只应该通过上面这种显式环境变量注入的无头子进程方式使用，不要动全局配置。
 
 ### 下一步行动清单（新会话直接从这里开始，按顺序做）
 
-1. **确认GLM key是否已经到手**，如果到手了先花几分钟验证一下`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`这套无头调用方式真的能跑通（一个只读的小任务試一下），避免后面大规模依赖它的时候才发现调用方式不对。
+1. ~~确认GLM key是否已经到手，验证无头调用方式能跑通~~ **已完成**：key已到手并验证成功，见上方"今晚的工具/会话安排"小节的完整调用命令（记得带`--bare`）。
 2. **SEC-001是今晚最高优先级**，GasCan已经明确要求必须在明天上线前修好。具体做法：不要直接合并`release/v1-rehearsal-candidate`这个分支（它是从`d58097e`往前的独立历史，还带着一堆`project-commander-kit`之类跟这次修复无关的东西），应该只看这个分支里`apps/server/src/leases/`、`app.module.ts`、`deploy/nginx.conf`这几个文件相对`d58097e`的实际diff，把这部分改动**独立摘出来、逐行审查、按这个项目一贯的标准重新走一遍验证**（`tsc`+`jest`+真实部署到dev+真实浏览器下载合同+确认旧公开URL在Nginx和Nest两层都被真的拦住），当成全新工作对待，不要因为spec文档写得detailed就默认它是对的。`specs/SEC-001.md`里的"Required behavior"和"Acceptance and evidence"两节写得很具体，可以直接当验收清单用，但验收动作要自己重新做一遍。
 3. **REL-001（换租/退租审批事务安全）、REL-002（生产配置启动校验）优先级其次**，同样只摘取`apps/`目录下的实际代码diff独立审查+重新验证，不合并整个分支历史。这两项都不像SEC-001那样是"不修就不能上线"的硬阻塞，但都是低成本高价值的加固，时间允许就一起做。
 4. **SEC-002（删除废弃的payments/report接口）优先级最低**，明天的最低上线范围不含在线支付新增功能，这项可做可不做，时间紧张可以往后放。
