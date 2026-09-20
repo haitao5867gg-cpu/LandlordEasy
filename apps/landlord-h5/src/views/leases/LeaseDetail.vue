@@ -215,7 +215,7 @@
     </van-popup>
 
     <!-- 同住人新增/编辑弹窗 -->
-    <van-dialog v-model:show="showCoOccupantDialog" :title="editingCoOccupantId ? '编辑同住人' : '新增同住人'" show-cancel-button @confirm="handleSaveCoOccupant">
+    <van-dialog v-model:show="showCoOccupantDialog" :title="editingCoOccupantId ? '编辑同住人' : '新增同住人'" show-cancel-button :before-close="beforeCloseCoOccupant">
       <van-field v-model.trim="coOccupantForm.name" label="姓名" placeholder="同住人姓名" :rules="[{ required: true, message: '请填写姓名' }]" />
       <van-field v-model.trim="coOccupantForm.idCard" label="身份证号" maxlength="18" placeholder="15或18位身份证号" :rules="[{ required: true, message: '请填写完整身份证号' }, { pattern: /^\d{17}[\dXx]$|^\d{15}$/, message: '身份证号格式不正确' }]" />
       <van-field v-model.trim="coOccupantForm.phone" label="手机号" type="tel" maxlength="11" placeholder="11位手机号" :rules="[{ required: true, message: '请填写手机号' }, { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确' }]" />
@@ -516,12 +516,12 @@ function openCoOccupantDialog(co?: { id: number; name: string; idCard?: string |
   showCoOccupantDialog.value = true;
 }
 
-async function handleSaveCoOccupant() {
+async function handleSaveCoOccupant(): Promise<boolean> {
   const idCardOk = /^\d{17}[\dXx]$|^\d{15}$/.test(coOccupantForm.idCard);
   const phoneOk = /^1[3-9]\d{9}$/.test(coOccupantForm.phone);
   if (!coOccupantForm.name || !idCardOk || !phoneOk) {
     showToast('请填写姓名、完整身份证号和手机号');
-    return;
+    return false; // 校验不过不关窗,避免用户重新打开重填
   }
   const body: Record<string, unknown> = {
     name: coOccupantForm.name,
@@ -534,8 +534,18 @@ async function handleSaveCoOccupant() {
     await http.post(`/leases/${route.params.id}/co-occupants`, body);
   }
   showToast('已保存');
-  showCoOccupantDialog.value = false;
   await fetchLease();
+  return true;
+}
+
+/** van-dialog before-close:取消直接关,确认走保存且校验失败/请求失败不关窗 */
+async function beforeCloseCoOccupant(action: string): Promise<boolean> {
+  if (action !== 'confirm') return true;
+  try {
+    return await handleSaveCoOccupant();
+  } catch {
+    return false; // http拦截器已toast,失败留在弹窗里可改可重试
+  }
 }
 
 async function handleRemoveCoOccupant(co: { id: number; name: string }) {
