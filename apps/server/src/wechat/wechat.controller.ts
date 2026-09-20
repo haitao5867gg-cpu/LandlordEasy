@@ -53,15 +53,11 @@ export class WechatController {
     @Query('echostr') echostr: string | undefined,
     @Res() response: Response,
   ): void {
-    const token = process.env.WECHAT_TOKEN || '';
-    if (!token || !signature || !timestamp || !nonce || !echostr) {
+    if (!signature || !timestamp || !nonce || !echostr) {
       response.status(400).type('text/plain').send('missing params');
       return;
     }
-    const expected = createHash('sha1')
-      .update([token, timestamp, nonce].sort().join(''))
-      .digest('hex');
-    if (expected !== signature) {
+    if (!this.verifySignature(signature, timestamp, nonce)) {
       this.logger.warn('微信服务器URL接入验证签名不匹配');
       response.status(403).type('text/plain').send('invalid signature');
       return;
@@ -69,12 +65,42 @@ export class WechatController {
     response.status(200).type('text/plain').send(echostr);
   }
 
-  /** 微信服务器公开事件 webhook，不使用房东 Guard。 */
+  /**
+   * 微信每一次事件推送(不只是首次URL接入验证)都会带上同一套signature/timestamp/
+   * nonce查询参数,算法与GET接入验证完全一致(sha1(sort([token,timestamp,nonce])
+   * 拼接))。这里必须原样校验,否则任何知道这个URL的人都能伪造关注/扫码事件,
+   * 把任意签约任务的followerOpenid绑定成攻击者的openid、抢占租客账号绑定场景值
+   * (2026-09-20 review发现,已用真实dev环境复现:未校验时可无鉴权伪造subscribe
+   * 事件成功绑定)。
+   */
+  private verifySignature(
+    signature: string,
+    timestamp: string,
+    nonce: string,
+  ): boolean {
+    const token = process.env.WECHAT_TOKEN || '';
+    if (!token) return false;
+    const expected = createHash('sha1')
+      .update([token, timestamp, nonce].sort().join(''))
+      .digest('hex');
+    return expected === signature;
+  }
+
+  /** 微信服务器公开事件 webhook，不使用房东 Guard，但必须校验微信签名。 */
   @Post('event')
   async event(
+    @Query('signature') signature: string | undefined,
+    @Query('timestamp') timestamp: string | undefined,
+    @Query('nonce') nonce: string | undefined,
     @Req() req: RawBodyRequest<Request>,
     @Res() response: Response,
   ): Promise<void> {
+    if (!signature || !timestamp || !nonce || !this.verifySignature(signature, timestamp, nonce)) {
+      this.logger.warn('微信事件推送签名校验失败,拒绝处理');
+      response.status(401).type('text/plain').send('invalid signature');
+      return;
+    }
+
     // 先写出响应，避免数据库或客服消息调用拖过微信要求的 5 秒时限。
     response.status(200).type('text/plain').send('success');
 

@@ -7,13 +7,26 @@ import { IWechatCustomerServiceService } from './wechat-customer-service.interfa
 import { WechatEventService } from './wechat-event.service';
 import { WechatController } from './wechat.controller';
 
+const TEST_TOKEN = 'test-token';
+const TIMESTAMP = '1735689600';
+const NONCE = 'abc123';
+
+function sign(token: string, timestamp: string, nonce: string): string {
+  return createHash('sha1')
+    .update([token, timestamp, nonce].sort().join(''))
+    .digest('hex');
+}
+
 describe('WechatController contract signing events', () => {
   let prisma: jest.Mocked<PrismaService>;
   let customerService: jest.Mocked<IWechatCustomerServiceService>;
   let leasesService: jest.Mocked<LeasesService>;
   let controller: WechatController;
+  const originalToken = process.env.WECHAT_TOKEN;
+  const validSignature = sign(TEST_TOKEN, TIMESTAMP, NONCE);
 
   beforeEach(() => {
+    process.env.WECHAT_TOKEN = TEST_TOKEN;
     prisma = {
       contractSigningTask: {
         findFirst: jest.fn(),
@@ -39,6 +52,11 @@ describe('WechatController contract signing events', () => {
     );
   });
 
+  afterAll(() => {
+    if (originalToken === undefined) delete process.env.WECHAT_TOKEN;
+    else process.env.WECHAT_TOKEN = originalToken;
+  });
+
   function request(xml: string): RawBodyRequest<Request> {
     return { rawBody: Buffer.from(xml) } as RawBodyRequest<Request>;
   }
@@ -50,6 +68,11 @@ describe('WechatController contract signing events', () => {
       send: jest.fn().mockReturnThis(),
     } as unknown as Response;
     return { value, send: value.send as jest.Mock };
+  }
+
+  /** 带上通过签名校验所需的 signature/timestamp/nonce,模拟微信真实推送。 */
+  function postEvent(xml: string, res: Response) {
+    return controller.event(validSignature, TIMESTAMP, NONCE, request(xml), res);
   }
 
   it.each([
@@ -68,7 +91,7 @@ describe('WechatController contract signing events', () => {
     customerService.sendTextMessage.mockResolvedValue(true);
     const res = response();
 
-    await controller.event(request(xml), res.value);
+    await postEvent(xml, res.value);
 
     expect(prisma.contractSigningTask.findFirst).toHaveBeenCalledWith({
       where: { sceneValue: 123, status: 'PENDING_SCAN' },
@@ -103,7 +126,7 @@ describe('WechatController contract signing events', () => {
     customerService.sendTextMessage.mockResolvedValue(true);
     const res = response();
 
-    await expect(controller.event(request(xml), res.value)).resolves.toBeUndefined();
+    await expect(postEvent(xml, res.value)).resolves.toBeUndefined();
 
     expect(prisma.contractSigningTask.updateMany).toHaveBeenCalledWith({
       where: { id: 9, status: 'PENDING_SCAN' },
@@ -123,11 +146,9 @@ describe('WechatController contract signing events', () => {
     customerService.sendTextMessage.mockResolvedValue(true);
     const res = response();
 
-    await controller.event(
-      request(
-        '<xml><FromUserName>openid-2</FromUserName><MsgType>event</MsgType>' +
-          '<Event>subscribe</Event><EventKey>qrscene_456</EventKey></xml>',
-      ),
+    await postEvent(
+      '<xml><FromUserName>openid-2</FromUserName><MsgType>event</MsgType>' +
+        '<Event>subscribe</Event><EventKey>qrscene_456</EventKey></xml>',
       res.value,
     );
 
@@ -145,11 +166,9 @@ describe('WechatController contract signing events', () => {
     const res = response();
 
     await expect(
-      controller.event(
-        request(
-          '<xml><FromUserName>openid-3</FromUserName><MsgType>event</MsgType>' +
-            '<Event>SCAN</Event><EventKey>789</EventKey></xml>',
-        ),
+      postEvent(
+        '<xml><FromUserName>openid-3</FromUserName><MsgType>event</MsgType>' +
+          '<Event>SCAN</Event><EventKey>789</EventKey></xml>',
         res.value,
       ),
     ).resolves.toBeUndefined();
@@ -163,12 +182,10 @@ describe('WechatController contract signing events', () => {
     customerService.sendTextMessage.mockResolvedValue(true);
     const res = response();
 
-    await controller.event(
-      request(
-        '<xml><FromUserName><![CDATA[openid-tenant]]></FromUserName>' +
-          '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>' +
-          '<EventKey><![CDATA[qrscene_321]]></EventKey></xml>',
-      ),
+    await postEvent(
+      '<xml><FromUserName><![CDATA[openid-tenant]]></FromUserName>' +
+        '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>' +
+        '<EventKey><![CDATA[qrscene_321]]></EventKey></xml>',
       res.value,
     );
 
@@ -196,12 +213,10 @@ describe('WechatController contract signing events', () => {
     customerService.sendTextMessage.mockResolvedValue(true);
     const res = response();
 
-    await controller.event(
-      request(
-        '<xml><FromUserName><![CDATA[openid-other]]></FromUserName>' +
-          '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[scan]]></Event>' +
-          '<EventKey><![CDATA[321]]></EventKey></xml>',
-      ),
+    await postEvent(
+      '<xml><FromUserName><![CDATA[openid-other]]></FromUserName>' +
+        '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[scan]]></Event>' +
+        '<EventKey><![CDATA[321]]></EventKey></xml>',
       res.value,
     );
 
@@ -212,35 +227,76 @@ describe('WechatController contract signing events', () => {
     );
   });
 
-  describe('verifyUrl (微信服务器URL接入验证)', () => {
-    const originalToken = process.env.WECHAT_TOKEN;
+  describe('POST /wechat/event 签名校验(2026-09-20新增,修复无鉴权伪造事件问题)', () => {
+    const xml =
+      '<xml><FromUserName><![CDATA[attacker-openid]]></FromUserName>' +
+      '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>' +
+      '<EventKey><![CDATA[qrscene_123]]></EventKey></xml>';
 
-    afterEach(() => {
-      if (originalToken === undefined) delete process.env.WECHAT_TOKEN;
-      else process.env.WECHAT_TOKEN = originalToken;
-    });
-
-    function sign(token: string, timestamp: string, nonce: string): string {
-      return createHash('sha1')
-        .update([token, timestamp, nonce].sort().join(''))
-        .digest('hex');
-    }
-
-    it('签名正确时原样回显echostr', () => {
-      process.env.WECHAT_TOKEN = 'test-token';
-      const timestamp = '1735689600';
-      const nonce = 'abc123';
-      const signature = sign('test-token', timestamp, nonce);
+    it('缺少签名参数时拒绝,不解析事件、不查库', async () => {
       const res = response();
 
-      controller.verifyUrl(signature, timestamp, nonce, 'echo-value', res.value);
+      await controller.event(undefined, undefined, undefined, request(xml), res.value);
+
+      expect(res.value.status).toHaveBeenCalledWith(401);
+      expect(res.send).not.toHaveBeenCalledWith('success');
+      expect(prisma.contractSigningTask.findFirst).not.toHaveBeenCalled();
+      expect(prisma.tenant.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('签名错误时拒绝,不解析事件、不查库', async () => {
+      const res = response();
+
+      await controller.event('wrong-signature', TIMESTAMP, NONCE, request(xml), res.value);
+
+      expect(res.value.status).toHaveBeenCalledWith(401);
+      expect(res.send).not.toHaveBeenCalledWith('success');
+      expect(prisma.contractSigningTask.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('WECHAT_TOKEN 未配置时拒绝(不允许空token通过校验)', async () => {
+      delete process.env.WECHAT_TOKEN;
+      const res = response();
+
+      await controller.event(
+        sign('', TIMESTAMP, NONCE),
+        TIMESTAMP,
+        NONCE,
+        request(xml),
+        res.value,
+      );
+
+      expect(res.value.status).toHaveBeenCalledWith(401);
+      expect(prisma.contractSigningTask.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('签名正确时正常处理并返回 success', async () => {
+      (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue({
+        id: 9,
+        lease: { room: { roomNo: '205', building: { name: 'R栋' } } },
+      });
+      (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      const res = response();
+
+      await postEvent(xml, res.value);
+
+      expect(res.value.status).toHaveBeenCalledWith(200);
+      expect(res.send).toHaveBeenCalledWith('success');
+      expect(prisma.contractSigningTask.findFirst).toHaveBeenCalled();
+    });
+  });
+
+  describe('verifyUrl (微信服务器URL接入验证)', () => {
+    it('签名正确时原样回显echostr', () => {
+      const res = response();
+
+      controller.verifyUrl(validSignature, TIMESTAMP, NONCE, 'echo-value', res.value);
 
       expect(res.value.status).toHaveBeenCalledWith(200);
       expect(res.send).toHaveBeenCalledWith('echo-value');
     });
 
     it('签名不匹配时拒绝', () => {
-      process.env.WECHAT_TOKEN = 'test-token';
       const res = response();
 
       controller.verifyUrl('wrong-signature', '123', 'nonce', 'echo-value', res.value);
@@ -250,7 +306,6 @@ describe('WechatController contract signing events', () => {
     });
 
     it('缺少参数时拒绝', () => {
-      process.env.WECHAT_TOKEN = 'test-token';
       const res = response();
 
       controller.verifyUrl(undefined, undefined, undefined, undefined, res.value);
