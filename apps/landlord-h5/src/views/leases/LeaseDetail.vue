@@ -137,7 +137,7 @@
 
       <van-cell-group inset title="交接记录">
         <div v-if="lease.status === 'ACTIVE'" class="handover-actions">
-          <van-button size="small" plain type="primary" @click="openHandoverDialog">新增交接记录</van-button>
+          <van-button size="small" plain type="primary" @click="openHandoverDialog()">新增交接记录</van-button>
         </div>
         <van-empty v-if="!handoverRecords.length" description="暂无交接记录" />
         <van-cell v-for="record in handoverRecords" :key="record.id">
@@ -148,6 +148,10 @@
               </van-tag>
               <span class="handover-time">{{ dt(record.createdAt) }}</span>
             </div>
+          </template>
+          <template #right-icon>
+            <van-icon name="edit" style="margin-right:10px;" @click="openHandoverDialog(record)" />
+            <van-icon name="delete-o" class="checklist-delete" @click="handleDeleteHandover(record)" />
           </template>
           <template #label>
             <div v-for="(item, index) in record.checklist || []" :key="index">
@@ -221,11 +225,11 @@
       <van-field v-model.trim="coOccupantForm.phone" label="手机号" type="tel" maxlength="11" placeholder="11位手机号" :rules="[{ required: true, message: '请填写手机号' }, { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确' }]" />
     </van-dialog>
 
-    <!-- 新增交接记录弹窗 -->
-    <van-dialog v-model:show="showHandoverDialog" title="新增交接记录" show-cancel-button @confirm="handleAddHandover">
+    <!-- 新增/编辑交接记录弹窗 -->
+    <van-dialog v-model:show="showHandoverDialog" :title="editingHandoverId ? '编辑交接记录' : '新增交接记录'" show-cancel-button :before-close="beforeCloseHandover">
       <van-field name="type" label="类型">
         <template #input>
-          <van-radio-group v-model="handoverForm.type" direction="horizontal">
+          <van-radio-group v-model="handoverForm.type" direction="horizontal" :disabled="!!editingHandoverId">
             <van-radio name="CHECKIN">入住交接</van-radio>
             <van-radio name="CHECKOUT">退房交接</van-radio>
           </van-radio-group>
@@ -262,6 +266,7 @@ const loading = ref(true);
 const showEndDialog = ref(false);
 const showRenewDialog = ref(false);
 const showHandoverDialog = ref(false);
+const editingHandoverId = ref<number | null>(null);
 const showContractDialog = ref(false);
 const generating = ref(false);
 const launching = ref(false);
@@ -477,11 +482,83 @@ async function handleGenerateBindQrcode() {
   }
 }
 
-function openHandoverDialog() {
-  handoverForm.type = 'CHECKIN';
-  handoverForm.checklist = [];
-  handoverForm.remark = '';
+function openHandoverDialog(record?: { id: number; type: string; checklist?: Array<{ item?: string | null; quantity?: number | null; condition?: string | null }>; remark?: string | null }) {
+  editingHandoverId.value = record?.id ?? null;
+  handoverForm.type = record?.type ?? 'CHECKIN';
+  handoverForm.checklist = record?.checklist?.length
+    ? record.checklist.map((entry) => ({
+        item: entry.item ?? '',
+        quantity: entry.quantity === undefined || entry.quantity === null ? '' : String(entry.quantity),
+        condition: entry.condition ?? '',
+      }))
+    : [];
+  handoverForm.remark = record?.remark ?? '';
   showHandoverDialog.value = true;
+}
+
+/** 校验交接检查项:全空拦截(不能什么都不填就提交),半填的行指明第几项补全,不再静默丢弃 */
+function validateHandoverChecklist(): string | null {
+  const rows = handoverForm.checklist;
+  const hasAnyRow = rows.some((r) => r.item || r.quantity || r.condition);
+  if (!hasAnyRow) return '请至少填写一项检查项(项目和状况必填)';
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row.item && !row.quantity && !row.condition) continue;
+    if (!row.item || !row.condition) return `第${i + 1}项检查项不完整:项目和状况必填`;
+  }
+  return null;
+}
+
+async function saveHandover(): Promise<boolean> {
+  const error = validateHandoverChecklist();
+  if (error) {
+    showToast(error);
+    return false;
+  }
+  const checklist = handoverForm.checklist
+    .filter(item => item.item && item.condition)
+    .map(item => ({
+      item: item.item,
+      quantity: item.quantity === '' ? null : Number(item.quantity),
+      condition: item.condition,
+    }));
+  if (editingHandoverId.value) {
+    await http.put(`/handover/${editingHandoverId.value}`, { checklist, remark: handoverForm.remark });
+    showToast('已更新');
+  } else {
+    await http.post('/handover', {
+      leaseId: Number(route.params.id),
+      type: handoverForm.type,
+      checklist,
+      remark: handoverForm.remark,
+    });
+    showToast('已添加');
+  }
+  await fetchHandoverRecords();
+  return true;
+}
+
+/** van-dialog before-close:取消直接关,确认走保存且校验失败/请求失败不关窗 */
+async function beforeCloseHandover(action: string): Promise<boolean> {
+  if (action !== 'confirm') {
+    editingHandoverId.value = null;
+    return true;
+  }
+  try {
+    const saved = await saveHandover();
+    if (!saved) return false;
+    editingHandoverId.value = null;
+    return true;
+  } catch {
+    return false; // http拦截器已toast,失败留在弹窗里可改可重试
+  }
+}
+
+async function handleDeleteHandover(record: { id: number }) {
+  await showConfirmDialog({ title: '删除交接记录', message: '删除后不可恢复,确定删除这条交接记录吗?' });
+  await http.delete(`/handover/${record.id}`);
+  showToast('已删除');
+  await fetchHandoverRecords();
 }
 
 /** 从合同签约设置拉默认物品清单预填检查项,房东只需改数量/状况 */
@@ -553,25 +630,6 @@ async function handleRemoveCoOccupant(co: { id: number; name: string }) {
   await http.delete(`/leases/co-occupants/${co.id}`);
   showToast('已删除');
   await fetchLease();
-}
-
-async function handleAddHandover() {
-  const checklist = handoverForm.checklist
-    .filter(item => item.item && item.condition)
-    .map(item => ({
-      item: item.item,
-      quantity: item.quantity === '' ? null : Number(item.quantity),
-      condition: item.condition,
-    }));
-  await http.post('/handover', {
-    leaseId: Number(route.params.id),
-    type: handoverForm.type,
-    checklist,
-    remark: handoverForm.remark,
-  });
-  showToast('已添加');
-  showHandoverDialog.value = false;
-  await fetchHandoverRecords();
 }
 
 async function handleEnd() {

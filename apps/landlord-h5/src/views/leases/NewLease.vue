@@ -86,16 +86,26 @@
             </van-radio-group>
           </template>
         </van-field>
-        <van-field v-model="carPlateModel" label="车牌号" placeholder="车牌格式：粤B12345（可选）" />
+        <van-field
+          :model-value="carPlateDisplay"
+          label="车牌号"
+          placeholder="点击输入车牌号(可选)"
+          readonly
+          is-link
+          @click="openPlateKeyboard"
+        />
         <div class="co-occupant-section">
         <div class="co-occupant-header">共同居住人(可选,合同附件二)</div>
-        <div v-for="(co, index) in coOccupants" :key="index" class="co-occupant-row">
-          <van-field v-model.trim="co.name" placeholder="姓名" style="flex:1;" />
-          <van-field v-model.trim="co.idCard" placeholder="身份证号" style="flex:1.6;" />
-          <van-field v-model.trim="co.phone" placeholder="手机号" type="tel" style="flex:1.2;" />
-          <van-icon name="delete-o" class="checklist-delete" @click="coOccupants.splice(index, 1)" />
+        <div v-for="(co, index) in coOccupants" :key="index" class="co-occupant-card">
+          <div class="co-occupant-card-title">
+            <span>同住人 {{ index + 1 }}</span>
+            <van-icon name="delete-o" class="checklist-delete" @click="coOccupants.splice(index, 1)" />
+          </div>
+          <van-field v-model.trim="co.name" label="姓名" placeholder="同住人姓名" maxlength="20" />
+          <van-field v-model.trim="co.idCard" label="身份证号" maxlength="18" placeholder="15或18位身份证号" />
+          <van-field v-model.trim="co.phone" label="手机号" type="tel" maxlength="11" placeholder="11位手机号" />
         </div>
-        <van-button size="small" plain @click="coOccupants.push({ name: '', idCard: '', phone: '' })">+ 添加同住人</van-button>
+        <van-button size="small" plain class="co-add-btn" @click="coOccupants.push({ name: '', idCard: '', phone: '' })">+ 添加同住人</van-button>
       </div>
       <van-field v-model="form.commission" label="佣金" type="number" inputmode="decimal" placeholder="可选">
           <template #button><span class="amount-unit">元</span></template>
@@ -117,6 +127,37 @@
         <van-button round block type="primary" native-type="submit" :loading="loading">确认签约</van-button>
       </div>
     </van-form>
+
+    <!-- 车牌键盘弹窗 -->
+    <van-popup v-model:show="showPlateKeyboard" position="bottom" round>
+      <div class="plate-keyboard">
+        <div class="plate-slots">
+          <div
+            v-for="n in PLATE_MAX_LEN"
+            :key="n"
+            class="plate-slot"
+            :class="{ active: n === plateDraft.length + 1, filled: n <= plateDraft.length, hint: n === PLATE_MAX_LEN && plateDraft.length < PLATE_MAX_LEN }"
+          >
+            <template v-if="n <= plateDraft.length">{{ plateDraft[n - 1] }}</template>
+            <template v-else-if="n === PLATE_MAX_LEN">新能源</template>
+          </div>
+        </div>
+        <div class="plate-tools">
+          <van-button size="small" plain class="plate-tool-btn" @click="clearPlateDraft">清空</van-button>
+          <van-button size="small" plain class="plate-tool-btn" @click="removePlateKey">删除</van-button>
+          <van-button size="small" type="primary" class="plate-tool-btn" @click="confirmPlate">确定</van-button>
+        </div>
+        <div class="plate-keys" :class="platePanel">
+          <button
+            v-for="ch in (platePanel === 'province' ? PLATE_PROVINCES : platePanel === 'letter' ? PLATE_LETTERS : PLATE_ALNUM)"
+            :key="ch"
+            type="button"
+            class="plate-key"
+            @click="pressPlateKey(ch)"
+          >{{ ch }}</button>
+        </div>
+      </div>
+    </van-popup>
 
     <van-dialog v-model:show="showResult" title="签约成功" :showConfirmButton="false">
       <div style="padding:16px;text-align:center;">
@@ -176,12 +217,48 @@ const form = reactive({
   feeItems: [] as { name: string; amount: number | '' }[],
 });
 
-const carPlateModel = computed({
-  get: () => form.carPlate,
-  set: (value: string) => {
-    form.carPlate = value.toUpperCase();
-  },
-});
+// ===== 车牌键盘(主流交互:省份→字母→字母数字,普通车牌7位/新能源8位) =====
+const PLATE_PROVINCES = [...'京津冀晋蒙辽吉黑沪苏浙皖闽赣鲁豫鄂湘粤桂琼渝川贵云藏陕甘青宁新'];
+const PLATE_LETTERS = [...'ABCDEFGHJKLMNPQRSTUVWXYZ']; // 车牌不用 I/O
+const PLATE_ALNUM = [...'0123456789', ...PLATE_LETTERS];
+const PLATE_MAX_LEN = 8;
+const showPlateKeyboard = ref(false);
+const plateDraft = ref('');
+const platePanel = computed(() =>
+  plateDraft.value.length === 0 ? 'province' : plateDraft.value.length === 1 ? 'letter' : 'alnum',
+);
+// 展示成 沪A·48563 的可读格式,存储仍是连续字符串
+const carPlateDisplay = computed(() =>
+  form.carPlate.length > 2 ? `${form.carPlate.slice(0, 2)}·${form.carPlate.slice(2)}` : form.carPlate,
+);
+
+function openPlateKeyboard() {
+  plateDraft.value = form.carPlate;
+  showPlateKeyboard.value = true;
+}
+
+function pressPlateKey(ch: string) {
+  if (plateDraft.value.length >= PLATE_MAX_LEN) return;
+  plateDraft.value += ch;
+}
+
+function removePlateKey() {
+  plateDraft.value = plateDraft.value.slice(0, -1);
+}
+
+function clearPlateDraft() {
+  plateDraft.value = '';
+}
+
+function confirmPlate() {
+  const len = plateDraft.value.length;
+  if (len !== 7 && len !== 8) {
+    showToast(`车牌号为7位(普通)或8位(新能源),当前${len}位`);
+    return;
+  }
+  form.carPlate = plateDraft.value;
+  showPlateKeyboard.value = false;
+}
 
 const depositManuallyEdited = ref(false);
 const depositModel = computed({
@@ -311,6 +388,31 @@ function closeResult() {
 .checklist-delete { color: #969799; padding: 0 8px; font-size: 18px; }
 .co-occupant-section { padding: 4px 0; }
 .co-occupant-header { font-size: 13px; color: #646566; padding: 6px 16px; }
-.co-occupant-row { display: flex; align-items: center; gap: 6px; padding: 0 8px; }
-.co-occupant-row .van-field { flex: 1; }
+.co-occupant-card { margin: 0 8px 8px; background: #f7f8fa; border-radius: 8px; overflow: hidden; }
+.co-occupant-card-title { display: flex; justify-content: space-between; align-items: center; padding: 8px 8px 0 16px; font-size: 13px; color: #646566; }
+.co-add-btn { margin: 0 16px 8px; }
+
+.plate-keyboard { padding: 16px 10px calc(16px + env(safe-area-inset-bottom)); background: #f2f3f5; }
+.plate-slots { display: flex; gap: 4px; justify-content: center; margin-bottom: 12px; }
+.plate-slot {
+  width: 34px; height: 44px;
+  display: flex; align-items: center; justify-content: center;
+  background: #fff; border: 1px solid #dcdee0; border-radius: 4px;
+  font-size: 18px; font-weight: 600; color: #323233;
+}
+.plate-slot.active { border-color: #1989fa; box-shadow: inset 0 0 0 1px #1989fa; }
+.plate-slot.hint { font-size: 9px; font-weight: 400; color: #c8c9cc; }
+.plate-tools { display: flex; gap: 8px; justify-content: flex-end; margin-bottom: 10px; }
+.plate-tool-btn { min-width: 64px; }
+.plate-keys { display: grid; gap: 5px; }
+.plate-keys.province { grid-template-columns: repeat(10, 1fr); }
+.plate-keys.letter { grid-template-columns: repeat(8, 1fr); }
+.plate-keys.alnum { grid-template-columns: repeat(9, 1fr); }
+.plate-key {
+  height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  background: #fff; border: none; border-radius: 6px;
+  font-size: 15px; color: #323233; padding: 0;
+}
+.plate-key:active { background: #dde0e6; }
 </style>
