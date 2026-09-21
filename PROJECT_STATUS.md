@@ -919,3 +919,5 @@ GasCan今晚发来一份《住房租赁合同正式标准模板.docx》（已保
 5. 上线时你还要做:公众号后台消息推送URL+自定义菜单URL从dev改生产(清单B);问微签企业认证进度
 
 **【2026-09-21 01:30 质量审查完成】**GasCan睡前追加指令"全盘review防屎山"已执行:Claude强模型审9100行产品代码diff(六维:上帝文件/死代码/重复/模式/类型/配置),精选7条小而确定的修复当晚落地(bbc38d0,行为零变化,275测试全过,已部署dev):删平行PDF实现+2个死方法、身份证/手机号正则13处归一为共享常量、状态映射收拢、admin写法统一。**9项结构性优化(拆god-service/拆组件/日期统一等)记入review-notes.md Review16的"上线后清理队列"——上线前夜不大重构是正确决策,队列已排好优先级,上线后按序消化**。dev现运行bbc38d0。
+
+**【2026-09-21 17:50 生产上线完成 🚀】**main=88743ab(合并前全量回归:server tsc 0错+jest 275全过+两端vue-tsc 0错)。生产部署全链路:库备份237KB完整性校验→prod .env补齐(微签6项凭证含sealId 180680/WECHAT_TOKEN/NODE_ENV=production/SERVER_PUBLIC_BASE_URL/PDF_CHROME路径)→schema迁移(新增表/列,唯一索引警告确认为新列全NULL良性)→双前端构建部署(真实appid已验证进产物)→后端构建PM2重启→内外网健康检查200+双前端200→合同签约设置已播种(占秀英/18121023296/收款人占秀英/水电单价/11项默认清单;**身份证号占位待GasCan提供**)。**事故记录:首次bundle误打包本地旧main,且git reset --hard抹掉了prod前端.env.production的真实appid本地补丁——已改用.env.production.local(gitignore内,Vite优先加载)永久根治,并用ff-only merge替代reset**。待GasCan:①公众号后台改消息推送URL+自定义菜单(生产代码已就绪可改)②发占秀英身份证号③本人登录验收+第一份生产合同(身份证号到位后)。
