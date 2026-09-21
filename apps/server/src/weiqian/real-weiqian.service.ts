@@ -38,11 +38,11 @@ const AUTH_MODE = 'Signature';
 // 签署页两条签署横线中心约在29%高度(=71%从底部):甲方x=240(24%宽),
 // 乙方x=710(71%宽),y均取710,章中心压在签署线上。
 // 2026-09-22 新合同模板9页(正文3+附件5+签署页1),签署页从第8页变为第9页;
-// y坐标沿用710(签署页版式未变),首次预览需像素级复核。
+// y坐标=735:2026-09-22新版9页合同签署页实测(150dpi像素级,签署线位于顶部26.5%,1000-265=735)。
 const LAUNCHER_AUTO_SEAL_RULE = {
   autosealType: 1,
   x: 240,
-  y: 710,
+  y: 735,
   autosealPage: 9,
 } as const;
 // 乙方(接收方)指定盖章位置+签章类型。sealType=10强制手写签名,不给
@@ -52,7 +52,7 @@ const LAUNCHER_AUTO_SEAL_RULE = {
 // 选的,不受我方参数控制。x/y同样是第8页乙方签署线中心换算的0-1000坐标。
 const RECEIVER_POSITION_RULE = {
   x: 710,
-  y: 710,
+  y: 735,
   pageNum: 9,
   sealType: 10,
 } as const;
