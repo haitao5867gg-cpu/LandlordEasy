@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateRoomDto, UpdateRoomDto, BatchCreateRoomsDto } from './rooms.dto';
+import { maskPii } from '../common/utils/pii-mask';
 
 @Injectable()
 export class RoomsService {
@@ -45,12 +46,23 @@ export class RoomsService {
     });
     if (!room) throw new NotFoundException('房间不存在');
 
-    // 获取该房间的操作日志
-    const auditLogs = await this.prisma.auditLog.findMany({
-      where: { entityType: 'rooms', entityId: id },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    });
+    // 获取该房间的操作日志；detail 出库前再脱敏一次，
+    // 覆盖历史明文行（对已脱敏的新行是幂等的）
+    const auditLogs = (
+      await this.prisma.auditLog.findMany({
+        where: {
+          OR: [
+            { entityType: 'rooms', entityId: id },
+            { entityType: 'leases', entityId: { in: room.leases.map((lease) => lease.id) } },
+          ],
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      })
+    ).map((log) => ({
+      ...log,
+      detail: log.detail === null ? null : (maskPii(log.detail) as object),
+    }));
 
     return { ...room, auditLogs };
   }

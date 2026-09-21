@@ -10,6 +10,51 @@ export interface SystemSettings {
   qrcodeImageUrl: string;
 }
 
+export interface ContractSettingsInput {
+  landlordName: string;
+  landlordIdCard: string;
+  landlordPhone: string;
+  defaultPenaltyMonths?: number;
+  defaultOverdueDays?: number;
+  defaultCleaningFee?: number;
+  defaultRenewNoticeDays?: number;
+  // M22 新增(全部可选,缺省沿用数据库默认值)
+  payeeName?: string;
+  waterFeeRule?: string;
+  electricityFeeRule?: string;
+  gasFeeRule?: string;
+  otherFeeRule?: string;
+  defaultItemChecklist?: Array<{ item: string; quantity?: number }>;
+  continuousStayDays?: number;
+  cumulativeStayDays?: number;
+  abandonedPropertyDays?: number;
+  nonRenewalNoticeDays?: number;
+  earlyTerminationNoticeDays?: number;
+  depositRefundWorkDays?: number;
+  electronicNoticeHours?: number;
+  waterPrice?: number;
+  electricityPrice?: number;
+}
+
+const DEFAULT_CONTRACT_SETTINGS = {
+  defaultPenaltyMonths: 1,
+  defaultOverdueDays: 5,
+  defaultCleaningFee: 110,
+  defaultRenewNoticeDays: 30,
+  payeeName: '占秀英',
+  waterFeeRule: '以实际发生为准',
+  electricityFeeRule: '以实际发生为准',
+  gasFeeRule: '以实际发生为准',
+  otherFeeRule: '以实际发生为准',
+  continuousStayDays: 30,
+  cumulativeStayDays: 90,
+  abandonedPropertyDays: 30,
+  nonRenewalNoticeDays: 30,
+  earlyTerminationNoticeDays: 30,
+  depositRefundWorkDays: 3,
+  electronicNoticeHours: 24,
+};
+
 const SETTINGS_FILE = path.join(process.cwd(), 'data/settings.json');
 const UPLOAD_DIR = path.join(process.cwd(), 'data/uploads');
 
@@ -59,6 +104,67 @@ export class AdminService {
     Object.assign(settings, updates);
     this.saveSettings(settings);
     return settings;
+  }
+
+  // === 合同签约设置(数据库单例) ===
+
+  async getContractSettings() {
+    const settings = await this.prisma.contractSettings.findFirst({
+      orderBy: { id: 'asc' },
+    });
+    return settings ?? {
+      id: null,
+      landlordName: '',
+      landlordIdCard: '',
+      landlordPhone: '',
+      ...DEFAULT_CONTRACT_SETTINGS,
+      updatedAt: null,
+    };
+  }
+
+  async updateContractSettings(input: ContractSettingsInput) {
+    const existing = await this.prisma.contractSettings.findFirst({
+      orderBy: { id: 'asc' },
+    });
+    const data = {
+      landlordName: input.landlordName,
+      landlordIdCard: input.landlordIdCard,
+      landlordPhone: input.landlordPhone,
+      ...this.pickDefined(input, [
+        'defaultPenaltyMonths',
+        'defaultOverdueDays',
+        'defaultCleaningFee',
+        'defaultRenewNoticeDays',
+        'payeeName',
+        'waterFeeRule',
+        'electricityFeeRule',
+        'gasFeeRule',
+        'otherFeeRule',
+        'defaultItemChecklist',
+        'continuousStayDays',
+        'cumulativeStayDays',
+        'abandonedPropertyDays',
+        'nonRenewalNoticeDays',
+        'earlyTerminationNoticeDays',
+        'depositRefundWorkDays',
+        'electronicNoticeHours',
+        'waterPrice',
+        'electricityPrice',
+      ]),
+    };
+
+    return existing
+      ? this.prisma.contractSettings.update({ where: { id: existing.id }, data })
+      : this.prisma.contractSettings.create({ data });
+  }
+
+  private pickDefined(input: object, keys: string[]) {
+    const result: Record<string, unknown> = {};
+    const record = input as Record<string, unknown>;
+    for (const key of keys) {
+      if (record[key] !== undefined) result[key] = record[key];
+    }
+    return result;
   }
 
   // === 收款码图片上传 ===

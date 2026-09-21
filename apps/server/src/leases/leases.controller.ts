@@ -1,18 +1,34 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   Post,
+  Put,
+  Delete,
   Param,
   Body,
   Query,
   UseGuards,
   ParseIntPipe,
   Req,
+  Res,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
+import { sendContractPdf } from './send-contract-pdf';
 import { LeasesService } from './leases.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
-import { CreateContractSigningTaskDto, CreateLeaseDto, EndLeaseDto, RenewLeaseDto } from './leases.dto';
+import {
+  ApproveTerminationRequestDto,
+  CreateCoOccupantDto,
+  UpdateCoOccupantDto,
+  ApproveTransferRequestDto,
+  CreateContractSigningTaskDto,
+  CreateLeaseDto,
+  EndLeaseDto,
+  LaunchContractSigningTaskDto,
+  RejectRequestDto,
+  RenewLeaseDto,
+} from './leases.dto';
 import { JwtPayload } from '../auth/auth.service';
 
 @Controller('leases')
@@ -28,6 +44,18 @@ export class LeasesController {
     );
   }
 
+  /** 退租违约申请列表(房东)——必须声明在 `:id` 路由之前,否则会被当成 lease id 解析。 */
+  @Get('termination-requests')
+  listTerminationRequests(@Query('status') status?: string) {
+    return this.leasesService.listTerminationRequests(status);
+  }
+
+  /** 换租申请列表(房东)——同样必须声明在 `:id` 路由之前。 */
+  @Get('transfer-requests')
+  listTransferRequests(@Query('status') status?: string) {
+    return this.leasesService.listTransferRequests(status);
+  }
+
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.leasesService.findOne(id);
@@ -39,12 +67,88 @@ export class LeasesController {
     return this.leasesService.create(dto, user.sub);
   }
 
+  // ===== 共同居住人(M22) =====
+
+  @Get(':id/co-occupants')
+  listCoOccupants(@Param('id', ParseIntPipe) id: number) {
+    return this.leasesService.listCoOccupants(id);
+  }
+
+  @Post(':id/co-occupants')
+  addCoOccupant(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateCoOccupantDto,
+  ) {
+    return this.leasesService.addCoOccupant(id, dto);
+  }
+
+  @Put('co-occupants/:coOccupantId')
+  updateCoOccupant(
+    @Param('coOccupantId', ParseIntPipe) coOccupantId: number,
+    @Body() dto: UpdateCoOccupantDto,
+  ) {
+    return this.leasesService.updateCoOccupant(coOccupantId, dto);
+  }
+
+  @Delete('co-occupants/:coOccupantId')
+  removeCoOccupant(@Param('coOccupantId', ParseIntPipe) coOccupantId: number) {
+    return this.leasesService.removeCoOccupant(coOccupantId);
+  }
+
   @Post(':id/contract-signing-tasks')
   createContractSigningTask(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: CreateContractSigningTaskDto,
   ) {
     return this.leasesService.createContractSigningTask(id, dto);
+  }
+
+  /** 生成/复用租客账号绑定二维码,替代邀请码。 */
+  @Post(':id/bind-qrcode')
+  getTenantBindQrcode(@Param('id', ParseIntPipe) id: number) {
+    return this.leasesService.getOrCreateTenantBindQrcode(id);
+  }
+
+  @Post('contract-signing-tasks/:id/launch')
+  launchContractSigningTask(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: LaunchContractSigningTaskDto,
+  ) {
+    return this.leasesService.launchContractSigningTask(id, dto);
+  }
+
+  @Get('contract-signing-tasks/:id/pdf')
+  async downloadContract(@Param('id', ParseIntPipe) id: number, @Res() res: Response) {
+    sendContractPdf(res, await this.leasesService.downloadSignedContract(id), id, 'signed');
+  }
+
+  @Get('contract-signing-tasks/:id/preview')
+  async downloadPreview(@Param('id', ParseIntPipe) id: number, @Res() res: Response) {
+    sendContractPdf(res, await this.leasesService.previewContractPdf(id), id, 'preview');
+  }
+
+  /** 房东手动预览当前微签文件,跳转触发失效时的人工兜底第一步(仅预览,不确认)。 */
+  @Post('contract-signing-tasks/:id/preview-signed-file')
+  previewSignedFile(@Param('id', ParseIntPipe) id: number) {
+    return this.leasesService.previewSignedFile(id);
+  }
+
+  /** M22:CREATED状态任务的"直接签署二维码"——房东保存/转发给租客,扫码即签,无需公众号通知。 */
+  @Get('contract-signing-tasks/:id/sign-qrcode')
+  getSignQrcode(@Param('id', ParseIntPipe) id: number) {
+    return this.leasesService.getSignQrcode(id);
+  }
+
+  /** 房东肉眼核实乙方签字属实后手动确认已签署,跳转触发失效时的人工兜底第二步。 */
+  @Post('contract-signing-tasks/:id/confirm-signed')
+  async confirmSignedTask(@Param('id', ParseIntPipe) id: number) {
+    const confirmed = await this.leasesService.tryConfirmSigned(id);
+    if (!confirmed) {
+      throw new BadRequestException(
+        '未能确认签署,请先点击"下载查看签署进度"核实乙方签字后再试',
+      );
+    }
+    return { confirmed: true };
   }
 
   @Post(':id/end')
@@ -56,5 +160,45 @@ export class LeasesController {
   @Post(':id/renew')
   renew(@Param('id', ParseIntPipe) id: number, @Body() dto: RenewLeaseDto) {
     return this.leasesService.renew(id, dto);
+  }
+
+  @Post('termination-requests/:id/approve')
+  approveTerminationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ApproveTerminationRequestDto,
+    @Req() req: Request,
+  ) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.leasesService.approveTerminationRequest(id, dto, user.sub);
+  }
+
+  @Post('termination-requests/:id/reject')
+  rejectTerminationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RejectRequestDto,
+    @Req() req: Request,
+  ) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.leasesService.rejectTerminationRequest(id, dto, user.sub);
+  }
+
+  @Post('transfer-requests/:id/approve')
+  approveTransferRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ApproveTransferRequestDto,
+    @Req() req: Request,
+  ) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.leasesService.approveTransferRequest(id, dto, user.sub);
+  }
+
+  @Post('transfer-requests/:id/reject')
+  rejectTransferRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RejectRequestDto,
+    @Req() req: Request,
+  ) {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    return this.leasesService.rejectTransferRequest(id, dto, user.sub);
   }
 }

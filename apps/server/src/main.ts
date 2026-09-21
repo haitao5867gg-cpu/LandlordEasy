@@ -1,9 +1,11 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, BadRequestException } from '@nestjs/common';
 import { ValidationError } from 'class-validator';
-import { AppModule } from './app.module';
+import { text } from 'express';
+import { blockContractUploads } from './common/middleware/contract-uploads.middleware';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
+import { validateStartupConfig } from './config/startup-config';
 
 /** 将 class-validator 的英文错误消息映射为中文 */
 function translateValidationError(error: ValidationError): string {
@@ -40,9 +42,28 @@ function translateValidationError(error: ValidationError): string {
   return messageMap[key] || `提交的信息格式不正确,请检查后重试`;
 }
 
-async function bootstrap() {
+export async function bootstrap() {
+  // Validate before AppModule evaluation, Nest provider construction, Prisma,
+  // scheduler initialization, HTTP listen, or any external integration call.
+  validateStartupConfig();
+  const { AppModule } = await import('./app.module');
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  // Register before init/static serving, outside the API prefix, to protect legacy uploads.
+  app.use(blockContractUploads);
   app.setGlobalPrefix('api/v1');
+  // 微信公众号事件推送用 text/xml,NestJS 内置的 json/urlencoded parser 不认这个
+  // content-type,rawBody:true 全局开关对它不生效,req.rawBody 会一直是 undefined。
+  // 单独给这个路由挂一个 text() parser 补上(2026-09-01 用真实微信XML请求体格式
+  // 手动验证时发现 WechatController.event 一直拿到空字符串,才发现这个缺口)。
+  app.use(
+    '/api/v1/wechat/event',
+    text({
+      type: ['text/xml', 'application/xml'],
+      verify: (req: unknown, _res, buf) => {
+        (req as { rawBody?: Buffer }).rawBody = buf;
+      },
+    }),
+  );
   app.useGlobalFilters(new GlobalExceptionFilter());
   app.useGlobalInterceptors(new ResponseInterceptor());
   app.useGlobalPipes(
@@ -61,4 +82,6 @@ async function bootstrap() {
   await app.listen(port);
   console.log(`Server running on http://localhost:${port}`);
 }
-bootstrap();
+if (require.main === module) {
+  void bootstrap();
+}

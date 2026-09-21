@@ -2,8 +2,9 @@ import { Module } from '@nestjs/common';
 import { MockTencentEsignService } from './mock-tencent-esign.service';
 import { RealTencentEsignService } from './real-tencent-esign.service';
 import { TENCENT_ESIGN_SERVICE } from './tencent-esign.interface';
+import { resolveEsignMode } from '../config/startup-config';
 
-const esignMode = process.env.ESIGN_MODE || 'mock';
+const esignMode = resolveEsignMode();
 
 const tencentEsignProvider = {
   provide: TENCENT_ESIGN_SERVICE,

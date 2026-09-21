@@ -12,8 +12,16 @@ describe('BillsService manual reminders', () => {
     id: 1,
     status: 'PENDING',
     totalAmount: 1200,
+    periodStart: new Date('2026-08-01T00:00:00.000Z'),
+    periodEnd: new Date('2026-08-31T00:00:00.000Z'),
     dueDate: new Date('2026-08-31T00:00:00.000Z'),
-    lease: { tenant: { id: 10, openid: 'openid-10' } },
+    lease: {
+      tenant: { id: 10, openid: 'openid-10' },
+      room: {
+        roomNo: '305',
+        building: { name: 'Q栋', property: { name: '鸿翼人才公寓' } },
+      },
+    },
     ...overrides,
   });
 
@@ -42,7 +50,13 @@ describe('BillsService manual reminders', () => {
     expect(wechatNotify.sendTemplateMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         openid: 'openid-10',
-        data: expect.objectContaining({ keyword3: { value: '今日到期' } }),
+        data: expect.objectContaining({
+          amount3: { value: '1200' },
+          time4: { value: '2026-08-01~2026-08-31' },
+          thing5: { value: '房租账单' },
+          thing7: { value: '鸿翼人才公寓Q栋305' },
+          time10: { value: '2026-08-31' },
+        }),
       }),
     );
     expect(prisma.reminderLog.create).toHaveBeenCalledWith({

@@ -7,6 +7,7 @@ import { join } from 'path';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthModule } from './health/health.module';
 import { WechatModule } from './wechat/wechat.module';
+import { WeiqianModule } from './weiqian/weiqian.module';
 import { AuthModule } from './auth/auth.module';
 import { BuildingsModule } from './buildings/buildings.module';
 import { PropertiesModule } from './properties/properties.module';
@@ -22,6 +23,7 @@ import { RemindersModule } from './reminders/reminders.module';
 import { TenantApiModule } from './tenant-api/tenant-api.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { AdminModule } from './admin/admin.module';
+import { AnnouncementsModule } from './announcements/announcements.module';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 
 @Module({
@@ -35,6 +37,7 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
     PrismaModule,
     HealthModule,
     WechatModule,
+    WeiqianModule,
     AuthModule,
     BuildingsModule,
     PropertiesModule,
@@ -50,6 +53,7 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
     TenantApiModule,
     ExpensesModule,
     AdminModule,
+    AnnouncementsModule,
   ],
   providers: [
     {

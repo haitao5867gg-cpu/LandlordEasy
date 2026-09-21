@@ -1,6 +1,6 @@
 <template>
   <div class="my-bills-page">
-    <van-nav-bar title="我的账单" />
+    <van-nav-bar title="我的账单" right-text="我的租约" @click-right="$router.push('/leases')" />
     <van-loading v-if="loading" class="page-loading" />
     <template v-else>
       <!-- 多租约切换 -->

@@ -14,7 +14,21 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
-import { IsString, IsOptional, IsBoolean, IsNumber } from 'class-validator';
+import {
+  IsArray,
+  IsBoolean,
+  IsInt,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+import { ID_CARD_PATTERN } from '../common/constants/validation-patterns';
+import { Type } from 'class-transformer';
 import { AdminService } from './admin.service';
 import { LandlordGuard } from '../auth/guards/landlord.guard';
 import { JwtPayload } from '../auth/auth.service';
@@ -49,6 +63,133 @@ class UpdateSettingsDto {
   @IsOptional()
   @IsString()
   qrcodeImageUrl?: string;
+}
+
+class UpdateContractSettingsDto {
+  @IsString()
+  @IsNotEmpty()
+  landlordName!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @Matches(ID_CARD_PATTERN)
+  landlordIdCard!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^1[3-9]\d{9}$/)
+  landlordPhone!: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  defaultPenaltyMonths?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  defaultOverdueDays?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  defaultCleaningFee?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  defaultRenewNoticeDays?: number;
+
+  // ===== M22 新合同模板全局配置 =====
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(30)
+  payeeName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  waterFeeRule?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  electricityFeeRule?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  gasFeeRule?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  otherFeeRule?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ChecklistItemDto)
+  defaultItemChecklist?: ChecklistItemDto[];
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  continuousStayDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  cumulativeStayDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  abandonedPropertyDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  nonRenewalNoticeDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  earlyTerminationNoticeDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  depositRefundWorkDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  electronicNoticeHours?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  waterPrice?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  electricityPrice?: number;
+}
+
+class ChecklistItemDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(30)
+  item!: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  quantity?: number;
 }
 
 @Controller('admin')
@@ -89,6 +230,18 @@ export class AdminController {
   @Put('settings')
   updateSettings(@Body() dto: UpdateSettingsDto) {
     return this.adminService.updateSettings(dto);
+  }
+
+  // === 合同签约设置 ===
+
+  @Get('contract-settings')
+  getContractSettings() {
+    return this.adminService.getContractSettings();
+  }
+
+  @Put('contract-settings')
+  updateContractSettings(@Body() dto: UpdateContractSettingsDto) {
+    return this.adminService.updateContractSettings(dto);
   }
 
   // === 收款码图片上传 ===

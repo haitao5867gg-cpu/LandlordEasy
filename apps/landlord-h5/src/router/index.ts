@@ -14,6 +14,7 @@ const router = createRouter({
     { path: '/bills', name: 'bills', component: () => import('../views/bills/BillList.vue') },
     { path: '/bills/:id', name: 'billDetail', component: () => import('../views/bills/BillDetail.vue') },
     { path: '/payments/pending', name: 'pendingPayments', component: () => import('../views/payments/PendingPayments.vue') },
+    { path: '/applications', name: 'applications', component: () => import('../views/Applications.vue') },
     { path: '/dashboard/vacancy', name: 'vacancy', component: () => import('../views/dashboard/Vacancy.vue') },
     { path: '/dashboard/expiring', name: 'expiring', component: () => import('../views/dashboard/Expiring.vue') },
     { path: '/dashboard/overdue', name: 'overdue', component: () => import('../views/dashboard/Overdue.vue') },
@@ -25,7 +26,9 @@ const router = createRouter({
     { path: '/settings/landlords', name: 'landlords', component: () => import('../views/settings/Landlords.vue') },
     { path: '/settings/buildings', name: 'buildings', component: () => import('../views/settings/Buildings.vue') },
     { path: '/settings/properties', name: 'properties', component: () => import('../views/settings/Properties.vue') },
+    { path: '/settings/contract-settings', name: 'contractSettings', component: () => import('../views/settings/ContractSettings.vue') },
     { path: '/settings/room-types', name: 'roomTypes', component: () => import('../views/settings/RoomTypes.vue') },
+    { path: '/settings/announcements', name: 'announcements', component: () => import('../views/settings/Announcements.vue') },
   ],
 });
 

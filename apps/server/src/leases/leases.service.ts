@@ -1,23 +1,80 @@
-import { randomInt } from 'crypto';
-import { Inject, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { randomBytes, randomInt } from 'crypto';
+import QRCode from 'qrcode';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  ApproveTerminationRequestDto,
+  ApproveTransferRequestDto,
+  CreateCoOccupantDto,
+  UpdateCoOccupantDto,
   CreateContractSigningTaskDto,
   CreateLeaseDto,
+  CreateTerminationRequestDto,
+  CreateTransferRequestDto,
   EndLeaseDto,
+  LaunchContractSigningTaskDto,
+  RejectRequestDto,
   RenewLeaseDto,
 } from './leases.dto';
 import {
   IWechatQrcodeService,
   WECHAT_QRCODE_SERVICE,
 } from '../wechat/wechat-qrcode.interface';
+import {
+  IWechatCustomerServiceService,
+  WECHAT_CUSTOMER_SERVICE,
+} from '../wechat/wechat-customer-service.interface';
+import {
+  IWechatNotifyService,
+  WECHAT_NOTIFY_SERVICE,
+} from '../wechat/wechat-notify.interface';
+import { ContractPdfService } from '../contract-pdf/contract-pdf.service';
+import {
+  ChecklistEntry,
+  ContractPdfData,
+} from '../contract-pdf/contract-pdf.types';
+import { AdminService } from '../admin/admin.service';
+import {
+  IWeiQianService,
+  WEIQIAN_SERVICE,
+} from '../weiqian/weiqian.interface';
+
+import { readContractPdf, writeContractPdf } from './contract-storage';
+import { BillEngineService } from '../bills/bill-engine.service';
+import { buildRentReminderMessage } from '../reminders/rent-reminder-message';
+const DEFAULT_WEIQIAN_SIGN_BASE_URL = 'http://forwave.picp.net:8888';
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+type DbClient = Prisma.TransactionClient | PrismaService;
+type LockTable =
+  | 'rooms'
+  | 'leases'
+  | 'lease_termination_requests'
+  | 'room_transfer_requests';
+
 
 @Injectable()
 export class LeasesService {
+  private readonly logger = new Logger(LeasesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(WECHAT_QRCODE_SERVICE) private readonly wechatQrcode: IWechatQrcodeService,
+    private readonly contractPdf: ContractPdfService,
+    @Inject(WEIQIAN_SERVICE) private readonly weiqian: IWeiQianService,
+    @Inject(WECHAT_CUSTOMER_SERVICE)
+    private readonly wechatCustomerService: IWechatCustomerServiceService,
+    @Inject(WECHAT_NOTIFY_SERVICE)
+    private readonly wechatNotify: IWechatNotifyService,
+    private readonly admin: AdminService,
+    private readonly billEngine: BillEngineService,
   ) {}
 
   async findAll(roomId?: number, status?: string) {
@@ -41,21 +98,53 @@ export class LeasesService {
         bills: { include: { items: true, payments: true }, orderBy: { periodStart: 'desc' } },
         depositRecords: true,
         handoverRecords: true,
+        contractSigningTasks: { orderBy: { createdAt: 'desc' } },
+        coOccupants: { orderBy: { id: 'asc' } },
       },
     });
     if (!lease) throw new NotFoundException('租约不存在');
     return lease;
   }
 
-  /** 创建电子签约任务并生成关注场景二维码 */
+  /** 创建电子签约任务；已绑定 openid 时直接自动发起签署，否则生成关注场景二维码。 */
   async createContractSigningTask(leaseId: number, dto: CreateContractSigningTaskDto) {
     const lease = await this.prisma.lease.findUnique({
       where: { id: leaseId },
-      select: { id: true },
+      select: { id: true, tenant: { select: { openid: true } } },
     });
     if (!lease) throw new NotFoundException('租约不存在');
 
-    const task = await this.createContractSigningTaskRecord(leaseId, dto);
+    // GasCan 2026-09-20 拍板:强制"先做入住交接、再生成电子签约"——附件三的
+    // 物品清单/交付日期取自 CHECKIN 交接记录,没有记录就不允许生成合同
+    const checkinHandover = await this.prisma.handoverRecord.findFirst({
+      where: { leaseId, type: 'CHECKIN' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!checkinHandover) {
+      throw new BadRequestException(
+        '请先在租约详情页填写"入住交接记录"(物品清单),再生成电子签约——合同附件三将自动使用交接单数据',
+      );
+    }
+
+    const followerOpenid = lease.tenant.openid;
+    const task = await this.createContractSigningTaskRecord(
+      leaseId,
+      dto,
+      followerOpenid,
+    );
+    if (followerOpenid) {
+      try {
+        return await this.launchContractSigningTaskInternal(task.id, {});
+      } catch (error) {
+        this.logger.warn(
+          `签约任务 ${task.id} 创建后自动发起失败,请按当前任务状态恢复: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return task;
+      }
+    }
+
     const { qrCodeImage } = await this.wechatQrcode.createSceneQrcode(task.sceneValue);
 
     return this.prisma.contractSigningTask.update({
@@ -64,24 +153,114 @@ export class LeasesService {
     });
   }
 
+  // ===== 共同居住人(M22,备案性质,合同附件二数据来源) =====
+
+  async listCoOccupants(leaseId: number) {
+    await this.ensureLeaseExists(leaseId);
+    return this.prisma.coOccupant.findMany({
+      where: { leaseId },
+      orderBy: { id: 'asc' },
+    });
+  }
+
+  async addCoOccupant(leaseId: number, dto: CreateCoOccupantDto) {
+    await this.ensureLeaseExists(leaseId);
+    return this.prisma.coOccupant.create({ data: { leaseId, ...dto } });
+  }
+
+  async updateCoOccupant(coOccupantId: number, dto: UpdateCoOccupantDto) {
+    const existing = await this.prisma.coOccupant.findUnique({
+      where: { id: coOccupantId },
+    });
+    if (!existing) throw new NotFoundException('共同居住人不存在');
+    return this.prisma.coOccupant.update({
+      where: { id: coOccupantId },
+      data: dto,
+    });
+  }
+
+  async removeCoOccupant(coOccupantId: number) {
+    const existing = await this.prisma.coOccupant.findUnique({
+      where: { id: coOccupantId },
+    });
+    if (!existing) throw new NotFoundException('共同居住人不存在');
+    await this.prisma.coOccupant.delete({ where: { id: coOccupantId } });
+    return { deleted: true };
+  }
+
+  private async ensureLeaseExists(leaseId: number) {
+    const lease = await this.prisma.lease.findUnique({
+      where: { id: leaseId },
+      select: { id: true },
+    });
+    if (!lease) throw new NotFoundException('租约不存在');
+  }
+
+  /** 生成(或复用)租客账号绑定二维码,扫码关注公众号即自动绑定 tenant-h5,替代邀请码。 */
+  async getOrCreateTenantBindQrcode(
+    leaseId: number,
+  ): Promise<{ qrCodeImage: string; sceneValue: number }> {
+    const lease = await this.prisma.lease.findUnique({
+      where: { id: leaseId },
+      select: { tenantId: true },
+    });
+    if (!lease) throw new NotFoundException('租约不存在');
+
+    const sceneValue = await this.ensureTenantBindSceneValue(lease.tenantId);
+    const { qrCodeImage } = await this.wechatQrcode.createSceneQrcode(sceneValue);
+    return { qrCodeImage, sceneValue };
+  }
+
+  private async ensureTenantBindSceneValue(tenantId: number): Promise<number> {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { bindSceneValue: true },
+    });
+    if (tenant?.bindSceneValue) return tenant.bindSceneValue;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const updated = await this.prisma.tenant.update({
+          where: { id: tenantId },
+          data: { bindSceneValue: randomInt(1, 2 ** 31) },
+          select: { bindSceneValue: true },
+        });
+        return updated.bindSceneValue!;
+      } catch (error) {
+        const shouldRetry =
+          attempt === 0 &&
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2002';
+        if (!shouldRetry) throw error;
+      }
+    }
+
+    throw new Error('无法生成唯一的绑定场景值');
+  }
+
   private async createContractSigningTaskRecord(
     leaseId: number,
     dto: CreateContractSigningTaskDto,
+    followerOpenid: string | null,
+    db: DbClient = this.prisma,
   ) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.prisma.contractSigningTask.create({
+        return await db.contractSigningTask.create({
           data: {
             leaseId,
             type: dto.type,
             sceneValue: randomInt(1, 2 ** 31),
-            waterMeterReading: dto.waterMeterReading,
-            electricityMeterReading: dto.electricityMeterReading,
-            gasMeterReading: dto.gasMeterReading,
             facilities: dto.facilities
               ? JSON.parse(JSON.stringify(dto.facilities))
               : [],
-            status: 'PENDING_SCAN',
+            ...(dto.extraTerms === undefined ? {} : { extraTerms: dto.extraTerms }),
+            penaltyMonths: dto.penaltyMonths,
+            overdueToleranceDays: dto.overdueToleranceDays,
+            cleaningFee: dto.cleaningFee,
+            renewalNoticeDays: dto.renewalNoticeDays,
+            status: followerOpenid ? 'FOLLOWED' : 'PENDING_SCAN',
+            ...(followerOpenid ? { followerOpenid } : {}),
           },
         });
       } catch (error) {
@@ -96,32 +275,620 @@ export class LeasesService {
     throw new Error('无法生成唯一的微信场景值');
   }
 
+  /** 在租客关注后发起微签互签任务，供自动流程和房东手动重试复用。 */
+  async launchContractSigningTask(
+    taskId: number,
+    dto: LaunchContractSigningTaskDto,
+  ) {
+    return this.launchContractSigningTaskInternal(taskId, dto);
+  }
+
+  private async launchContractSigningTaskInternal(
+    taskId: number,
+    dto: LaunchContractSigningTaskDto,
+  ) {
+    const task = await this.prisma.contractSigningTask.findUnique({
+      where: { id: taskId },
+      include: {
+        lease: {
+          include: {
+            room: {
+              include: { building: { include: { property: true } } },
+            },
+            tenant: true,
+            coOccupants: { orderBy: { id: 'asc' } },
+          },
+        },
+      },
+    });
+    if (!task) throw new NotFoundException('电子签约任务不存在');
+    if (task.status !== 'FOLLOWED') {
+      throw new BadRequestException(
+        '当前状态不允许发起签署,需要租客先关注公众号',
+      );
+    }
+
+    const settings = await this.prisma.contractSettings.findFirst({
+      orderBy: { id: 'asc' },
+    });
+    if (!settings) {
+      throw new BadRequestException(
+        '尚未配置合同甲方信息,请先到系统设置完成合同签约配置',
+      );
+    }
+
+    const tenant = task.lease.tenant;
+    if (!tenant.idCard) {
+      throw new BadRequestException('租客身份证号未填写,无法发起实名认证签署');
+    }
+    if (!task.followerOpenid) {
+      throw new BadRequestException('未记录租客关注信息,请重新生成二维码并让租客扫码');
+    }
+
+    const publicBaseUrl = process.env.SERVER_PUBLIC_BASE_URL?.replace(/\/+$/, '');
+    if (!publicBaseUrl) {
+      throw new InternalServerErrorException(
+        '未配置 SERVER_PUBLIC_BASE_URL,无法生成签署完成回跳地址',
+      );
+    }
+
+    // Claim before any provider call. LAUNCHING is deliberately sticky after a
+    // provider error because a timeout can mean that the remote task exists even
+    // though no response reached us. An operator must reconcile that state rather
+    // than blindly retry and create a second signature request.
+    const claimed = await this.prisma.contractSigningTask.updateMany({
+      where: { id: task.id, status: 'FOLLOWED' },
+      data: { status: 'LAUNCHING' },
+    });
+    if (claimed.count !== 1) {
+      throw new BadRequestException('签约任务正在发起或已发起,请勿重复操作');
+    }
+
+    // M22:附件三的物品清单/交付日期取该租约最近一次入住交接记录
+    // (GasCan 2026-09-20 拍板:强制先做入住交接、再生成电子签约,合同数据从交接单自动取)
+    const checkinHandover = await this.prisma.handoverRecord.findFirst({
+      where: { leaseId: task.leaseId, type: 'CHECKIN' },
+      orderBy: { createdAt: 'desc' },
+    });
+    // 创建任务时校验过,但等待租客关注期间交接记录可能被删除/清空——发起签署
+    // (消耗真实微签额度)前必须复核,否则会签出附件三全空白的正式合同。
+    // 2026-09-20 Claude独立评审P1#1。
+    if (!checkinHandover) {
+      throw new BadRequestException(
+        '该租约的入住交接记录已被删除,请先到租约详情页重新填写,再发起签署',
+      );
+    }
+    const checklist = this.toChecklistEntries(checkinHandover.checklist);
+    const systemSettings = this.admin.getSettings();
+
+    const pdfData: ContractPdfData = {
+      landlordName: settings.landlordName,
+      landlordIdCard: settings.landlordIdCard,
+      landlordPhone: settings.landlordPhone,
+      tenantName: tenant.name,
+      tenantIdCard: tenant.idCard,
+      tenantPhone: tenant.phone,
+      propertyAddress: this.buildPropertyAddress(task.lease.room),
+      leaseStartDate: task.lease.startDate,
+      leaseEndDate: task.lease.endDate,
+      monthlyRent: Number(task.lease.rent),
+      paymentCycle: task.lease.payCycle,
+      depositAmount: Number(task.lease.deposit),
+      payeeName: settings.payeeName ?? '占秀英',
+      advancePaymentDays: systemSettings.reminderPreDays,
+      handoverDate: checkinHandover?.createdAt ?? null,
+      checklist,
+      coOccupants: task.lease.coOccupants.map((c) => ({
+        name: c.name,
+        idCard: c.idCard ?? '',
+        phone: c.phone ?? '',
+      })),
+      penaltyMonths:
+        dto.penaltyMonths ?? task.penaltyMonths ?? settings.defaultPenaltyMonths,
+      overdueToleranceDays:
+        dto.overdueToleranceDays ??
+        task.overdueToleranceDays ??
+        settings.defaultOverdueDays,
+      cleaningFee: Number(
+        dto.cleaningFee ?? task.cleaningFee ?? settings.defaultCleaningFee,
+      ),
+      renewalNoticeDays:
+        dto.renewalNoticeDays ??
+        task.renewalNoticeDays ??
+        settings.defaultRenewNoticeDays,
+      continuousStayDays: settings.continuousStayDays ?? 30,
+      cumulativeStayDays: settings.cumulativeStayDays ?? 90,
+      abandonedPropertyDays: settings.abandonedPropertyDays ?? 30,
+      nonRenewalNoticeDays: settings.nonRenewalNoticeDays ?? 30,
+      earlyTerminationNoticeDays: settings.earlyTerminationNoticeDays ?? 30,
+      depositRefundWorkDays: settings.depositRefundWorkDays ?? 3,
+      electronicNoticeHours: settings.electronicNoticeHours ?? 24,
+      waterFeeRule: this.formatUtilityRule(settings.waterPrice, '吨'),
+      electricityFeeRule: this.formatUtilityRule(settings.electricityPrice, '度'),
+      otherFeeRule: settings.otherFeeRule ?? '以实际发生为准',
+      launchDate: new Date(),
+      extraTerms: task.extraTerms ?? undefined,
+      contractNumber: `LE-${task.id}`,
+    };
+
+    const fileName = `contract-${task.id}.pdf`;
+    let pdfBuffer: Buffer;
+    try {
+      pdfBuffer = await this.contractPdf.generate(pdfData);
+    } catch (error) {
+      // No provider side effect has begun, so a normal retry is safe.
+      await this.prisma.contractSigningTask.updateMany({
+        where: { id: task.id, status: 'LAUNCHING' },
+        data: { status: 'FOLLOWED' },
+      });
+      throw error;
+    }
+
+    // 落地页callback依赖这个token判断"这次重定向真的对应这个任务",不能用
+    // task.id(自增、可枚举)本身当parm,否则任何人访问这个公开GET路由都能
+    // 触发confirm(2026-09-20用真实微签账号实测确认过这个问题)。
+    const callbackToken = randomBytes(24).toString('hex');
+    let createdTask: { bId: string; shortCode: string };
+    try {
+      const uploadedFile = await this.weiqian.uploadFile(pdfBuffer, fileName);
+      createdTask = await this.weiqian.createEachSignTask({
+        launchAccount: settings.landlordPhone,
+        fBIds: [uploadedFile.bId],
+        fileName,
+        receiverAccount: tenant.phone,
+        receiverName: tenant.name,
+        receiverIdCard: tenant.idCard,
+        expiresTime: Date.now() + SEVEN_DAYS_MS,
+        sendSmsToReceiver: true,
+        finishSignJumpPage: `${publicBaseUrl}/wechat/contract-sign-callback`,
+        parm: callbackToken,
+      });
+    } catch (error) {
+      this.logger.error(
+        `签约任务 ${task.id} 调用微签失败,状态保留为 LAUNCHING 以防不确定结果被重复提交: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      throw error;
+    }
+
+    // The provider must never be called again merely because persisting its
+    // successful response hit a transient database error. Retry only the local
+    // write and retain the provider bId in the final log for manual recovery.
+    const updatedTask = await this.persistLaunchedSigningTask(
+      task.id,
+      createdTask,
+      callbackToken,
+    );
+    const signBaseUrl = (
+      process.env.WEIQIAN_SIGN_BASE_URL || DEFAULT_WEIQIAN_SIGN_BASE_URL
+    ).replace(/\/+$/, '');
+    const signUrl = `${signBaseUrl}/q/${createdTask.shortCode}`;
+    const roomLabel = this.formatRoomLabel(task.lease.room);
+    try {
+      await this.wechatCustomerService.sendTextMessage(
+        task.followerOpenid,
+        `【${roomLabel}】您的租房合同可以签署了,请点击链接完成实名认证并签字(建议在微信内直接打开):
+${signUrl}
+链接7天内有效,请尽快完成`,
+      );
+    } catch (error) {
+      // CREATED is already durable. Messaging is best-effort and must not make
+      // the caller believe the provider launch failed or invite a second launch.
+      this.logger.warn(
+        `签约任务 ${task.id} 已发起但客服消息发送失败: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    // M22(GasCan 2026-09-20要求):发起签署也走模板消息——客服消息受48小时
+    // 互动窗口限制经常发不出去,模板消息不受限且支持点击直接跳签署页。
+    // 仅当 WECHAT_TEMPLATE_CONTRACT_LAUNCH 配置时发送,与客服消息并行,互为补充。
+    // ⚠️ data字段名当前是占位猜测,必须等GasCan在公众号后台添加模板后,按真实
+    // 字段清单(如thing1.DATA/character_string2.DATA)对齐才能配置env启用!
+    const launchTemplateId = process.env.WECHAT_TEMPLATE_CONTRACT_LAUNCH;
+    if (launchTemplateId) {
+      try {
+        await this.wechatNotify.sendTemplateMessage({
+          openid: task.followerOpenid,
+          templateId: launchTemplateId,
+          url: signUrl,
+          data: {
+            // 字段清单以微信接口get_all_private_template返回的真实模板为准
+            // (2026-09-20实测,截图标注的字段名不可信):character_string1合同编号/
+            // thing7资产名称(房屋)/time3起租时间/time4到期时间/thing8项目名称
+            character_string1: { value: `LE-${task.id}` },
+            thing7: { value: roomLabel.slice(0, 20) },
+            time3: { value: this.formatLocalDate(task.lease.startDate) },
+            time4: { value: this.formatLocalDate(task.lease.endDate) },
+            thing8: { value: '电子合同签署' },
+          },
+        });
+      } catch (error) {
+        this.logger.warn(
+          `签约任务 ${task.id} 发起签署模板消息发送失败: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
+    return updatedTask;
+  }
+
+  private async persistLaunchedSigningTask(
+    taskId: number,
+    createdTask: { bId: string; shortCode: string },
+    callbackToken: string,
+  ) {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.prisma.contractSigningTask.update({
+          where: { id: taskId },
+          data: {
+            status: 'CREATED',
+            weiqianBId: createdTask.bId,
+            weiqianShortCode: createdTask.shortCode,
+            signCallbackToken: callbackToken,
+          },
+        });
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    this.logger.error(
+      `签约任务 ${taskId} 已由微签创建但本地持久化失败;请使用 provider bId=${createdTask.bId} 人工恢复`,
+    );
+    throw lastError;
+  }
+
+  /** 拼装"R栋205"这样的房间标识,用于客服消息区分多套房源。 */
+  /** 水电单价拼合同附件五文案:配置了数值→"8元/吨,租客自行充值使用";未配置→"以实际发生为准" */
+  private formatUtilityRule(price: unknown, unit: string): string {
+    const value = Number(price);
+    return Number.isFinite(value) && value > 0
+      ? `${value}元/${unit},租客自行充值使用`
+      : '以实际发生为准';
+  }
+
+  /** 微信模板消息time字段用的本地日期(yyyy-MM-dd) */
+  private formatLocalDate(value: Date): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  }
+
+
+  private formatRoomLabel(room: { roomNo: string; building: { name: string } }): string {
+    return `${room.building.name}${room.roomNo}`;
+  }
+
+  /**
+   * 微签落地页回调入口。token是发起签署时生成的不可猜测随机值(见
+   * launchContractSigningTaskInternal),不是task自增id——落地页这个GET路由
+   * 完全公开,不能用可枚举的id判断"这次重定向真的对应这个任务"。找不到
+   * 匹配token的CREATED任务时返回false,调用方不应据此暴露"token是否存在"
+   * 之外的任何信息。
+   */
+  async confirmSignedByCallbackToken(token: string): Promise<boolean> {
+    if (!token) return false;
+    const task = await this.prisma.contractSigningTask.findFirst({
+      where: { signCallbackToken: token, status: 'CREATED' },
+      select: { id: true },
+    });
+    if (!task) return false;
+    return this.tryConfirmSigned(task.id);
+  }
+
+  /** 核实微签已签文件并完成本地归档、状态更新和租客 openid 绑定 */
+  async tryConfirmSigned(taskId: number): Promise<boolean> {
+    const task = await this.prisma.contractSigningTask.findUnique({
+      where: { id: taskId },
+      include: {
+        lease: {
+          include: {
+            tenant: true,
+            room: { include: { building: { include: { property: true } } } },
+          },
+        },
+      },
+    });
+    if (!task || task.status !== 'CREATED' || !task.weiqianBId) return false;
+
+    const signedPdf = await this.weiqian.downloadSignedFile(task.weiqianBId);
+    if (!signedPdf) return false;
+
+    const signedPdfUrl = this.saveSignedPdf(task.id, signedPdf);
+
+    const updateResult = await this.prisma.contractSigningTask.updateMany({
+      where: { id: task.id, status: 'CREATED' },
+      data: { status: 'SIGNED', signedPdfUrl, signedAt: new Date() },
+    });
+    if (updateResult.count === 0) return true;
+
+    try {
+      const existingBills = await this.prisma.bill.findMany({
+        where: { leaseId: task.lease.id },
+        select: { id: true },
+      });
+      const generated = await this.billEngine.generateBillsForLease(task.lease, {
+        includeDeposit: true,
+      });
+      if (generated > 0) {
+        const firstBill = await this.prisma.bill.findFirst({
+          where: {
+            leaseId: task.lease.id,
+            ...(existingBills.length > 0
+              ? { id: { notIn: existingBills.map((bill) => bill.id) } }
+              : {}),
+          },
+          orderBy: { periodStart: 'asc' },
+          include: {
+            lease: {
+              include: {
+                room: { include: { building: { include: { property: true } } } },
+              },
+            },
+          },
+        });
+        if (firstBill) {
+          await this.sendInitialBillReminder(task.followerOpenid, firstBill);
+        } else {
+          this.logger.error(`签约任务 ${task.id} 已生成账单,但未查询到新账单`);
+        }
+      }
+    } catch (error) {
+      this.logger.error(
+        `签约任务 ${task.id} 已确认,但首期账单生成失败: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    if (task.followerOpenid) {
+      const roomLabel = this.formatRoomLabel(task.lease.room);
+      await this.wechatCustomerService.sendTextMessage(
+        task.followerOpenid,
+        `【${roomLabel}】您的租房合同已签署完成,感谢配合。如有疑问请直接联系房东`,
+      );
+
+      // 客服消息受微信48小时互动窗口限制、经常发不出去;模板消息不受这个限制,
+      // 作为保底通道并行发送,只要模板ID配置了就发,两条消息都发不影响业务。
+      const templateId = process.env.WECHAT_TEMPLATE_CONTRACT_SIGNED;
+      if (templateId) {
+        await this.wechatNotify.sendTemplateMessage({
+          openid: task.followerOpenid,
+          templateId,
+          data: {
+            thing1: { value: this.buildPropertyAddress(task.lease.room) },
+            character_string2: { value: `LE-${task.id}` },
+            // const3是微信审核过的固定候选词字段,值必须跟后台"管理枚举值"里审核
+            // 通过的原文完全一致,不能随便改——"公寓房屋租赁合同"是2026-09-04审核
+            // 通过的值(此前"新签合同"/"续签合同"、"房屋租赁合同"都被驳回过)
+            const3: { value: '公寓房屋租赁合同' },
+            time4: {
+              value: `${task.lease.startDate.toISOString().split('T')[0]}~${task.lease.endDate.toISOString().split('T')[0]}`,
+            },
+            thing5: { value: task.lease.tenant.name },
+          },
+        });
+      }
+    }
+
+    const tenant = task.lease.tenant;
+    if (task.followerOpenid && !tenant.openid) {
+      await this.prisma.tenant.update({
+        where: { id: tenant.id },
+        data: { openid: task.followerOpenid },
+      });
+    } else if (
+      task.followerOpenid &&
+      tenant.openid &&
+      tenant.openid !== task.followerOpenid
+    ) {
+      this.logger.warn(
+        `签约任务 ${task.id} 的关注 openid 与租客 ${tenant.id} 已绑定 openid 冲突,未自动覆盖`,
+      );
+    }
+
+    return true;
+  }
+
+  private async sendInitialBillReminder(
+    followerOpenid: string | null,
+    bill: {
+      id: number;
+      totalAmount: unknown;
+      periodStart: Date;
+      periodEnd: Date;
+      dueDate: Date;
+      lease: {
+        room: {
+          roomNo: string;
+          building: { name: string; property: { name: string } };
+        };
+      };
+    },
+  ): Promise<void> {
+    const templateId = process.env.WECHAT_TEMPLATE_RENT_REMINDER;
+    if (!followerOpenid || !templateId) return;
+
+    try {
+      const success = await this.wechatNotify.sendTemplateMessage(
+        buildRentReminderMessage(bill, followerOpenid, templateId),
+      );
+      if (!success) {
+        this.logger.error(`首期账单 ${bill.id} 提醒发送失败`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `首期账单 ${bill.id} 提醒发送失败: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * 房东手动预览当前微签文件,用于跳转触发失效时的人工兜底核实。
+   * 只是把微签当前能下载到的文件存一份给房东看,绝不代表签署已确认——
+   * 不修改任务状态、signedPdfUrl、signedAt,也不做 openid 绑定。
+   */
+  /**
+   * M22(GasCan 2026-09-20 要求):已发起(CREATED)的签约任务生成"直接签署二维码",
+   * 房东保存/转发给租客,微信扫码打开签署页,无需经过公众号通知或关注流程。
+   * 二维码按需生成不落库(shortCode 已持久化,二维码内容只是它的URL)。
+   */
+  async getSignQrcode(taskId: number): Promise<{ qrcodeImage: string; signUrl: string }> {
+    const task = await this.prisma.contractSigningTask.findUnique({
+      where: { id: taskId },
+      select: { id: true, status: true, weiqianShortCode: true },
+    });
+    if (!task) throw new NotFoundException('电子签约任务不存在');
+    if (task.status !== 'CREATED') {
+      throw new BadRequestException('仅"等待租客签署"状态的任务可生成签署二维码');
+    }
+    if (!task.weiqianShortCode) {
+      throw new BadRequestException('该任务没有签署短链,无法生成二维码');
+    }
+    const signBaseUrl = (
+      process.env.WEIQIAN_SIGN_BASE_URL || DEFAULT_WEIQIAN_SIGN_BASE_URL
+    ).replace(/\/+$/, '');
+    const signUrl = `${signBaseUrl}/q/${task.weiqianShortCode}`;
+    const qrcodeImage = await QRCode.toDataURL(signUrl, { width: 440, margin: 2 });
+    return { qrcodeImage, signUrl };
+  }
+
+  async previewSignedFile(taskId: number): Promise<{ previewUrl: string }> {
+    await this.previewContractPdf(taskId);
+    return { previewUrl: `/api/v1/leases/contract-signing-tasks/${taskId}/preview` };
+  }
+
+  async previewContractPdf(taskId: number): Promise<Buffer> {
+    const task = await this.prisma.contractSigningTask.findUnique({ where: { id: taskId } });
+    if (!task) throw new NotFoundException('电子签约任务不存在');
+    if (task.status !== 'CREATED' || !task.weiqianBId) {
+      throw new BadRequestException('当前状态不支持预览签署进度');
+    }
+    const pdf = await this.weiqian.downloadSignedFile(task.weiqianBId);
+    if (!pdf) throw new BadRequestException('微签暂未返回文件,可能签署尚未开始,请稍后重试');
+    writeContractPdf(taskId, 'preview', pdf);
+    return pdf;
+  }
+
+  async listTenantContracts(tenantId: number) {
+    return this.prisma.contractSigningTask.findMany({
+      where: { status: 'SIGNED', lease: { tenantId } },
+      select: { id: true, leaseId: true, status: true, createdAt: true, signedAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async downloadSignedContract(taskId: number, tenantId?: number): Promise<Buffer> {
+    const task = await this.prisma.contractSigningTask.findUnique({
+      where: { id: taskId }, include: { lease: true },
+    });
+    // No lease-status filter: historic contracts remain the tenant's own records.
+    if (!task || task.status !== 'SIGNED' || (tenantId !== undefined && task.lease.tenantId !== tenantId)) {
+      throw new NotFoundException('已签合同不存在或无权访问');
+    }
+    try {
+      return readContractPdf(taskId);
+    } catch {
+      // Fail closed for missing/unmigrated/unsafe files; never follow signedPdfUrl or public fallback.
+      throw new NotFoundException('合同文件暂不可用,请联系房东');
+    }
+  }
+
+  private saveSignedPdf(taskId: number, signedPdf: Buffer): string {
+    writeContractPdf(taskId, 'signed', signedPdf);
+    return `/api/v1/leases/contract-signing-tasks/${taskId}/pdf`;
+  }
+
+  private buildPropertyAddress(room: {
+    roomNo: string;
+    building: { name: string; property: { name: string } };
+  }): string {
+    return `${room.building.property.name}${room.building.name}${room.roomNo}室`;
+  }
+
+
+  /** HandoverRecord.checklist JSON → 附件三 ChecklistEntry;兼容旧的 {item,condition} 与新的 {item,quantity,condition} 两种形状 */
+  private toChecklistEntries(value: unknown): ChecklistEntry[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+      .filter((e) => typeof e.item === 'string' && e.item.trim() !== '')
+      .map((e) => ({
+        item: String(e.item),
+        quantity: typeof e.quantity === 'number' && Number.isFinite(e.quantity) ? e.quantity : null,
+        condition: typeof e.condition === 'string' ? e.condition : '',
+      }));
+  }
+
   /** 新签租约 */
   async create(dto: CreateLeaseDto, operatorId: number) {
-    // 检查房间是否空置
-    const room = await this.prisma.room.findUnique({ where: { id: dto.roomId } });
-    if (!room) throw new NotFoundException('房间不存在');
-    if (room.status !== 'VACANT') {
-      throw new BadRequestException('房间不是空置状态,无法签约');
+    return this.prisma.$transaction((tx) => this.createInTransaction(tx, dto, operatorId));
+  }
+
+  private async lockRow(db: Prisma.TransactionClient, table: LockTable, id: number) {
+    const tableName = Prisma.raw(`\`${table}\``);
+    await db.$queryRaw(Prisma.sql`SELECT id FROM ${tableName} WHERE id = ${id} FOR UPDATE`);
+  }
+
+  private async createInTransaction(
+    db: Prisma.TransactionClient,
+    dto: CreateLeaseDto,
+    operatorId: number,
+    roomErrorMessages: { notFound: string; notVacant: string } = {
+      notFound: '房间不存在',
+      notVacant: '房间不是空置状态,无法签约',
+    },
+  ) {
+    // 新签(create)和换租审批(approveTransferRequest → createInTransaction)共用这个
+    // 入口,DTO 里 startDate/endDate 只做了各自的格式校验,没有先后关系校验——不
+    // 拦住的话可以建出结束日早于起租日的租约,账单引擎按 periodStart < endDate
+    // 循环生成账单,倒挂租期下循环体一次都不执行,房间被占用但租金永不出账。
+    if (new Date(dto.endDate) <= new Date(dto.startDate)) {
+      throw new BadRequestException('结束日期必须晚于起始日期');
+    }
+    await this.lockRow(db, 'rooms', dto.roomId);
+    // 原子claim:仅当房间此刻确实空置才转为已租且要求恰好一行受影响,
+    // 避免可重复读快照下"先查后写"让两笔并发操作都误判房间仍空置。
+    const claimedRoom = await db.room.updateMany({
+      where: { id: dto.roomId, status: 'VACANT' },
+      data: { status: 'RENTED' },
+    });
+    if (claimedRoom.count !== 1) {
+      const room = await db.room.findUnique({ where: { id: dto.roomId } });
+      if (!room) throw new NotFoundException(roomErrorMessages.notFound);
+      throw new BadRequestException(roomErrorMessages.notVacant);
     }
 
     // 创建或查找租客
-    let tenant = await this.prisma.tenant.findFirst({
+    let tenant = await db.tenant.findFirst({
       where: { phone: dto.tenantPhone },
     });
     if (!tenant) {
-      tenant = await this.prisma.tenant.create({
+      tenant = await db.tenant.create({
         data: {
           name: dto.tenantName,
           phone: dto.tenantPhone,
           idCard: dto.tenantIdCard,
         },
       });
+    } else if (!tenant.idCard && dto.tenantIdCard) {
+      tenant = await db.tenant.update({
+        where: { id: tenant.id },
+        data: { idCard: dto.tenantIdCard },
+      });
     }
 
     const inviteCode = this.generateInviteCode();
 
-    const lease = await this.prisma.lease.create({
+    const lease = await db.lease.create({
       data: {
         roomId: dto.roomId,
         tenantId: tenant.id,
@@ -137,14 +904,8 @@ export class LeasesService {
       },
     });
 
-    // 房间转已租
-    await this.prisma.room.update({
-      where: { id: dto.roomId },
-      data: { status: 'RENTED' },
-    });
-
     // 押金入台账
-    await this.prisma.depositRecord.create({
+    await db.depositRecord.create({
       data: {
         leaseId: lease.id,
         type: 'RECEIVE',
@@ -158,11 +919,40 @@ export class LeasesService {
 
   /** 退租 */
   async endLease(id: number, dto: EndLeaseDto, operatorId: number) {
-    const lease = await this.prisma.lease.findUnique({ where: { id } });
-    if (!lease) throw new NotFoundException('租约不存在');
-    if (lease.status !== 'ACTIVE') {
+    return this.prisma.$transaction((tx) => this.endLeaseInTransaction(tx, id, dto, operatorId));
+  }
+
+  private async endLeaseInTransaction(
+    db: Prisma.TransactionClient,
+    id: number,
+    dto: EndLeaseDto,
+    operatorId: number,
+  ) {
+    await this.lockRow(db, 'leases', id);
+    // 原子结束租约。在 REPEATABLE READ 下,普通读复用的是本事务首次普通读所建立
+    // 的快照 —— 而那次读(外层申请单的 findUnique)发生在 leases 行加锁之前,所以
+    // 「先读 status 再判断」可能读到过期的 ACTIVE:同一租约上并发的退租审批与
+    // 换租审批会双双通过,重复结算押金并把房间状态改乱。改为带条件的 updateMany,
+    // 由 MySQL 保证同一行只有一个事务能把它从 ACTIVE 结束掉 —— 与本 PR 中房间
+    // 认领(createInTransaction)使用的是同一手法。
+    const claimedLease = await db.lease.updateMany({
+      where: { id, status: 'ACTIVE' },
+      data: {
+        status: 'ENDED',
+        endedAt: new Date(dto.endDate),
+        endReason: dto.endReason,
+      },
+    });
+    if (claimedLease.count !== 1) {
+      const existing = await db.lease.findUnique({ where: { id } });
+      if (!existing) throw new NotFoundException('租约不存在');
       throw new BadRequestException('租约已结束');
     }
+
+    // 认领成功后才读取结算所需的不可变字段(押金、房间);事务总能读到自己的写入,
+    // 因此这里拿到的是加锁之后的当前版本,不再受快照过期影响。
+    const lease = await db.lease.findUnique({ where: { id } });
+    if (!lease) throw new NotFoundException('租约不存在');
 
     // 押金结算
     const depositAmount = Number(lease.deposit);
@@ -170,7 +960,7 @@ export class LeasesService {
       throw new BadRequestException('退还押金不能超过实际押金金额');
     }
     if (dto.depositRefund > 0) {
-      await this.prisma.depositRecord.create({
+      await db.depositRecord.create({
         data: {
           leaseId: id,
           type: 'REFUND',
@@ -181,7 +971,7 @@ export class LeasesService {
     }
     const deductAmount = depositAmount - dto.depositRefund;
     if (deductAmount > 0) {
-      await this.prisma.depositRecord.create({
+      await db.depositRecord.create({
         data: {
           leaseId: id,
           type: 'DEDUCT',
@@ -192,23 +982,15 @@ export class LeasesService {
       });
     }
 
-    // 租约归档
-    const updatedLease = await this.prisma.lease.update({
-      where: { id },
-      data: {
-        status: 'ENDED',
-        endedAt: new Date(dto.endDate),
-        endReason: dto.endReason,
-      },
-    });
+    // 租约归档已在上面的原子认领中完成,这里不再重复写入。
 
     // 房间转空置
-    await this.prisma.room.update({
+    await db.room.update({
       where: { id: lease.roomId },
       data: { status: 'VACANT' },
     });
 
-    return updatedLease;
+    return lease;
   }
 
   /** 续签 */
@@ -218,8 +1000,11 @@ export class LeasesService {
     if (lease.status !== 'ACTIVE') {
       throw new BadRequestException('只能续签活跃租约');
     }
-    if (new Date(dto.newEndDate) <= lease.startDate) {
-      throw new BadRequestException('新到期日不能早于或等于起租日');
+    // 续签语义上只允许延长:原来只挡了"newEndDate<=startDate",没挡"比当前
+    // endDate还短"这种输入,会把接口名叫renew实际执行成静默缩期,账单引擎从
+    // 新endDate之后就停止出账,但租客继续住。
+    if (new Date(dto.newEndDate) <= lease.endDate) {
+      throw new BadRequestException('新到期日必须晚于当前到期日');
     }
 
     return this.prisma.lease.update({
@@ -233,5 +1018,370 @@ export class LeasesService {
 
   private generateInviteCode(): string {
     return Math.random().toString(36).substring(2, 10).toUpperCase();
+  }
+
+  // ========== 租客退租违约申请 ==========
+
+  /** 违约金建议值:月租金 × 该租约签约时约定的违约金月数(没有电子签约记录时用系统默认值) */
+  private async calculateSuggestedPenalty(leaseId: number): Promise<number> {
+    const lease = await this.prisma.lease.findUnique({ where: { id: leaseId } });
+    if (!lease) throw new NotFoundException('租约不存在');
+    const task = await this.prisma.contractSigningTask.findFirst({
+      where: { leaseId, penaltyMonths: { not: null } },
+      orderBy: { createdAt: 'desc' },
+    });
+    const settings = await this.prisma.contractSettings.findFirst();
+    const penaltyMonths = task?.penaltyMonths ?? settings?.defaultPenaltyMonths ?? 1;
+    return Number(lease.rent) * penaltyMonths;
+  }
+
+  async previewTerminationPenalty(leaseId: number, tenantId: number) {
+    const lease = await this.prisma.lease.findUnique({ where: { id: leaseId } });
+    if (!lease || lease.tenantId !== tenantId) throw new NotFoundException('租约不存在');
+    const suggestedPenalty = await this.calculateSuggestedPenalty(leaseId);
+    // M22:退租提交页展示"根据合同约定应提前N日通知"提醒(仅提示,不做系统拦截,GasCan拍板)
+    const settings = await this.prisma.contractSettings.findFirst({
+      orderBy: { id: 'asc' },
+      select: { earlyTerminationNoticeDays: true },
+    });
+    return {
+      suggestedPenalty,
+      earlyTerminationNoticeDays: settings?.earlyTerminationNoticeDays ?? 30,
+    };
+  }
+
+  async createTerminationRequest(
+    leaseId: number,
+    tenantId: number,
+    dto: CreateTerminationRequestDto,
+  ) {
+    const lease = await this.prisma.lease.findUnique({ where: { id: leaseId } });
+    if (!lease || lease.tenantId !== tenantId) throw new NotFoundException('租约不存在');
+    if (lease.status !== 'ACTIVE') throw new BadRequestException('租约已结束');
+    const existing = await this.prisma.leaseTerminationRequest.findFirst({
+      where: { leaseId, status: 'PENDING' },
+    });
+    if (existing) throw new BadRequestException('已有一条待处理的退租申请,请勿重复提交');
+    // 同一租约上不允许同时存在两种待处理申请:它们是不同的行、走不同的行锁,
+    // 两个审批会各自走到结束租约这一步。这是纵深防御,真正的并发保证在
+    // endLeaseInTransaction 的原子认领里。
+    const existingTransfer = await this.prisma.roomTransferRequest.findFirst({
+      where: { leaseId, status: 'PENDING' },
+    });
+    if (existingTransfer) {
+      throw new BadRequestException('该租约已有待处理的换租申请,请先处理后再提交退租申请');
+    }
+
+    const suggestedPenalty = await this.calculateSuggestedPenalty(leaseId);
+    return this.prisma.leaseTerminationRequest.create({
+      data: {
+        leaseId,
+        tenantId,
+        requestedMoveOutDate: new Date(dto.requestedMoveOutDate),
+        reason: dto.reason,
+        suggestedPenalty,
+      },
+    });
+  }
+
+  async listMyTerminationRequests(tenantId: number) {
+    return this.prisma.leaseTerminationRequest.findMany({
+      where: { tenantId },
+      include: { lease: { include: { room: { include: { building: true } } } } },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async listTerminationRequests(status?: string) {
+    return this.prisma.leaseTerminationRequest.findMany({
+      where: status ? { status } : undefined,
+      include: {
+        lease: { include: { room: { include: { building: true } }, tenant: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async approveTerminationRequest(
+    id: number,
+    dto: ApproveTerminationRequestDto,
+    operatorId: number,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockRow(tx, 'lease_termination_requests', id);
+      const req = await tx.leaseTerminationRequest.findUnique({
+        where: { id },
+        include: { lease: true },
+      });
+      if (!req) throw new NotFoundException('申请不存在');
+      if (req.status === 'APPROVED') return req;
+      if (req.status !== 'PENDING') throw new BadRequestException('该申请已处理,不能重复操作');
+
+      const finalPenalty = dto.finalPenalty ?? Number(req.suggestedPenalty);
+      if (finalPenalty < 0) throw new BadRequestException('违约金不能为负数');
+      const deposit = Number(req.lease.deposit);
+      const depositRefund = Math.max(0, deposit - finalPenalty);
+      const shortfall = Math.max(0, finalPenalty - deposit);
+
+      await this.endLeaseInTransaction(
+        tx,
+        req.leaseId,
+        {
+          endDate: req.requestedMoveOutDate.toISOString().split('T')[0],
+          endReason: `租客申请退租(违约金¥${finalPenalty})`,
+          depositRefund,
+          depositDeductReason: `违约金¥${finalPenalty}`,
+        },
+        operatorId,
+      );
+
+      if (shortfall > 0) {
+        await this.createAdHocBill(tx, req.leaseId, '违约金差额', shortfall, req.requestedMoveOutDate);
+      }
+
+      return tx.leaseTerminationRequest.update({
+        where: { id },
+        data: {
+          status: 'APPROVED',
+          finalPenalty,
+          resolvedBy: operatorId,
+          resolvedAt: new Date(),
+        },
+      });
+    });
+  }
+
+  async rejectTerminationRequest(id: number, dto: RejectRequestDto, operatorId: number) {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockRow(tx, 'lease_termination_requests', id);
+      const req = await tx.leaseTerminationRequest.findUnique({ where: { id } });
+      if (!req) throw new NotFoundException('申请不存在');
+      if (req.status === 'REJECTED') return req;
+      if (req.status !== 'PENDING') throw new BadRequestException('该申请已处理,不能重复操作');
+      return tx.leaseTerminationRequest.update({
+        where: { id },
+        data: {
+          status: 'REJECTED',
+          landlordNote: dto.note,
+          resolvedBy: operatorId,
+          resolvedAt: new Date(),
+        },
+      });
+    });
+  }
+
+  /** 生成一张与正常月度账期无关的一次性账单(比如违约金差额),leaseId+periodStart 唯一约束冲突时顺延一天重试。 */
+  private async createAdHocBill(
+    db: Prisma.TransactionClient,
+    leaseId: number,
+    itemName: string,
+    amount: number,
+    dueDate: Date,
+  ) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const periodStart = new Date(dueDate);
+      periodStart.setDate(periodStart.getDate() + attempt);
+      try {
+        const bill = await db.bill.create({
+          data: {
+            leaseId,
+            periodStart,
+            periodEnd: periodStart,
+            dueDate: periodStart,
+            totalAmount: amount,
+          },
+        });
+        await db.billItem.create({
+          data: { billId: bill.id, type: 'OTHER', name: itemName, amount },
+        });
+        return bill;
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2002' &&
+          attempt < 2
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new InternalServerErrorException('生成一次性账单失败');
+  }
+
+  // ========== 租客换租申请 ==========
+
+  async createTransferRequest(leaseId: number, tenantId: number, dto: CreateTransferRequestDto) {
+    const lease = await this.prisma.lease.findUnique({ where: { id: leaseId } });
+    if (!lease || lease.tenantId !== tenantId) throw new NotFoundException('租约不存在');
+    if (lease.status !== 'ACTIVE') throw new BadRequestException('租约已结束');
+    const existing = await this.prisma.roomTransferRequest.findFirst({
+      where: { leaseId, status: 'PENDING' },
+    });
+    if (existing) throw new BadRequestException('已有一条待处理的换租申请,请勿重复提交');
+    // 与 createTerminationRequest 对称:见那里的说明。
+    const existingTermination = await this.prisma.leaseTerminationRequest.findFirst({
+      where: { leaseId, status: 'PENDING' },
+    });
+    if (existingTermination) {
+      throw new BadRequestException('该租约已有待处理的退租申请,请先处理后再提交换租申请');
+    }
+
+    return this.prisma.roomTransferRequest.create({
+      data: {
+        leaseId,
+        tenantId,
+        preferredRoom: dto.preferredRoom,
+        reason: dto.reason,
+      },
+    });
+  }
+
+  async listMyTransferRequests(tenantId: number) {
+    return this.prisma.roomTransferRequest.findMany({
+      where: { tenantId },
+      include: {
+        lease: { include: { room: { include: { building: true } } } },
+        targetRoom: { include: { building: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async listTransferRequests(status?: string) {
+    return this.prisma.roomTransferRequest.findMany({
+      where: status ? { status } : undefined,
+      include: {
+        lease: { include: { room: { include: { building: true } }, tenant: true } },
+        targetRoom: { include: { building: true } },
+        newLease: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async approveTransferRequest(id: number, dto: ApproveTransferRequestDto, operatorId: number) {
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      await this.lockRow(tx, 'room_transfer_requests', id);
+      const req = await tx.roomTransferRequest.findUnique({
+        where: { id },
+        include: { lease: { include: { tenant: true } } },
+      });
+      if (!req) throw new NotFoundException('申请不存在');
+      if (req.status === 'APPROVED' && req.newLeaseId) {
+        const signingTask = await tx.contractSigningTask.findFirst({
+          where: { leaseId: req.newLeaseId, type: 'NEW' },
+          orderBy: { createdAt: 'asc' },
+        });
+        return { request: req, signingTask };
+      }
+      if (req.status !== 'PENDING') throw new BadRequestException('该申请已处理,不能重复操作');
+
+      // 目标房间是否空置由下方 createInTransaction 的原子claim统一裁定,
+      // 这里只取房间号用于旧租约的退租备注,不作为并发裁定依据。
+      const targetRoom = await tx.room.findUnique({ where: { id: dto.targetRoomId } });
+      if (!targetRoom) throw new NotFoundException('目标房间不存在');
+
+      const tenant = req.lease.tenant;
+      const tenantIdCard = dto.tenantIdCard || tenant.idCard;
+      if (!tenantIdCard) {
+        throw new BadRequestException('该租客缺少身份证号,请在审批时通过 tenantIdCard 字段补充');
+      }
+
+      const oldDepositRefund = dto.oldDepositRefund ?? Number(req.lease.deposit);
+      await this.endLeaseInTransaction(
+        tx,
+        req.leaseId,
+        {
+          endDate: new Date().toISOString().split('T')[0],
+          endReason: `换租至${targetRoom.roomNo}`,
+          depositRefund: oldDepositRefund,
+          depositDeductReason: dto.oldDepositDeductReason,
+        },
+        operatorId,
+      );
+
+      const newLease = await this.createInTransaction(
+        tx,
+        {
+          roomId: dto.targetRoomId,
+          tenantName: tenant.name,
+          tenantPhone: tenant.phone,
+          tenantIdCard,
+          startDate: dto.newStartDate || new Date().toISOString().split('T')[0],
+          endDate: dto.newEndDate,
+          rent: dto.newRent,
+          deposit: dto.newDeposit,
+          payCycle: req.lease.payCycle,
+        },
+        operatorId,
+        { notFound: '目标房间不存在', notVacant: '目标房间不是空置状态' },
+      );
+      const signingTask = await this.createContractSigningTaskRecord(
+        newLease.id,
+        { type: 'NEW' },
+        tenant.openid,
+        tx,
+      );
+      const request = await tx.roomTransferRequest.update({
+        where: { id },
+        data: {
+          status: 'APPROVED',
+          targetRoomId: dto.targetRoomId,
+          newLeaseId: newLease.id,
+          resolvedBy: operatorId,
+          resolvedAt: new Date(),
+        },
+      });
+      return { request, signingTask };
+    });
+
+    // All external work begins only after the database transaction committed.
+    // The persisted task is the recovery point for QR/provider failure.
+    if (outcome.signingTask) {
+      try {
+        if (outcome.signingTask.status === 'FOLLOWED') {
+          await this.launchContractSigningTaskInternal(outcome.signingTask.id, {});
+        } else if (
+          outcome.signingTask.status === 'PENDING_SCAN' &&
+          !outcome.signingTask.qrCodeImage
+        ) {
+          const { qrCodeImage } = await this.wechatQrcode.createSceneQrcode(
+            outcome.signingTask.sceneValue,
+          );
+          await this.prisma.contractSigningTask.update({
+            where: { id: outcome.signingTask.id },
+            data: { qrCodeImage },
+          });
+        }
+      } catch (error) {
+        this.logger.warn(
+          `换租已提交,签约任务 ${outcome.signingTask.id} 等待恢复: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
+    return outcome.request;
+  }
+
+  async rejectTransferRequest(id: number, dto: RejectRequestDto, operatorId: number) {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockRow(tx, 'room_transfer_requests', id);
+      const req = await tx.roomTransferRequest.findUnique({ where: { id } });
+      if (!req) throw new NotFoundException('申请不存在');
+      if (req.status === 'REJECTED') return req;
+      if (req.status !== 'PENDING') throw new BadRequestException('该申请已处理,不能重复操作');
+      return tx.roomTransferRequest.update({
+        where: { id },
+        data: {
+          status: 'REJECTED',
+          landlordNote: dto.note,
+          resolvedBy: operatorId,
+          resolvedAt: new Date(),
+        },
+      });
+    });
   }
 }

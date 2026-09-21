@@ -1,46 +1,22 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
-import * as jwt from 'jsonwebtoken';
+import { Injectable } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
+import { LeasesService } from '../leases/leases.service';
+import { MaintenanceService } from '../maintenance/maintenance.service';
+import {
+  CreateTerminationRequestDto,
+  CreateTransferRequestDto,
+} from '../leases/leases.dto';
+import { CreateRepairRequestDto } from '../maintenance/maintenance.dto';
 
 @Injectable()
 export class TenantApiService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  /** 邀请码绑定租约,成功后返回刷新的 JWT */
-  async bindInviteCode(openid: string, inviteCode: string) {
-    const lease = await this.prisma.lease.findUnique({
-      where: { inviteCode },
-      include: { tenant: true },
-    });
-    if (!lease) throw new NotFoundException('邀请码无效');
-    if (lease.status !== 'ACTIVE') {
-      throw new BadRequestException('该租约已结束');
-    }
-
-    // 检查 openid 是否已绑定其他租客
-    const existingTenant = await this.prisma.tenant.findUnique({ where: { openid } });
-    if (existingTenant && existingTenant.id !== lease.tenantId) {
-      throw new BadRequestException('该微信号已绑定其他租客,请联系房东合并');
-    }
-
-    // 将 openid 绑定到租客
-    const tenant = await this.prisma.tenant.update({
-      where: { id: lease.tenantId },
-      data: { openid },
-    });
-
-    // 签发包含 tenantId 的新 JWT
-    const jwtSecret = process.env.JWT_SECRET || 'dev-secret';
-    const token = jwt.sign(
-      { sub: tenant.id, openid, role: 'tenant', tenantId: tenant.id },
-      jwtSecret,
-      { expiresIn: 7 * 24 * 60 * 60 },
-    );
-
-    return { message: '绑定成功', tenantId: tenant.id, leaseId: lease.id, token };
-  }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly leasesService: LeasesService,
+    private readonly maintenanceService: MaintenanceService,
+  ) {}
 
   /** 获取收款码图片 URL */
   async getQrcodeUrl() {
@@ -95,5 +71,37 @@ export class TenantApiService {
       include: { room: { include: { building: true } } },
       orderBy: { startDate: 'desc' },
     });
+  }
+
+  createRepairRequest(leaseId: number, tenantId: number, dto: CreateRepairRequestDto) {
+    return this.maintenanceService.createRepairRequest(leaseId, tenantId, dto);
+  }
+
+  listMyRepairRequests(tenantId: number) {
+    return this.maintenanceService.listMyRepairRequests(tenantId);
+  }
+
+  previewTerminationPenalty(leaseId: number, tenantId: number) {
+    return this.leasesService.previewTerminationPenalty(leaseId, tenantId);
+  }
+
+  createTerminationRequest(
+    leaseId: number,
+    tenantId: number,
+    dto: CreateTerminationRequestDto,
+  ) {
+    return this.leasesService.createTerminationRequest(leaseId, tenantId, dto);
+  }
+
+  listMyTerminationRequests(tenantId: number) {
+    return this.leasesService.listMyTerminationRequests(tenantId);
+  }
+
+  createTransferRequest(leaseId: number, tenantId: number, dto: CreateTransferRequestDto) {
+    return this.leasesService.createTransferRequest(leaseId, tenantId, dto);
+  }
+
+  listMyTransferRequests(tenantId: number) {
+    return this.leasesService.listMyTransferRequests(tenantId);
   }
 }

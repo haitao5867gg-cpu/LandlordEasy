@@ -30,12 +30,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { usePropertyStore } from './stores/property';
+import { useAuthStore } from './stores/auth';
 
 const route = useRoute();
 const propertyStore = usePropertyStore();
+const authStore = useAuthStore();
 const activeTab = ref(0);
 const showActionSheet = ref(false);
 
@@ -68,9 +70,15 @@ function onSelectProperty(_: any, index: number) {
   showActionSheet.value = false;
 }
 
-onMounted(() => {
-  propertyStore.fetchProperties();
-});
+// 未登录时不拉公寓列表——否则登录页冷启动就发请求,401被拦截器弹"缺少认证令牌"toast;
+// 登录成功 token 写入后再拉取
+watch(
+  () => authStore.token,
+  (token) => {
+    if (token) void propertyStore.fetchProperties();
+  },
+  { immediate: true },
+);
 </script>
 
 <style>

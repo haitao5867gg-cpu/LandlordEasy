@@ -21,6 +21,10 @@ model Landlord {
   payments        Payment[]        @relation("ConfirmedBy")
   expenses        Expense[]
   handoverRecords HandoverRecord[]
+  repairRequests            RepairRequest[]
+  terminationRequests       LeaseTerminationRequest[]
+  transferRequests          RoomTransferRequest[]
+  announcements             Announcement[]
 
   @@map("landlords")
 }
@@ -33,7 +37,8 @@ model Property {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  buildings Building[]
+  buildings     Building[]
+  announcements Announcement[]
 
   @@map("properties")
 }
@@ -91,6 +96,8 @@ model Room {
   leases             Lease[]
   maintenanceRecords MaintenanceRecord[]
   expenses           Expense[]           @relation("RoomExpense")
+  repairRequests     RepairRequest[]
+  transferRequestsAsTarget RoomTransferRequest[] @relation("TargetRoomTransfer")
 
   @@unique([buildingId, roomNo])
   @@map("rooms")
@@ -98,16 +105,20 @@ model Room {
 
 // ========== 租客 ==========
 model Tenant {
-  id        Int      @id @default(autoincrement())
-  openid    String?  @unique
-  name      String
-  phone     String
-  idCard    String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             Int      @id @default(autoincrement())
+  openid         String?  @unique
+  bindSceneValue Int?     @unique
+  name           String
+  phone          String
+  idCard         String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   leases       Lease[]
   reminderLogs ReminderLog[]
+  repairRequests      RepairRequest[]
+  terminationRequests LeaseTerminationRequest[]
+  transferRequests    RoomTransferRequest[]
 
   @@map("tenants")
 }
@@ -138,8 +149,59 @@ model Lease {
   depositRecords       DepositRecord[]
   handoverRecords      HandoverRecord[]
   contractSigningTasks ContractSigningTask[]
+  coOccupants          CoOccupant[]
+  repairRequests       RepairRequest[]
+  terminationRequests  LeaseTerminationRequest[]
+  transferRequestsAsOld RoomTransferRequest[] @relation("OldLeaseTransfer")
+  transferRequestsAsNew RoomTransferRequest[] @relation("NewLeaseTransfer")
 
   @@map("leases")
+}
+
+// ========== 合同签约配置 ==========
+model ContractSettings {
+  id                     Int      @id @default(autoincrement())
+  landlordName           String
+  landlordIdCard         String
+  landlordPhone          String
+  defaultPenaltyMonths   Int      @default(1)
+  defaultOverdueDays     Int      @default(5)
+  defaultCleaningFee     Decimal  @default(110) @db.Decimal(10, 2)
+  defaultRenewNoticeDays Int      @default(30)
+  // M22 新增:新标准合同模板的全局配置项(GasCan 2026-09-20拍板,跟提醒参数一样放设置页可改)
+  payeeName              String   @default("占秀英") // 收款人姓名
+  defaultItemChecklist   Json? // [{item, quantity}] 附件三默认物品清单(全局一份)
+  waterPrice             Decimal  @default(8) @db.Decimal(10, 2) // 水费单价元/吨,合同附件五(GasCan 2026-09-21:即充即用仅单价进合同)
+  waterFeeRule           String   @default("以实际发生为准") @db.VarChar(200)
+  electricityPrice       Decimal  @default(1.3) @db.Decimal(10, 2) // 电费单价元/度
+  electricityFeeRule     String   @default("以实际发生为准") @db.VarChar(200)
+  gasFeeRule             String   @default("以实际发生为准") @db.VarChar(200)
+  otherFeeRule           String   @default("以实际发生为准") @db.VarChar(200)
+  continuousStayDays     Int      @default(30) // 连续居住超过N日视为长期同住人
+  cumulativeStayDays     Int      @default(90) // 累计居住超过N日视为长期同住人
+  abandonedPropertyDays  Int      @default(30) // 遗留物保管天数
+  nonRenewalNoticeDays   Int      @default(30) // 不续租通知天数
+  earlyTerminationNoticeDays Int  @default(30) // 提前退租通知天数(仅提醒不拦截)
+  depositRefundWorkDays  Int      @default(3) // 押金退还工作日数
+  electronicNoticeHours  Int      @default(24) // 电子通知视为送达的小时数
+  updatedAt              DateTime @updatedAt
+
+  @@map("contract_settings")
+}
+
+// ========== 共同居住人(M22,备案性质,无审批流程;合同附件二数据来源) ==========
+model CoOccupant {
+  id       Int      @id @default(autoincrement())
+  leaseId  Int
+  name     String
+  idCard   String?  @db.VarChar(18) // 完整身份证号(2026-09-20晚GasCan追加:必填完整号;列可空,应用层强制,与Tenant.idCard同款)
+  phone    String?  @db.VarChar(20) // 必填(2026-09-20晚GasCan追加;列可空,应用层强制)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  lease Lease @relation(fields: [leaseId], references: [id])
+
+  @@map("co_occupants")
 }
 
 // ========== 合同电子签约记录 ==========
@@ -153,8 +215,18 @@ model ContractSigningTask {
   electricityMeterReading Decimal?  @db.Decimal(10, 2)
   gasMeterReading         Decimal?  @db.Decimal(10, 2)
   facilities              Json?     // [{name, has}]
-  status                  String    @default("PENDING_SCAN") // PENDING_SCAN / CREATED / SIGNED / EXPIRED
-  tencentFlowId           String?
+  extraTerms              String?   @db.Text
+  penaltyMonths           Int?
+  overdueToleranceDays    Int?
+  cleaningFee             Decimal?  @db.Decimal(10, 2)
+  renewalNoticeDays       Int?
+  status                  String    @default("PENDING_SCAN") // PENDING_SCAN / FOLLOWED / LAUNCHING / CREATED / SIGNED / EXPIRED
+  followerOpenid          String?
+  weiqianBId              String?
+  weiqianShortCode        String?
+  // 落地页callback用的不可猜测token,取代原来直接用task自增id当parm——task.id
+  // 是可枚举的,不能作为"这个回调请求真的来自微签重定向"的判断依据。
+  signCallbackToken       String?   @unique
   signedPdfUrl            String?   @db.Text
   signedAt                DateTime?
   createdAt               DateTime  @default(now())
@@ -325,4 +397,92 @@ model AuditLog {
   operator Landlord @relation(fields: [operatorId], references: [id])
 
   @@map("audit_logs")
+}
+
+// ========== 租客在线报修 ==========
+model RepairRequest {
+  id           Int       @id @default(autoincrement())
+  leaseId      Int
+  tenantId     Int
+  roomId       Int
+  description  String    @db.Text
+  status       String    @default("SUBMITTED") // SUBMITTED / IN_PROGRESS / RESOLVED
+  landlordNote String?   @db.Text
+  resolvedCost Decimal?  @db.Decimal(10, 2)
+  resolvedBy   Int?
+  resolvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  lease    Lease     @relation(fields: [leaseId], references: [id])
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  room     Room      @relation(fields: [roomId], references: [id])
+  resolver Landlord? @relation(fields: [resolvedBy], references: [id])
+
+  @@map("repair_requests")
+}
+
+// ========== 租客退租违约申请 ==========
+model LeaseTerminationRequest {
+  id                   Int       @id @default(autoincrement())
+  leaseId              Int
+  tenantId             Int
+  requestedMoveOutDate DateTime  @db.Date
+  reason               String?   @db.Text
+  status               String    @default("PENDING") // PENDING / APPROVED / REJECTED
+  suggestedPenalty     Decimal   @db.Decimal(10, 2)
+  finalPenalty         Decimal?  @db.Decimal(10, 2)
+  landlordNote         String?   @db.Text
+  resolvedBy           Int?
+  resolvedAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  lease    Lease     @relation(fields: [leaseId], references: [id])
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  resolver Landlord? @relation(fields: [resolvedBy], references: [id])
+
+  @@map("lease_termination_requests")
+}
+
+// ========== 租客换租申请 ==========
+model RoomTransferRequest {
+  id            Int       @id @default(autoincrement())
+  leaseId       Int
+  tenantId      Int
+  preferredRoom String?
+  reason        String?   @db.Text
+  status        String    @default("PENDING") // PENDING / APPROVED / REJECTED
+  targetRoomId  Int?
+  newLeaseId    Int?      @unique
+  landlordNote  String?   @db.Text
+  resolvedBy    Int?
+  resolvedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  lease      Lease     @relation("OldLeaseTransfer", fields: [leaseId], references: [id])
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
+  targetRoom Room?     @relation("TargetRoomTransfer", fields: [targetRoomId], references: [id])
+  newLease   Lease?    @relation("NewLeaseTransfer", fields: [newLeaseId], references: [id])
+  resolver   Landlord? @relation(fields: [resolvedBy], references: [id])
+
+  @@map("room_transfer_requests")
+}
+
+// ========== 房东群发通知 ==========
+model Announcement {
+  id           Int      @id @default(autoincrement())
+  title        String
+  content      String   @db.Text
+  propertyId   Int?
+  createdBy    Int
+  successCount Int      @default(0)
+  failCount    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  property Property? @relation(fields: [propertyId], references: [id])
+  creator  Landlord  @relation(fields: [createdBy], references: [id])
+
+  @@map("announcements")
 }

@@ -8,11 +8,13 @@ import { MockWechatPayService } from './gateways/mock-wechat-pay.service';
 import { RealWechatPayService } from './gateways/real-wechat-pay.service';
 import { MockAlipayService } from './gateways/mock-alipay.service';
 import { RealAlipayService } from './gateways/real-alipay.service';
+import {
+  resolveAlipayMode,
+  resolveWechatPayMode,
+} from '../config/startup-config';
 
-const wechatPayMode =
-  process.env.WECHAT_PAY_MODE || process.env.PAYMENT_MODE || 'mock';
-const alipayMode =
-  process.env.ALIPAY_MODE || process.env.PAYMENT_MODE || 'mock';
+const wechatPayMode = resolveWechatPayMode();
+const alipayMode = resolveAlipayMode();
 
 const wechatPayProvider = {
   provide: WECHAT_PAY_SERVICE,

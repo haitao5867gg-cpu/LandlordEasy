@@ -14,6 +14,7 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "test": "jest",
     "test:watch": "jest --watch",
+    "test:mysql-integration": "jest --testPathPattern=mysql-integration.spec.ts --runInBand --setupFiles ./testing/mysql-integration/require-opt-in.ts",
     "test:cov": "jest --coverage",
     "test:e2e": "ts-node src/scripts/e2e-test.ts"
   },
@@ -28,8 +29,10 @@
     "@prisma/client": "^6.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "express": "^4.22.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
+    "puppeteer-core": "24.31.0",
     "qrcode": "1.5.4",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"

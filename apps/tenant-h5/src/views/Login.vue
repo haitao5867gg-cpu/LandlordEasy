@@ -20,11 +20,9 @@
       </div>
     </template>
 
-    <!-- 绑定邀请码(登录后、未绑定时显示) -->
+    <!-- 未绑定(正常情况下不会出现,绑定应该在关注公众号那一步就已完成) -->
     <van-cell-group v-if="loggedIn && !authStore.bound" inset>
-      <p style="padding:16px;color:#666;">首次使用请输入房东提供的邀请码绑定租约</p>
-      <van-field v-model="inviteCode" label="邀请码" placeholder="输入邀请码" />
-      <div style="padding:16px;"><van-button type="primary" block :loading="bindLoading" @click="handleBind">绑定</van-button></div>
+      <p style="padding:16px;color:#666;">尚未绑定账号,请联系房东获取绑定二维码,微信扫码关注公众号完成绑定</p>
     </van-cell-group>
 
     <p v-if="authError" class="error-text">{{ authError }}</p>
@@ -43,9 +41,7 @@ const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
 const openid = ref('');
-const inviteCode = ref('');
 const loginLoading = ref(false);
-const bindLoading = ref(false);
 const loggedIn = ref(!!authStore.token);
 const authError = ref('');
 
@@ -109,18 +105,6 @@ async function handleWechatCallback(code: string) {
   } catch {
     authError.value = '登录失败,请重试';
   } finally { loginLoading.value = false; }
-}
-
-async function handleBind() {
-  if (!inviteCode.value) { showToast('请输入邀请码'); return; }
-  bindLoading.value = true;
-  try {
-    const res = await http.post('/tenant/bind', { inviteCode: inviteCode.value }) as any;
-    if (res.token) authStore.setToken(res.token);
-    authStore.setBound(true);
-    showToast('绑定成功');
-    router.push('/');
-  } finally { bindLoading.value = false; }
 }
 </script>
 

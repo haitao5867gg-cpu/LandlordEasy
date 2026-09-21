@@ -7,9 +7,13 @@ import {
   IsArray,
   IsBoolean,
   IsIn,
+  IsNotEmpty,
+  Length,
   ValidateNested,
   Min,
+  Matches,
 } from 'class-validator';
+import { ID_CARD_PATTERN, PHONE_PATTERN } from '../common/constants/validation-patterns';
 import { Type } from 'class-transformer';
 
 class FeeItemDto {
@@ -30,11 +34,12 @@ export class CreateLeaseDto {
   tenantName!: string;
 
   @IsString()
+  @Matches(PHONE_PATTERN, { message: '手机号格式不正确' })
   tenantPhone!: string;
 
-  @IsOptional()
   @IsString()
-  tenantIdCard?: string;
+  @Matches(ID_CARD_PATTERN, { message: '身份证号格式不正确' })
+  tenantIdCard!: string;
 
   @IsDateString()
   startDate!: string;
@@ -106,25 +111,161 @@ class ContractSigningFacilityDto {
   has!: boolean;
 }
 
+export class LaunchContractSigningTaskDto {
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  penaltyMonths?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  overdueToleranceDays?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  cleaningFee?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  renewalNoticeDays?: number;
+}
+
+export class CreateTerminationRequestDto {
+  @IsDateString()
+  requestedMoveOutDate!: string;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
+export class ApproveTerminationRequestDto {
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  finalPenalty?: number;
+}
+
+export class RejectRequestDto {
+  @IsOptional()
+  @IsString()
+  note?: string;
+}
+
+export class CreateTransferRequestDto {
+  @IsOptional()
+  @IsString()
+  preferredRoom?: string;
+
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
+export class ApproveTransferRequestDto {
+  @IsInt()
+  targetRoomId!: number;
+
+  @IsNumber()
+  @Min(0)
+  newRent!: number;
+
+  @IsNumber()
+  @Min(0)
+  newDeposit!: number;
+
+  @IsDateString()
+  newEndDate!: string;
+
+  @IsOptional()
+  @IsDateString()
+  newStartDate?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(ID_CARD_PATTERN, { message: '身份证号格式不正确' })
+  tenantIdCard?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  oldDepositRefund?: number;
+
+  @IsOptional()
+  @IsString()
+  oldDepositDeductReason?: string;
+}
+
 export class CreateContractSigningTaskDto {
   @IsIn(['NEW', 'RENEW'])
   type!: 'NEW' | 'RENEW';
 
-  @IsOptional()
-  @IsNumber()
-  waterMeterReading?: number;
 
-  @IsOptional()
-  @IsNumber()
-  electricityMeterReading?: number;
-
-  @IsOptional()
-  @IsNumber()
-  gasMeterReading?: number;
 
   @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ContractSigningFacilityDto)
   facilities?: ContractSigningFacilityDto[];
+
+  @IsOptional()
+  @IsString()
+  extraTerms?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  penaltyMonths?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  overdueToleranceDays?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  cleaningFee?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  renewalNoticeDays?: number;
+}
+
+// ===== 共同居住人(M22,备案性质) =====
+
+export class CreateCoOccupantDto {
+  @IsString()
+  @IsNotEmpty()
+  @Length(1, 30)
+  name!: string;
+
+  // GasCan 2026-09-20晚追加:身份证必须填完整号码(15或18位含X),手机号必填
+  @IsString()
+  @Matches(ID_CARD_PATTERN)
+  idCard!: string;
+
+  @IsString()
+  @Matches(PHONE_PATTERN)
+  phone!: string;
+}
+
+export class UpdateCoOccupantDto {
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @Length(1, 30)
+  name?: string;
+
+  @IsOptional()
+  @Matches(ID_CARD_PATTERN)
+  idCard?: string;
+
+  @IsOptional()
+  @Matches(PHONE_PATTERN)
+  phone?: string;
 }

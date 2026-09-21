@@ -19,7 +19,7 @@
         <van-cell v-if="currentDebt > 0" title="当前欠费" :value="`¥${currentDebt.toFixed(2)}`" value-class="debt-value" />
       </van-cell-group>
 
-      <van-tabs v-model:active="activeTab">
+      <van-tabs v-model:active="activeTab" class="detail-tabs">
         <van-tab title="租约">
           <van-empty v-if="!room.leases?.length" description="暂无租约" />
           <van-cell-group v-else inset>
@@ -97,4 +97,13 @@ onMounted(async () => {
 
 <style scoped>
 .page-loading { display: flex; justify-content: center; padding: 60px; }
+/* tabs卡片化:与上方inset信息卡同语言——左右留边、圆角、不紧贴 */
+.detail-tabs {
+  margin: 12px 16px 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.detail-tabs :deep(.van-tabs__content) {
+  padding-top: 12px;
+}
 </style>

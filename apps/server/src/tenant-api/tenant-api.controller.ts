@@ -1,25 +1,41 @@
-import { Controller, Get, Post, Body, UseGuards, Req, BadRequestException } from '@nestjs/common';
-import { Request } from 'express';
-import { IsString } from 'class-validator';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Body,
+  UseGuards,
+  ParseIntPipe,
+  Req,
+  Res,
+  BadRequestException,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+import { LeasesService } from '../leases/leases.service';
+import { sendContractPdf } from '../leases/send-contract-pdf';
 import { TenantGuard } from '../auth/guards/tenant.guard';
 import { TenantApiService } from './tenant-api.service';
 import { JwtPayload } from '../auth/auth.service';
-
-class BindInviteCodeDto {
-  @IsString()
-  inviteCode!: string;
-}
+import { CreateRepairRequestDto } from '../maintenance/maintenance.dto';
+import {
+  CreateTerminationRequestDto,
+  CreateTransferRequestDto,
+} from '../leases/leases.dto';
 
 @Controller('tenant')
 export class TenantApiController {
-  constructor(private readonly tenantApiService: TenantApiService) {}
+  constructor(private readonly tenantApiService: TenantApiService, private readonly leasesService: LeasesService) {}
 
-  @Post('bind')
+  @Get('contracts')
   @UseGuards(TenantGuard)
-  async bindInviteCode(@Body() dto: BindInviteCodeDto, @Req() req: Request) {
-    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
-    if (!user.openid) throw new BadRequestException('缺少openid');
-    return this.tenantApiService.bindInviteCode(user.openid, dto.inviteCode);
+  listContracts(@Req() req: Request) {
+    return this.leasesService.listTenantContracts(this.getTenantId(req));
+  }
+
+  @Get('contracts/:id/pdf')
+  @UseGuards(TenantGuard)
+  async downloadContract(@Param('id', ParseIntPipe) id: number, @Req() req: Request, @Res() res: Response) {
+    sendContractPdf(res, await this.leasesService.downloadSignedContract(id, this.getTenantId(req)), id, 'signed');
   }
 
   @Get('bills')
@@ -43,5 +59,65 @@ export class TenantApiController {
   @UseGuards(TenantGuard)
   async getQrcode() {
     return this.tenantApiService.getQrcodeUrl();
+  }
+
+  private getTenantId(req: Request): number {
+    const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
+    if (!user.tenantId) throw new BadRequestException('未绑定租约');
+    return user.tenantId;
+  }
+
+  @Post('leases/:id/repair-requests')
+  @UseGuards(TenantGuard)
+  createRepairRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateRepairRequestDto,
+    @Req() req: Request,
+  ) {
+    return this.tenantApiService.createRepairRequest(id, this.getTenantId(req), dto);
+  }
+
+  @Get('repair-requests')
+  @UseGuards(TenantGuard)
+  listMyRepairRequests(@Req() req: Request) {
+    return this.tenantApiService.listMyRepairRequests(this.getTenantId(req));
+  }
+
+  @Get('leases/:id/termination-penalty-preview')
+  @UseGuards(TenantGuard)
+  previewTerminationPenalty(@Param('id', ParseIntPipe) id: number, @Req() req: Request) {
+    return this.tenantApiService.previewTerminationPenalty(id, this.getTenantId(req));
+  }
+
+  @Post('leases/:id/termination-requests')
+  @UseGuards(TenantGuard)
+  createTerminationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateTerminationRequestDto,
+    @Req() req: Request,
+  ) {
+    return this.tenantApiService.createTerminationRequest(id, this.getTenantId(req), dto);
+  }
+
+  @Get('termination-requests')
+  @UseGuards(TenantGuard)
+  listMyTerminationRequests(@Req() req: Request) {
+    return this.tenantApiService.listMyTerminationRequests(this.getTenantId(req));
+  }
+
+  @Post('leases/:id/transfer-requests')
+  @UseGuards(TenantGuard)
+  createTransferRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateTransferRequestDto,
+    @Req() req: Request,
+  ) {
+    return this.tenantApiService.createTransferRequest(id, this.getTenantId(req), dto);
+  }
+
+  @Get('transfer-requests')
+  @UseGuards(TenantGuard)
+  listMyTransferRequests(@Req() req: Request) {
+    return this.tenantApiService.listMyTransferRequests(this.getTenantId(req));
   }
 }

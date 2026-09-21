@@ -9,7 +9,7 @@ const tenantPhone = `139${runId}`;
 const tenantOpenid = `e2e_tenant_${runId}`;
 const rent = 1357;
 
-let inviteCode = '';
+let bindSceneValue = 0;
 let createdLeaseId = 0;
 
 function waitForApi(
@@ -102,18 +102,23 @@ test.describe.serial('核心收租流程', () => {
     await fieldInput(page, '押金').fill(String(rent));
 
     const createLeasePromise = waitForApi(page, 'POST', '/leases');
+    const bindQrcodePromise = waitForApi(page, 'POST', /\/leases\/\d+\/bind-qrcode$/);
     await page.getByRole('button', { name: '确认签约' }).click();
-    const lease = await expectApiSuccess<{ id: number; inviteCode: string }>(
-      await createLeasePromise,
-    );
+    const lease = await expectApiSuccess<{ id: number }>(await createLeasePromise);
     createdLeaseId = lease.id;
-    inviteCode = lease.inviteCode;
     expect(createdLeaseId).toBeGreaterThan(0);
-    expect(inviteCode).toMatch(/^[A-Z0-9]{8}$/);
 
     const successDialog = page.locator('.van-dialog').filter({ hasText: '签约成功' });
     await expect(successDialog).toBeVisible();
-    await expect(successDialog.locator('h2')).toHaveText(inviteCode);
+    const bindQrcode = await expectApiSuccess<{ qrCodeImage: string; sceneValue: number }>(
+      await bindQrcodePromise,
+    );
+    bindSceneValue = bindQrcode.sceneValue;
+    expect(bindSceneValue).toBeGreaterThan(0);
+    await expect(successDialog.locator('.van-image img')).toHaveAttribute(
+      'src',
+      /^data:image/,
+    );
     await successDialog.getByRole('button', { name: '完成' }).click();
     await expect(successDialog).not.toBeVisible();
 
@@ -154,9 +159,24 @@ test.describe.serial('核心收租流程', () => {
     await expect(page.locator('.van-notice-bar')).toBeVisible();
   });
 
-  test('tenant-h5: mock 登录、邀请码绑定并看到新租约账单', async ({ page }) => {
-    expect(inviteCode, '房东流程应先生成邀请码').not.toBe('');
+  test('tenant-h5: 扫码关注自动绑定(webhook模拟)+ mock 登录看到新租约账单', async ({
+    page,
+    request,
+  }) => {
+    expect(bindSceneValue, '房东流程应先生成绑定二维码').toBeGreaterThan(0);
     expect(createdLeaseId, '房东流程应先创建租约').toBeGreaterThan(0);
+
+    // 模拟微信"扫码关注"推送的事件 webhook,不经过任何 UI——这就是租客真实
+    // 扫码时会发生的服务器端效果,替代原来"输入邀请码绑定"的手动步骤。
+    const followEventXml =
+      `<xml><FromUserName><![CDATA[${tenantOpenid}]]></FromUserName>` +
+      `<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>` +
+      `<EventKey><![CDATA[qrscene_${bindSceneValue}]]></EventKey></xml>`;
+    const eventResponse = await request.post(`http://127.0.0.1:3000${apiPrefix}/wechat/event`, {
+      headers: { 'Content-Type': 'text/xml' },
+      data: followEventXml,
+    });
+    expect(eventResponse.ok()).toBeTruthy();
 
     await page.goto(`${tenantBaseUrl}/login`);
 
@@ -165,21 +185,14 @@ test.describe.serial('核心收租流程', () => {
     await expect(page.locator('.van-button')).toBeVisible();
 
     const loginPromise = waitForApi(page, 'POST', '/auth/tenant/login');
+    const myBillsPromise = waitForApi(page, 'GET', '/tenant/bills');
     await page.getByPlaceholder('输入 mock_openid').fill(tenantOpenid);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+
+    // 扫码关注已经在服务端完成绑定,登录应直接返回 bound:true,不再出现
+    // 任何"未绑定"提示或需要额外操作。
     const login = await expectApiSuccess<{ bound: boolean }>(await loginPromise);
-    expect(login.bound).toBe(false);
-
-    await expect(page.getByText('首次使用请输入房东提供的邀请码绑定租约')).toBeVisible();
-    await page.getByPlaceholder('输入邀请码').fill(inviteCode);
-
-    const bindPromise = waitForApi(page, 'POST', '/tenant/bind');
-    const myBillsPromise = waitForApi(page, 'GET', '/tenant/bills');
-    await page.getByRole('button', { name: '绑定', exact: true }).click();
-
-    const bind = await expectApiSuccess<{ leaseId: number; token: string }>(await bindPromise);
-    expect(bind.leaseId).toBe(createdLeaseId);
-    expect(bind.token).toBeTruthy();
+    expect(login.bound).toBe(true);
 
     const leases = await expectApiSuccess<
       Array<{ id: number; bills: Array<{ totalAmount: string | number }> }>
