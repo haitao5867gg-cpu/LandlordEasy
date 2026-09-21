@@ -40,7 +40,10 @@ describe('WechatController contract signing events', () => {
       },
     } as unknown as jest.Mocked<PrismaService>;
     process.env.SERVER_PUBLIC_BASE_URL = 'https://dev.landlordeasy.cn/api/v1';
-    customerService = { sendTextMessage: jest.fn() };
+    customerService = {
+      sendTextMessage: jest.fn(),
+      sendNewsMessage: jest.fn(),
+    };
     leasesService = {
       launchContractSigningTask: jest.fn(),
       tryConfirmSigned: jest.fn(),
@@ -91,6 +94,7 @@ describe('WechatController contract signing events', () => {
     });
     (prisma.contractSigningTask.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
     customerService.sendTextMessage.mockResolvedValue(true);
+    customerService.sendNewsMessage.mockResolvedValue(true);
     const res = response();
 
     await postEvent(xml, res.value);
@@ -181,7 +185,7 @@ describe('WechatController contract signing events', () => {
   it('场景值匹配租客绑定场景值时,首次关注自动绑定 openid 并推送链接', async () => {
     (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue(null);
     (prisma.tenant.findFirst as jest.Mock).mockResolvedValue({ id: 5, openid: null });
-    customerService.sendTextMessage.mockResolvedValue(true);
+    customerService.sendNewsMessage.mockResolvedValue(true);
     const res = response();
 
     await postEvent(
@@ -199,6 +203,35 @@ describe('WechatController contract signing events', () => {
       where: { id: 5, openid: null },
       data: { openid: 'openid-tenant' },
     });
+    // 主路径:图文卡片(标题+租客端链接),不再发纯文字
+    expect(customerService.sendNewsMessage).toHaveBeenCalledWith(
+      'openid-tenant',
+      expect.objectContaining({
+        title: '绑定成功',
+        url: expect.stringContaining('https://dev.landlordeasy.cn/tenant/'),
+      }),
+    );
+    expect(customerService.sendTextMessage).not.toHaveBeenCalledWith(
+      'openid-tenant',
+      expect.stringContaining('绑定成功'),
+    );
+  });
+
+  it('图文卡片发送失败时回退纯文字,保证绑定提示不丢', async () => {
+    (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue(null);
+    (prisma.tenant.findFirst as jest.Mock).mockResolvedValue({ id: 5, openid: null });
+    (prisma.tenant.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    customerService.sendNewsMessage.mockResolvedValueOnce(false);
+    customerService.sendTextMessage.mockResolvedValue(true);
+    const res = response();
+
+    await postEvent(
+      '<xml><FromUserName><![CDATA[openid-tenant]]></FromUserName>' +
+        '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>' +
+        '<EventKey><![CDATA[qrscene_321]]></EventKey></xml>',
+      res.value,
+    );
+
     expect(customerService.sendTextMessage).toHaveBeenCalledWith(
       'openid-tenant',
       expect.stringContaining('https://dev.landlordeasy.cn/tenant/'),

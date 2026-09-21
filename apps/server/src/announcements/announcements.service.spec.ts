@@ -12,7 +12,7 @@ describe('AnnouncementsService', () => {
       tenant: { findMany: jest.fn() },
       announcement: { create: jest.fn() },
     } as unknown as jest.Mocked<PrismaService>;
-    wechatCustomer = { sendTextMessage: jest.fn() };
+    wechatCustomer = { sendTextMessage: jest.fn(), sendNewsMessage: jest.fn() };
     service = new AnnouncementsService(prisma, wechatCustomer);
   });
 

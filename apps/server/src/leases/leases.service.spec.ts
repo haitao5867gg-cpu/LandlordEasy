@@ -116,7 +116,7 @@ describe('LeasesService contract signing tasks', () => {
       createEachSignTask: jest.fn(),
       downloadSignedFile: jest.fn(),
     };
-    wechatCustomer = { sendTextMessage: jest.fn() };
+    wechatCustomer = { sendTextMessage: jest.fn(), sendNewsMessage: jest.fn() };
     wechatNotify = { sendTemplateMessage: jest.fn().mockResolvedValue(true) };
     billEngine = {
       generateBillsForLease: jest.fn().mockResolvedValue(0),

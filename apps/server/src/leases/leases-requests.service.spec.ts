@@ -52,6 +52,7 @@ describe('LeasesService 退租违约/换租申请', () => {
     };
     const wechatCustomer: jest.Mocked<IWechatCustomerServiceService> = {
       sendTextMessage: jest.fn(),
+      sendNewsMessage: jest.fn(),
     };
     const wechatNotify: jest.Mocked<IWechatNotifyService> = {
       sendTemplateMessage: jest.fn(),

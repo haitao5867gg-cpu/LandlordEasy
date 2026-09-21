@@ -220,12 +220,25 @@ export class WechatController {
       '',
     ).replace(/\/api\/v1$/, '');
     const tenantUrl = publicBaseUrl ? `${publicBaseUrl}/tenant/` : '';
-    await this.wechatCustomerService.sendTextMessage(
-      openid,
-      tenantUrl
-        ? `绑定成功,点击查看您的租约和账单：${tenantUrl}`
-        : '绑定成功,请联系房东获取查看租约和账单的入口',
-    );
+    // GasCan 2026-09-21要求:绑定成功改发图文卡片(比纯文字直观,链接可点)。
+    // 客服news消息的picurl要求可公网访问的https图片,用统一的卡片底图;
+    // 图文发送失败(接口限制/图片问题)时回退纯文字,保证提示不丢。
+    const cardSent = tenantUrl
+      ? await this.wechatCustomerService.sendNewsMessage(openid, {
+          title: '绑定成功',
+          description: '点击查看您的租约和账单',
+          url: tenantUrl,
+          picurl: `${publicBaseUrl}/uploads/bind-success-card.png`,
+        })
+      : false;
+    if (!cardSent) {
+      await this.wechatCustomerService.sendTextMessage(
+        openid,
+        tenantUrl
+          ? `绑定成功,点击查看您的租约和账单：${tenantUrl}`
+          : '绑定成功,请联系房东获取查看租约和账单的入口',
+      );
+    }
     return true;
   }
 

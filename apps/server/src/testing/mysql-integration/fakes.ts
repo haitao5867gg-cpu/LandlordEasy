@@ -1,5 +1,5 @@
 import { IWechatQrcodeService } from '../../wechat/wechat-qrcode.interface';
-import { IWechatCustomerServiceService } from '../../wechat/wechat-customer-service.interface';
+import { IWechatCustomerServiceService, WechatNewsArticle } from '../../wechat/wechat-customer-service.interface';
 import { IWechatNotifyService } from '../../wechat/wechat-notify.interface';
 import { ContractPdfService } from '../../contract-pdf/contract-pdf.service';
 import {
@@ -44,6 +44,7 @@ export function createFakeWeiqian(): jest.Mocked<IWeiQianService> {
 export function createFakeWechatCustomerService(): jest.Mocked<IWechatCustomerServiceService> {
   return {
     sendTextMessage: jest.fn(async (_openid: string, _content: string) => true),
+    sendNewsMessage: jest.fn(async (_openid: string, _article: WechatNewsArticle) => true),
   };
 }
 

@@ -21,7 +21,7 @@
     </template>
 
     <!-- 未绑定(正常情况下不会出现,绑定应该在关注公众号那一步就已完成) -->
-    <van-cell-group v-if="loggedIn && !authStore.bound" inset>
+    <van-cell-group v-if="unboundTip || (loggedIn && !authStore.bound)" inset>
       <p style="padding:16px;color:#666;">尚未绑定账号,请联系房东获取绑定二维码,微信扫码关注公众号完成绑定</p>
     </van-cell-group>
 
@@ -44,6 +44,7 @@ const openid = ref('');
 const loginLoading = ref(false);
 const loggedIn = ref(!!authStore.token);
 const authError = ref('');
+const unboundTip = ref(false);
 
 const isMockMode = ref(
   window.location.hostname === 'localhost' ||
@@ -64,6 +65,18 @@ onMounted(() => {
   const code = route.query.code as string;
   if (code && !isMockMode.value) {
     handleWechatCallback(code);
+    return;
+  }
+
+  // 微信内打开时免点按钮直接静默授权(snsapi_base无感)——2026-09-21 GasCan
+  // 反馈:从服务号菜单/消息进来的租客不该先看到一个"微信授权登录"按钮。
+  // 非微信浏览器(如Safari)保留按钮,授权页需要微信登录态,自动跳过去体验更差。
+  if (
+    !isMockMode.value &&
+    !authStore.token &&
+    /MicroMessenger/i.test(navigator.userAgent)
+  ) {
+    redirectToWechat();
   }
 });
 
@@ -72,12 +85,7 @@ async function handleLogin() {
   loginLoading.value = true;
   try {
     const res = await http.post('/auth/tenant/login', { code: openid.value }) as any;
-    authStore.setToken(res.token);
-    loggedIn.value = true;
-    if (res.bound) {
-      authStore.setBound(true);
-      router.push('/');
-    }
+    applyLoginResult(res);
   } finally { loginLoading.value = false; }
 }
 
@@ -96,15 +104,26 @@ async function handleWechatCallback(code: string) {
   loginLoading.value = true;
   try {
     const res = await http.post('/auth/tenant/login', { code }) as any;
-    authStore.setToken(res.token);
-    loggedIn.value = true;
-    if (res.bound) {
-      authStore.setBound(true);
-      router.push('/');
-    }
+    applyLoginResult(res);
   } catch {
     authError.value = '登录失败,请重试';
   } finally { loginLoading.value = false; }
+}
+
+// 未绑定的openid不发token:之前会把"无租客"的token存下来,后续接口全部
+// 报"未绑定租约",租客完全看不懂(2026-09-21 GasCan实测反馈)。未绑定就
+// 停在本页并展示引导文案,下次进入重新静默授权,绑定完成后自然进得去。
+function applyLoginResult(res: { token: string; bound: boolean }) {
+  if (res.bound) {
+    authStore.setToken(res.token);
+    authStore.setBound(true);
+    loggedIn.value = true;
+    router.push('/');
+    return;
+  }
+  authStore.logout();
+  loggedIn.value = false;
+  unboundTip.value = true;
 }
 </script>
 

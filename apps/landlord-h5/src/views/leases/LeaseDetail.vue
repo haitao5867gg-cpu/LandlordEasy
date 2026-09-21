@@ -381,6 +381,11 @@ function optionalNumber(value: string): number | undefined {
 
 async function fetchLease() {
   lease.value = await http.get(`/leases/${route.params.id}`);
+  // 租客未绑定时自动展示绑定二维码,房东不用再点"生成绑定二维码"
+  // (2026-09-21 GasCan反馈:创建成功的弹窗一关,二维码就找不到了)
+  if (!lease.value?.tenant?.openid && !bindQrcodeImage.value) {
+    handleGenerateBindQrcode().catch(() => undefined);
+  }
 }
 
 async function fetchHandoverRecords() {
