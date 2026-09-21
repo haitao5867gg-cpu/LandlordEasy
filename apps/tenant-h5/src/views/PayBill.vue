@@ -134,7 +134,7 @@ interface WeixinJSBridge {
   invoke(
     method: 'getBrandWCPayRequest',
     params: WechatParams,
-    callback: (result: { err_msg?: string }) => void,
+    callback: (result: { err_msg?: string; err_desc?: string }) => void,
   ): void;
 }
 
@@ -273,7 +273,13 @@ function invokeWechatPay(params: WechatParams) {
       if (result.err_msg === 'get_brand_wcpay_request:cancel') {
         showToast('已取消微信支付');
       } else if (result.err_msg && result.err_msg !== 'get_brand_wcpay_request:ok') {
-        showToast('微信支付未完成，请重试');
+        // 把微信返回的完整错误透出来——JSAPI调起失败的原因(签名/绑定/目录)
+        // 只存在于err_msg/err_desc里,吞掉它就只能瞎猜(2026-09-21首次真实
+        // 调起失败排查时加)
+        showToast({
+          message: `支付调起失败: ${result.err_msg}${result.err_desc ? `(${result.err_desc})` : ''}`,
+          duration: 5000,
+        });
       }
     });
   };
