@@ -50,6 +50,10 @@ export interface ContractPdfData {
   earlyTerminationNoticeDays: number;
   depositRefundWorkDays: number;
   electronicNoticeHours: number;
+  // 2026-09-22 新合同新增三个全局参数(ContractSettings,均带默认值)
+  maxOccupantsPerRoom: number;
+  rentOverdueTerminateDays: number;
+  disguisedSubletDays: number;
   // 附件五:费用规则文本(ContractSettings,默认"以实际发生为准")
   waterFeeRule: string;
   electricityFeeRule: string;

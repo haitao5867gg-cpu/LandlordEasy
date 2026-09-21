@@ -55,6 +55,9 @@
         <van-field v-model="form.abandonedPropertyDays" label="遗留物保管" type="number" placeholder="默认30天" />
         <van-field v-model="form.depositRefundWorkDays" label="押金退还工作日" type="number" placeholder="默认3个工作日" />
         <van-field v-model="form.electronicNoticeHours" label="电子通知送达" type="number" placeholder="发送后N小时视为送达,默认24" />
+        <van-field v-model="form.maxOccupantsPerRoom" label="单间居住人数上限" type="number" placeholder="默认2人" />
+        <van-field v-model="form.rentOverdueTerminateDays" label="逾期可解除天数" type="number" placeholder="逾期超N日甲方可解约,默认15" />
+        <van-field v-model="form.disguisedSubletDays" label="变相转租认定天数" type="number" placeholder="非同住人连续占用超N日,默认15" />
       </van-cell-group>
 
       <van-cell-group inset title="默认物品清单">
@@ -105,6 +108,9 @@ const form = reactive({
   abandonedPropertyDays: '',
   depositRefundWorkDays: '',
   electronicNoticeHours: '',
+  maxOccupantsPerRoom: '',
+  rentOverdueTerminateDays: '',
+  disguisedSubletDays: '',
   defaultItemChecklistText: '',
 });
 
@@ -131,6 +137,9 @@ onMounted(async () => {
   form.abandonedPropertyDays = String(settings.abandonedPropertyDays ?? '');
   form.depositRefundWorkDays = String(settings.depositRefundWorkDays ?? '');
   form.electronicNoticeHours = String(settings.electronicNoticeHours ?? '');
+  form.maxOccupantsPerRoom = String(settings.maxOccupantsPerRoom ?? '');
+  form.rentOverdueTerminateDays = String(settings.rentOverdueTerminateDays ?? '');
+  form.disguisedSubletDays = String(settings.disguisedSubletDays ?? '');
   const checklist: Array<{ item: string; quantity?: number }> = settings.defaultItemChecklist || [];
   form.defaultItemChecklistText = checklist
     .map((entry) => (entry.quantity === undefined || entry.quantity === null ? entry.item : `${entry.item} ${entry.quantity}`))
@@ -173,6 +182,9 @@ async function saveSettings() {
       abandonedPropertyDays: optionalNumber(form.abandonedPropertyDays),
       depositRefundWorkDays: optionalNumber(form.depositRefundWorkDays),
       electronicNoticeHours: optionalNumber(form.electronicNoticeHours),
+      maxOccupantsPerRoom: optionalNumber(form.maxOccupantsPerRoom),
+      rentOverdueTerminateDays: optionalNumber(form.rentOverdueTerminateDays),
+      disguisedSubletDays: optionalNumber(form.disguisedSubletDays),
       defaultItemChecklist: parseChecklistText(form.defaultItemChecklistText),
     }) as any;
     configured.value = Boolean(settings.id);

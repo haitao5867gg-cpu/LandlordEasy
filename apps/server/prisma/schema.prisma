@@ -184,6 +184,9 @@ model ContractSettings {
   earlyTerminationNoticeDays Int  @default(30) // 提前退租通知天数(仅提醒不拦截)
   depositRefundWorkDays  Int      @default(3) // 押金退还工作日数
   electronicNoticeHours  Int      @default(24) // 电子通知视为送达的小时数
+  maxOccupantsPerRoom     Int      @default(2)  // 单间居住人数上限(2026-09-22新合同:当事人部分条款)
+  rentOverdueTerminateDays Int    @default(15) // 逾期超过N日甲方可解除(新合同第二条)
+  disguisedSubletDays     Int      @default(15) // 连续超N日非同住人占用视为变相转租(新合同第四条)
   updatedAt              DateTime @updatedAt
 
   @@map("contract_settings")

@@ -167,6 +167,21 @@ class UpdateContractSettingsDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  maxOccupantsPerRoom?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  rentOverdueTerminateDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  disguisedSubletDays?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
   electronicNoticeHours?: number;
 
   @IsOptional()

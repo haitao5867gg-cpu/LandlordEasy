@@ -32,6 +32,9 @@ export interface ContractSettingsInput {
   earlyTerminationNoticeDays?: number;
   depositRefundWorkDays?: number;
   electronicNoticeHours?: number;
+  maxOccupantsPerRoom?: number;
+  rentOverdueTerminateDays?: number;
+  disguisedSubletDays?: number;
   waterPrice?: number;
   electricityPrice?: number;
 }
@@ -53,6 +56,9 @@ const DEFAULT_CONTRACT_SETTINGS = {
   earlyTerminationNoticeDays: 30,
   depositRefundWorkDays: 3,
   electronicNoticeHours: 24,
+  maxOccupantsPerRoom: 2,
+  rentOverdueTerminateDays: 15,
+  disguisedSubletDays: 15,
 };
 
 const SETTINGS_FILE = path.join(process.cwd(), 'data/settings.json');
@@ -150,6 +156,9 @@ export class AdminService {
         'electronicNoticeHours',
         'waterPrice',
         'electricityPrice',
+        'maxOccupantsPerRoom',
+        'rentOverdueTerminateDays',
+        'disguisedSubletDays',
       ]),
     };
 

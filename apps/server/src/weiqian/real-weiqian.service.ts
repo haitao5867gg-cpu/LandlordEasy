@@ -37,11 +37,13 @@ const AUTH_MODE = 'Signature';
 // 像素级实测红章落在73.9%高度=1000-260=740,与"y从底部起算"精确吻合。
 // 签署页两条签署横线中心约在29%高度(=71%从底部):甲方x=240(24%宽),
 // 乙方x=710(71%宽),y均取710,章中心压在签署线上。
+// 2026-09-22 新合同模板9页(正文3+附件5+签署页1),签署页从第8页变为第9页;
+// y坐标沿用710(签署页版式未变),首次预览需像素级复核。
 const LAUNCHER_AUTO_SEAL_RULE = {
   autosealType: 1,
   x: 240,
   y: 710,
-  autosealPage: 8,
+  autosealPage: 9,
 } as const;
 // 乙方(接收方)指定盖章位置+签章类型。sealType=10强制手写签名,不给
 // 接收方"盖章/时间戳/批注"这些选项——这是这次真实联调发现的问题:同一
@@ -51,7 +53,7 @@ const LAUNCHER_AUTO_SEAL_RULE = {
 const RECEIVER_POSITION_RULE = {
   x: 710,
   y: 710,
-  pageNum: 8,
+  pageNum: 9,
   sealType: 10,
 } as const;
 
