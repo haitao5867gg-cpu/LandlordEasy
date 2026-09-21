@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Headers,
+  Logger,
   NotFoundException,
   Param,
   ParseIntPipe,
@@ -31,7 +32,22 @@ import {
 
 @Controller('payments')
 export class PaymentsController {
+  private readonly logger = new Logger(PaymentsController.name);
+
   constructor(private readonly paymentsService: PaymentsService) {}
+
+  /**
+   * JSAPI调起结果上报(诊断用,公开):前端WeixinJSBridge回调后把微信返回的
+   * err_msg/err_desc原样报上来落日志。调起失败的具体原因只存在于这段文字里
+   * (2026-09-21两台手机"首次支付-1、清缓存后成功"复现,5秒toast窗口截不到)。
+   */
+  @Post('wechat/invoke-report')
+  invokeReport(@Body() body: Record<string, unknown>) {
+    this.logger.log(
+      `[JSAPI调起上报] ${JSON.stringify(body).slice(0, 500)}`,
+    );
+    return { received: true };
+  }
 
   @Post('wechat/create-order')
   @UseGuards(TenantGuard)

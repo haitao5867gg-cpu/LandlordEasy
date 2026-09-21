@@ -256,6 +256,21 @@ function startPolling() {
 }
 
 function invokeWechatPay(params: WechatParams) {
+  const reportInvokeResult = (result: { err_msg?: string; err_desc?: string }) => {
+    try {
+      const payload = JSON.stringify({
+        err_msg: result.err_msg,
+        err_desc: result.err_desc,
+        href: window.location.href,
+        ua: navigator.userAgent.slice(0, 120),
+        appId: params.appId,
+        pkg: params.package,
+        ts: params.timeStamp,
+      });
+      navigator.sendBeacon?.('/api/v1/payments/wechat/invoke-report', new Blob([payload], { type: 'application/json' }));
+    } catch { /* 上报失败不影响主流程 */ }
+  };
+
   const invoke = () => {
     const bridge = document.WeixinJSBridge ?? window.WeixinJSBridge;
     if (!bridge) {
@@ -270,6 +285,8 @@ function invokeWechatPay(params: WechatParams) {
       signType: params.signType,
       paySign: params.paySign,
     }, (result) => {
+      // 调起结果原样上报服务器落日志——失败的真实原因只在err_msg/err_desc里
+      reportInvokeResult(result);
       if (result.err_msg === 'get_brand_wcpay_request:cancel') {
         showToast('已取消微信支付');
       } else if (result.err_msg && result.err_msg !== 'get_brand_wcpay_request:ok') {
