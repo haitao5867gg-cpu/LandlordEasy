@@ -4,6 +4,7 @@ import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { LeasesService } from '../leases/leases.service';
 import { IWechatCustomerServiceService } from './wechat-customer-service.interface';
+import { IWechatNotifyService } from './wechat-notify.interface';
 import { WechatEventService } from './wechat-event.service';
 import { WechatController } from './wechat.controller';
 
@@ -20,6 +21,7 @@ function sign(token: string, timestamp: string, nonce: string): string {
 describe('WechatController contract signing events', () => {
   let prisma: jest.Mocked<PrismaService>;
   let customerService: jest.Mocked<IWechatCustomerServiceService>;
+  let wechatNotify: jest.Mocked<IWechatNotifyService>;
   let leasesService: jest.Mocked<LeasesService>;
   let controller: WechatController;
   const originalToken = process.env.WECHAT_TOKEN;
@@ -38,12 +40,17 @@ describe('WechatController contract signing events', () => {
         update: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      lease: {
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
     } as unknown as jest.Mocked<PrismaService>;
     process.env.SERVER_PUBLIC_BASE_URL = 'https://dev.landlordeasy.cn/api/v1';
+    delete process.env.WECHAT_TEMPLATE_BIND_SUCCESS;
     customerService = {
       sendTextMessage: jest.fn(),
       sendNewsMessage: jest.fn(),
     };
+    wechatNotify = { sendTemplateMessage: jest.fn() };
     leasesService = {
       launchContractSigningTask: jest.fn(),
       tryConfirmSigned: jest.fn(),
@@ -53,6 +60,7 @@ describe('WechatController contract signing events', () => {
       prisma,
       new WechatEventService(),
       customerService,
+      wechatNotify,
       leasesService,
     );
   });
@@ -215,6 +223,40 @@ describe('WechatController contract signing events', () => {
       'openid-tenant',
       expect.stringContaining('绑定成功'),
     );
+  });
+
+  it('配置了绑定模板时优先发模板消息(合同时间/合同房源字段对齐真实模板),不再走图文/文字', async () => {
+    (prisma.contractSigningTask.findFirst as jest.Mock).mockResolvedValue(null);
+    (prisma.tenant.findFirst as jest.Mock).mockResolvedValue({ id: 5, openid: null });
+    (prisma.lease.findFirst as jest.Mock).mockResolvedValue({
+      startDate: new Date('2026-09-21T00:00:00+08:00'),
+      endDate: new Date('2027-09-20T00:00:00+08:00'),
+      room: { roomNo: '101', building: { name: 'R栋' } },
+    });
+    process.env.WECHAT_TEMPLATE_BIND_SUCCESS = 'tpl-bind-test';
+    wechatNotify.sendTemplateMessage.mockResolvedValue(true);
+    const res = response();
+
+    await postEvent(
+      '<xml><FromUserName><![CDATA[openid-tenant]]></FromUserName>' +
+        '<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[subscribe]]></Event>' +
+        '<EventKey><![CDATA[qrscene_321]]></EventKey></xml>',
+      res.value,
+    );
+
+    expect(wechatNotify.sendTemplateMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        openid: 'openid-tenant',
+        templateId: 'tpl-bind-test',
+        url: 'https://dev.landlordeasy.cn/tenant/',
+        data: {
+          time3: { value: '2026-09-21至2027-09-20' },
+          thing2: { value: 'R栋101' },
+        },
+      }),
+    );
+    expect(customerService.sendNewsMessage).not.toHaveBeenCalled();
+    expect(customerService.sendTextMessage).not.toHaveBeenCalled();
   });
 
   it('图文卡片发送失败时回退纯文字,保证绑定提示不丢', async () => {

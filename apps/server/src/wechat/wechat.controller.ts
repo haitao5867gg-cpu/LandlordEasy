@@ -20,6 +20,10 @@ import {
   IWechatCustomerServiceService,
   WECHAT_CUSTOMER_SERVICE,
 } from './wechat-customer-service.interface';
+import {
+  IWechatNotifyService,
+  WECHAT_NOTIFY_SERVICE,
+} from './wechat-notify.interface';
 import { LeasesService } from '../leases/leases.service';
 
 function buildFollowedFallbackMessage(roomLabel: string): string {
@@ -37,6 +41,8 @@ export class WechatController {
     private readonly wechatEventService: IWechatEventService,
     @Inject(WECHAT_CUSTOMER_SERVICE)
     private readonly wechatCustomerService: IWechatCustomerServiceService,
+    @Inject(WECHAT_NOTIFY_SERVICE)
+    private readonly wechatNotify: IWechatNotifyService,
     private readonly leasesService: LeasesService,
   ) {}
 
@@ -220,26 +226,65 @@ export class WechatController {
       '',
     ).replace(/\/api\/v1$/, '');
     const tenantUrl = publicBaseUrl ? `${publicBaseUrl}/tenant/` : '';
-    // GasCan 2026-09-21要求:绑定成功改发图文卡片(比纯文字直观,链接可点)。
-    // 客服news消息的picurl要求可公网访问的https图片,用统一的卡片底图;
-    // 图文发送失败(接口限制/图片问题)时回退纯文字,保证提示不丢。
-    const cardSent = tenantUrl
-      ? await this.wechatCustomerService.sendNewsMessage(openid, {
-          title: '绑定成功',
-          description: '点击查看您的租约和账单',
-          url: tenantUrl,
-          picurl: `${publicBaseUrl}/uploads/bind-success-card.png`,
-        })
-      : false;
-    if (!cardSent) {
-      await this.wechatCustomerService.sendTextMessage(
-        openid,
-        tenantUrl
-          ? `绑定成功,点击查看您的租约和账单：${tenantUrl}`
-          : '绑定成功,请联系房东获取查看租约和账单的入口',
-      );
-    }
+    await this.sendBindSuccess(openid, tenant.id, tenantUrl);
     return true;
+  }
+
+  // 绑定成功通知,按效果从优到劣三级回退:模板消息(GasCan 2026-09-21要求,
+  // 要"合同审批通知"那种卡片样式,模板「租赁合同绑定成功通知」字段
+  // time3=合同时间/thing2=合同房源,字段名以get_all_private_template
+  // 接口返回为准)→ 图文卡片 → 纯文字。任何一级失败落到下一级,提示不丢。
+  private async sendBindSuccess(
+    openid: string,
+    tenantId: number,
+    tenantUrl: string,
+  ): Promise<void> {
+    const templateId = process.env.WECHAT_TEMPLATE_BIND_SUCCESS;
+    if (templateId && tenantUrl) {
+      const lease = await this.prisma.lease.findFirst({
+        where: { tenantId },
+        orderBy: { startDate: 'desc' },
+        select: {
+          startDate: true,
+          endDate: true,
+          room: { select: { roomNo: true, building: { select: { name: true } } } },
+        },
+      });
+      if (lease) {
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const d = (x: Date) =>
+          `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
+        const roomLabel = `${lease.room.building.name}${lease.room.roomNo}`;
+        const sent = await this.wechatNotify.sendTemplateMessage({
+          openid,
+          templateId,
+          url: tenantUrl,
+          data: {
+            time3: { value: `${d(lease.startDate)}至${d(lease.endDate)}` },
+            thing2: { value: roomLabel.slice(0, 20) },
+          },
+        });
+        if (sent) return;
+        this.logger.warn(`租客 ${tenantId} 绑定成功模板消息发送失败,回退图文卡片`);
+      }
+    }
+
+    if (tenantUrl) {
+      const cardSent = await this.wechatCustomerService.sendNewsMessage(openid, {
+        title: '绑定成功',
+        description: '点击查看您的租约和账单',
+        url: tenantUrl,
+        picurl: `${process.env.SERVER_PUBLIC_BASE_URL?.replace(/\/+$/, '').replace(/\/api\/v1$/, '')}/uploads/bind-success-card.png`,
+      });
+      if (cardSent) return;
+    }
+
+    await this.wechatCustomerService.sendTextMessage(
+      openid,
+      tenantUrl
+        ? `绑定成功,点击查看您的租约和账单：${tenantUrl}`
+        : '绑定成功,请联系房东获取查看租约和账单的入口',
+    );
   }
 
   /**
