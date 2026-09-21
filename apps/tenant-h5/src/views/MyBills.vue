@@ -24,6 +24,8 @@
             @click="goPay(bill)"
           >
             <template #label>
+              <!-- 金额组成直接亮出来,租客不用点进去才知道钱由什么构成 -->
+              <div class="bill-items">{{ itemsSummary(bill) }}</div>
               <van-tag :type="tagType(bill.status)">{{ statusLabel(bill.status) }}</van-tag>
             </template>
           </van-cell>
@@ -54,6 +56,15 @@ function goPay(bill: any) {
   router.push(`/bills/${bill.id}/pay`);
 }
 
+// "租金¥1200 + 押金¥1000 + 水费¥40"——超过3项折叠成"等N项"
+function itemsSummary(bill: any): string {
+  const items = bill.items as Array<{ name: string; amount: string | number }> | undefined;
+  if (!items?.length) return '—';
+  const parts = items.map((i) => `${i.name}¥${Number(i.amount)}`);
+  if (parts.length <= 3) return parts.join(' + ');
+  return `${parts.slice(0, 3).join(' + ')} 等${parts.length}项`;
+}
+
 onMounted(async () => {
   try { leases.value = await http.get('/tenant/bills') as any; }
   finally { loading.value = false; }
@@ -63,4 +74,5 @@ onMounted(async () => {
 <style scoped>
 .my-bills-page { padding-bottom: 20px; }
 .page-loading { display: flex; justify-content: center; padding: 60px; }
+.bill-items { margin-bottom: 4px; color: #969799; font-size: 12px; line-height: 1.4; }
 </style>

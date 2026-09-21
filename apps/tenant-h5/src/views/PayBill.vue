@@ -7,6 +7,7 @@
       <van-empty v-if="!bill" description="账单不存在" />
       <template v-else>
         <van-cell-group inset title="账单信息">
+          <van-cell title="账单周期" :value="periodLabel" />
           <van-cell title="应付金额" :value="`¥${bill.totalAmount}`" />
           <van-cell title="账单状态">
             <template #value>
@@ -17,20 +18,23 @@
           </van-cell>
         </van-cell-group>
 
+        <!-- 费用明细不管付没付都要显示——待付款时租客恰恰最需要知道钱由什么组成
+            (2026-09-21 GasCan实测:首期账单=租金+押金,只看到总数会追问) -->
+        <van-cell-group inset title="费用明细">
+          <van-cell
+            v-for="item in bill.items"
+            :key="item.id"
+            :title="item.name"
+            :value="`¥${item.amount}`"
+          />
+          <van-cell v-if="!bill.items?.length" title="暂无明细" />
+        </van-cell-group>
+
         <template v-if="bill.status === 'PAID'">
           <div class="paid-state">
             <van-icon name="checked" size="56" color="#07c160" />
             <div>支付成功，账单已付款</div>
           </div>
-
-          <van-cell-group inset title="费用明细">
-            <van-cell
-              v-for="item in bill.items"
-              :key="item.id"
-              :title="item.name"
-              :value="`¥${item.amount}`"
-            />
-          </van-cell-group>
 
           <van-cell-group inset title="支付记录">
             <van-empty v-if="!confirmedPayments.length" description="暂无支付记录" />
@@ -107,6 +111,8 @@ interface Bill {
   status: string;
   items: BillItem[];
   payments: PaymentRecord[];
+  periodStart?: string;
+  periodEnd?: string;
 }
 
 interface WechatParams {
@@ -144,6 +150,12 @@ declare global {
 
 const route = useRoute();
 const bill = ref<Bill | null>(null);
+
+const periodLabel = computed(() => {
+  const s = bill.value?.periodStart?.split('T')[0];
+  const e = bill.value?.periodEnd?.split('T')[0];
+  return s && e ? `${s} ~ ${e}` : '—';
+});
 const loading = ref(true);
 const activeMethod = ref<PaymentMethod | null>(null);
 const creatingMethod = ref<PaymentMethod | null>(null);
