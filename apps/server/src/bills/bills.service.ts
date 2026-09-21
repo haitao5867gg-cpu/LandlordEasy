@@ -10,6 +10,7 @@ import {
   IWechatNotifyService,
   WECHAT_NOTIFY_SERVICE,
 } from '../wechat/wechat-notify.interface';
+import { buildRentReminderMessage } from '../reminders/rent-reminder-message';
 
 export interface BatchRemindResult {
   succeeded: number[];
@@ -145,25 +146,15 @@ export class BillsService {
     if (!tenant.openid) throw new BadRequestException('租客未绑定微信');
 
     const type = this.getReminderType(bill.dueDate, today);
-    // 字段名对应微信公众号后台真实配置的"房租账单催缴通知"模板(2026-09-04用真实
-    // access_token查get_all_private_template核实),跟reminders.service.ts自动
-    // 催缴用的是同一个模板,字段必须保持一致:
-    // amount3=金额 / time4=账单周期 / thing5=账单类型 / thing7=房间名称 / time10=到期时间
+    // 与reminders.service.ts自动催缴、签约后首期提醒共用同一个构造器——
+    // 字段名对应微信公众号后台真实配置的"房租账单催缴通知"模板(2026-09-04用
+    // 真实access_token查get_all_private_template核实),且顶层带url直接跳
+    // 租客端付款页。之前手动催缴在这里手搓payload漏了url,租客收到消息
+    // 不能点击支付(GasCan 2026-09-21实测反馈)。
     const templateId = process.env.WECHAT_TEMPLATE_RENT_REMINDER || 'RENT_REMINDER';
-    const room = bill.lease.room;
-    const success = await this.wechatNotify.sendTemplateMessage({
-      openid: tenant.openid,
-      templateId,
-      data: {
-        amount3: { value: `${bill.totalAmount}` },
-        time4: {
-          value: `${bill.periodStart.toISOString().split('T')[0]}~${bill.periodEnd.toISOString().split('T')[0]}`,
-        },
-        thing5: { value: '房租账单' },
-        thing7: { value: `${room.building.property.name}${room.building.name}${room.roomNo}` },
-        time10: { value: bill.dueDate.toISOString().split('T')[0] },
-      },
-    });
+    const success = await this.wechatNotify.sendTemplateMessage(
+      buildRentReminderMessage(bill, tenant.openid, templateId),
+    );
 
     await this.prisma.reminderLog.create({
       data: {
