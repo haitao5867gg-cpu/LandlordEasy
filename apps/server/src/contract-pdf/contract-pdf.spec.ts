@@ -134,14 +134,14 @@ describe('ContractPdfService(M22 新模板)', () => {
         })),
       },
     ],
-  ])('页数确定性:模板固定9页(%s)', async (_name, data) => {
+  ])('页数确定性:模板固定5页(%s)', async (_name, data) => {
     const html = buildContractHtml(data, numberToChineseUppercase(data.monthlyRent));
-    // HTML 层:固定9个 .page 分节(2026-09-22新合同:正文3+附件5+签署页1)
-    expect((html.match(/class="page/g) ?? []).length).toBe(9);
+    // HTML 层:固定5个 .page 分节(2026-09-22v2压缩版:正文2+附件合页3)
+    expect((html.match(/class="page/g) ?? []).length).toBe(5);
     const pdf = await new ContractPdfService().generate(data);
     // PDF 层:根 /Pages 的 /Count 必须是8(Chrome 未压缩该对象;若压缩则退化断言文件头)
     const text = pdf.toString('latin1');
     const counts = [...text.matchAll(/\/Count (\d+)/g)].map((m) => Number(m[1]));
-    expect(Math.max(...counts)).toBe(9);
+    expect(Math.max(...counts)).toBe(5);
   });
 });

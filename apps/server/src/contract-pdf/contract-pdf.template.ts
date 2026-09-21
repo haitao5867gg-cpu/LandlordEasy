@@ -6,9 +6,11 @@ import { ChecklistEntry, ContractPdfData } from './contract-pdf.types';
  * 第四条 ③第六条"【__30_】"格式残留 ④物品清单"燃气灶／电磁炉"改纯"电磁炉")。
  *
  * 页数确定性(微签固定坐标盖章的前提):
- * - 全文固定 9 页(正文3+附件5+签署页1),每页 .page 固定 210x297mm + overflow hidden;
+ * - 全文固定 5 页(正文2+附件一二合页+附件三四合页+附件五与签署合页),
+ *   每页 .page 固定 210x297mm + overflow hidden(2026-09-22 GasCan签署实测
+ *   9页版空白带过半,压缩重排,填充率65-85%);
  * - 物品清单固定 12 行、共同居住人固定 8 行,不随数据变长;
- * - 签署页固定为最后一页(第 9 页),甲方自动章与乙方手写签名坐标锚定该页
+ * - 签署区固定为最后一页(第 5 页),甲方自动章与乙方手写签名坐标锚定该页
  *   (见 real-weiqian.service.ts 的 LAUNCHER/RECEIVER 坐标常量,改版式必须同步改)。
  *
  * GasCan 2026-09-22 拍板:收款方式模糊化(线下/线上不写死);单间人数上限、
@@ -121,7 +123,7 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   @page { size: A4; margin: 0; }
   * { box-sizing: border-box; }
   html, body { width: 210mm; margin: 0; padding: 0; }
-  body { color: #111; font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 9.2px; line-height: 1.55; }
+  body { color: #111; font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 9px; line-height: 1.55; }
   .page { position: relative; width: 210mm; height: 297mm; padding: 10mm 12mm; overflow: hidden; break-after: page; page-break-after: always; background: #fff; }
   .page:last-child { break-after: auto; page-break-after: auto; }
   h1 { height: 12mm; margin: 0 0 2mm; text-align: center; font-family: SimSun, "Songti SC", "Noto Serif CJK SC", serif; font-size: 20px; letter-spacing: 4px; line-height: 12mm; }
@@ -132,7 +134,7 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   .info-row { height: 5.6mm; overflow: hidden; white-space: nowrap; }
   .info-label { display: inline-block; width: 22mm; font-weight: 700; }
   .clause-title { font-weight: 700; }
-  .clause p { margin: 0 0 1.2mm; text-indent: 2em; }
+  .clause p { margin: 0 0 1.3mm; text-indent: 2em; }
   .no-indent { text-indent: 0 !important; }
   .break-page-2 { height: 2mm; }
   .break-page-3 { height: 2mm; }
@@ -146,8 +148,8 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   .note { font-size: 8.4px; color: #444; margin: 1.5mm 0 2mm; }
   .confirm-line { margin-top: 4mm; height: 6mm; }
   .sig-page-intro { text-indent: 2em; margin: 0 0 8mm; }
-  .sig-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14mm; margin-top: 10mm; }
-  .sig-block { min-height: 34mm; }
+  .sig-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14mm; margin-top: 6mm; }
+  .sig-block { min-height: 30mm; }
   .sig-block .sig-name { height: 6mm; white-space: nowrap; overflow: hidden; }
   .sig-block .sig-line { position: relative; margin-top: 20mm; height: 10mm; border-top: .25mm solid #999; font-size: 8.6px; color: #333; padding-top: 1mm; }
   .attachments-note { position: absolute; bottom: 12mm; left: 12mm; right: 12mm; font-size: 8.6px; color: #444; }
@@ -182,18 +184,13 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
     <p>6. 双方约定免租期：无。</p>
     <p>7. 仅房屋主体严重损毁导致房屋完全无法居住时，乙方方可拒付或扣减租金；房屋设施轻微故障不得作为乙方拒付、扣减租金的理由，乙方应当按照维修条款申请报修。</p>
   </div>
-</section>
-
-<!-- 第2页:第三条+第四条(含装饰改造) -->
-<section class="page">
-  <div class="break-page-2"></div>
-  <div class="clause"><span class="clause-title">第三条　押金 费用与结算</span>
+<div class="clause"><span class="clause-title">第三条　押金 费用与结算</span>
     <p>1. 乙方应于${field(startDate, '26mm')}前支付租赁押金人民币￥${field(deposit, '20mm')}元。押金不计利息，不当然抵作最后一期租金。</p>
     <p>2. 水、电、网络、卫生及其他费用的承担项目、计价方式、结算周期，以附件五为准。甲方应提供合理的结算依据或账单记录。</p>
     <p>3. 乙方完成退房交接且双方费用结清后，甲方应于${field(n(data.depositRefundWorkDays), '9mm')}个工作日内退还剩余押金。甲方仅可就本合同明确约定且实际发生的下列项目扣减：未付租金或费用、约定违约金、乙方原因造成的修复费用、约定或实际发生的清洁费用、按本合同处理遗留物的合理费用。甲方应向乙方提供结算明细；余额退至乙方指定账户。（格式条款提示：本条押金扣减规则双方已充分阅读知悉。）</p>
     <p>4. 房屋及附属设施自然老化损耗由甲方承担，不得从押金中扣减；因乙方使用不当、保管不善、人为破坏产生修复更换费用，甲方可凭有效票据从押金扣减。本房屋为公寓，乙方不得用于工商注册登记；租赁终止，若乙方擅自使用该地址注册，必须完成工商地址迁出，否则甲方有权顺延押金退还。</p>
   </div>
-  <div class="clause"><span class="clause-title">第四条　使用 维修与安全管理</span>
+<div class="clause"><span class="clause-title">第四条　使用 维修与安全管理</span>
     <p>1. 乙方应安全、合理使用房屋及附属设施，遵守公寓管理规约和消防、治安等规定。乙方不得私拉乱接水、电线路；不得在室内、楼道及公共区域为电动车或其电池充电；不得损坏、拆除或停用消防设施。</p>
     <p>2. 未经甲方书面盖章同意，乙方不得改变房屋用途、拆改室内设施、改动承重结构或其他结构、增设隔断、违法增设卫浴，不得将房屋全部或部分转租、转借、变相交由第三方长期占有使用。经甲方书面同意转租、分租的，不免除乙方在本合同项下全部义务；次承租人造成房屋、设施损坏的，全部赔偿责任由乙方承担。连续超过${field(n(data.disguisedSubletDays), '9mm')}日非本合同列明共同居住人实际占有房屋，视为变相转租。</p>
     <p>3. 除本合同列明共同居住人外，乙方不得擅自增加长期共同居住人。连续居住超过${field(n(data.continuousStayDays), '9mm')}日或累计超过${field(n(data.cumulativeStayDays), '9mm')}日者，视为长期共同居住人，但经甲方同意的正常短期访客除外。</p>
@@ -201,11 +198,12 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
     <p>5. 甲方因维修、检查、带看或履行法定义务需要进入房屋的，应提前24小时通知乙方，并尽量减少对正常居住的影响；发生漏水、火灾等紧急情况时，甲方可采取必要措施进入并及时告知乙方。</p>
     <p>6. 装饰、改造：未经甲方同意，乙方不得对房屋进行装修、打墙、改动管线；确需小型加装、打孔，必须提交方案取得甲方书面同意。租赁期满或合同解除，乙方可拆除、带走非甲方提供的已备案的可移动家具家电；已经附合于房屋的固定装饰、加装设施，乙方不得拆除，无偿归甲方所有；拆除造成房屋损坏，乙方承担修复赔偿责任。乙方未经甲方书面同意擅自改造装修的，甲方有权要求乙方恢复原状并赔偿全部损失。</p>
   </div>
-</section>
 
-<!-- 第3页:第五~九条+补充条款 -->
+    </section>
+
+<!-- 第2页:第三~九条+补充条款 -->
 <section class="page">
-  <div class="break-page-3"></div>
+  <div class="break-page-2"></div>
   <div class="clause"><span class="clause-title">第五条　违约 催告与解除</span>
     <p>1. 乙方未按约支付租金或其他到期费用的，甲方可通过约定方式书面催告乙方在${field(n(data.overdueToleranceDays), '9mm')}日内支付；逾期仍未支付的，甲方有权解除合同，并要求乙方承担未付费用、约定违约金及依法可主张的实际损失。</p>
     <p>2. 乙方存在擅自转租、违规隔断、超员居住、擅自改变用途、违法活动、严重扰民、严重危及消防或人身安全、故意损坏房屋设施等违约行为的，甲方有权书面催告其在${field(n(data.overdueToleranceDays), '9mm')}日内改正；违约行为不能补救、严重危及安全或逾期未改正的，甲方有权解除合同。</p>
@@ -238,17 +236,14 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   ${extraTerms ? `<div class="clause"><span class="clause-title">补充条款</span><p>${escapeHtml(extraTerms)}</p></div>` : ''}
 </section>
 
-<!-- 第4页:附件一(转租授权) -->
+<!-- 第3页:附件一+附件二 合页 -->
 <section class="page">
   <h2>附件一　出租权利依据确认</h2>
   <p style="text-indent:2em; margin:8mm 0;">甲方确认其以转租出租人身份签署本合同，已取得房屋产权人书面转租授权，对出租范围具有合法、持续的出租及管理权；本合同租赁期限不超过甲方上游租赁合同剩余租赁期限。权利依据文件由甲方留存备查，涉及隐私信息的按法律规定脱敏。</p>
   <p style="text-indent:2em;">如甲方系合法承租并经同意转租人，甲方确认上游出租关系允许转租。甲方因无权出租或授权失效致使乙方不能正常使用房屋的，依法承担相应责任。</p>
   <div class="confirm-line">甲方确认：（随主合同电子签署一并确认）</div>
-</section>
 
-<!-- 第5页:附件二 共同居住人确认(独立一页) -->
-<section class="page">
-  <h2>附件二　共同居住人确认</h2>
+  <h2 style="margin-top:10mm;">附件二　共同居住人确认</h2>
   <div class="info-row" style="margin:4mm 0;"><span class="info-label">承租人</span>${field(data.tenantName, '40mm')}</div>
   <p class="no-indent" style="margin:2mm 0 3mm; font-weight:700;">共同居住人名单</p>
   <table class="co-table">
@@ -261,7 +256,7 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   <div class="confirm-line">承租人确认：（随主合同电子签署一并确认）</div>
 </section>
 
-<!-- 第6页:附件三 房屋及物品交接单(无燃气;不采集品牌型号,GasCan 2026-09-22拍板) -->
+<!-- 第4页:附件三+附件四 合页 -->
 <section class="page">
   <h2>附件三　房屋及物品交接单</h2>
   <div class="meters">
@@ -278,11 +273,8 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   </table>
   <p class="note">未交付的项目标注“—”；未列明物品汇总于“其他”栏。</p>
   <div class="confirm-line">甲方交付确认：（随主合同电子签署一并确认）　乙方接收确认：（随主合同电子签署一并确认）</div>
-</section>
 
-<!-- 第7页:附件四 安全责任承诺书 -->
-<section class="page">
-  <h2>附件四　租赁房屋安全责任承诺书</h2>
+  <h2 style="margin-top:8mm;">附件四　租赁房屋安全责任承诺书</h2>
   <p style="text-indent:2em; margin:3mm 0;">承诺人已阅读本合同，自愿承诺在居住期间遵守下列要求，并对因本人或共同居住人违反本承诺所造成的损失依法承担相应责任：</p>
   <p style="text-indent:2em;">1. 遵守房屋租赁合同、物业管理规约和依法进行的安全检查，发现隐患及时告知并配合整改。</p>
   <p style="text-indent:2em;">2. 安全、节约用水，不擅自改装供水管线和设施；因使用不当造成漏水、浸水等损失的，承担相应责任。</p>
@@ -295,7 +287,7 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
   <div class="confirm-line">承诺人：（随主合同电子签署一并确认）</div>
 </section>
 
-<!-- 第8页:附件五 费用及押金结算规则 -->
+<!-- 第5页:附件五+签署区 合页(全文最后一页,微签盖章/签名坐标锚定此页) -->
 <section class="page">
   <h2>附件五　费用及押金结算规则</h2>
   <div class="info-block" style="margin-top:6mm;">
@@ -308,11 +300,8 @@ export function buildContractHtml(data: ContractPdfData, rentUppercase: string):
     <div class="info-row"><span class="info-label">扣减明细</span>通过本合同第八条约定的通知渠道发送</div>
   </div>
   <div class="confirm-line">甲方确认：（随主合同电子签署一并确认）　乙方确认：（随主合同电子签署一并确认）</div>
-</section>
 
-<!-- 第9页:签署页(全文最后一页,微签盖章/签名坐标锚定此页) -->
-<section class="page">
-  <h2>签　署　页</h2>
+  <h2 style="margin-top:8mm;">签　署</h2>
   <p class="sig-page-intro">双方确认已完整阅读、理解并同意本合同正文及全部附件内容，对于格式提示条款已经充分知悉，双方签署后，本合同及附件共同生效。</p>
   <div class="sig-grid">
     <div class="sig-block">

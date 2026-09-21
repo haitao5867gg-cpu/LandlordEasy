@@ -169,9 +169,9 @@ describe('RealWeiQianService', () => {
           idCard: '310000000000000000',
         },
       ],
-      positionDTOS: [{ x: 710, y: 735, pageNum: 9, sealType: 10 }],
+      positionDTOS: [{ x: 710, y: 489, pageNum: 5, sealType: 10 }],
       launcherSignRule: [
-        { autosealType: 1, x: 240, y: 735, autosealPage: 9, sealId: 37179 },
+        { autosealType: 1, x: 240, y: 489, autosealPage: 5, sealId: 37179 },
       ],
       expiresTime: 1701000000000,
       finishSignJumpPage: 'https://tenant.example/sign-complete',
