@@ -186,16 +186,8 @@
     <van-popup v-model:show="showContractDialog" position="bottom" round class="contract-popup">
       <div class="contract-popup-header">生成电子签约</div>
       <van-form @submit="handleGenerateContract">
-        <van-cell-group title="水电说明">
-          <div class="contract-hint" style="padding:8px 16px;">
-            公寓水电为即充即用、入住自动清零,无需填写表底数;合同附件五将自动写入住客信息栏配置的水电单价。
-          </div>
-        </van-cell-group>
-        <van-cell-group title="物品清单(自动取自交接单)">
-          <div class="contract-hint" style="padding:8px 16px;">
-            合同附件三的物品清单、数量与交付日期将自动取自该租约的「入住交接记录」,无需在此重复填写;如尚未填写,请先完成入住交接。
-          </div>
-        </van-cell-group>
+
+
         <van-cell-group title="补充条款">
           <van-field
             v-model="contractForm.extraTerms"
@@ -205,11 +197,11 @@
             placeholder="可选,请输入补充条款"
           />
         </van-cell-group>
-        <van-cell-group title="合同条款覆盖">
-          <van-field v-model="contractForm.penaltyMonths" label="违约金月数" type="number" placeholder="留空使用默认值" />
-          <van-field v-model="contractForm.overdueToleranceDays" label="逾期容忍天数" type="number" placeholder="留空使用默认值" />
-          <van-field v-model="contractForm.cleaningFee" label="清洁费" type="number" placeholder="留空使用默认值" />
-          <van-field v-model="contractForm.renewalNoticeDays" label="续租提前通知" type="number" placeholder="留空使用默认值" />
+        <van-cell-group title="合同条款(预填系统默认值,可改)">
+          <van-field v-model="contractForm.penaltyMonths" label="违约金月数" type="number" />
+          <van-field v-model="contractForm.overdueToleranceDays" label="逾期容忍天数" type="number" />
+          <van-field v-model="contractForm.cleaningFee" label="清洁费" type="number" />
+          <van-field v-model="contractForm.renewalNoticeDays" label="续租提前通知" type="number" />
         </van-cell-group>
         <div class="contract-popup-actions">
           <van-button block plain type="default" @click="showContractDialog = false">取消</van-button>
@@ -355,7 +347,7 @@ onMounted(async () => {
   } finally { loading.value = false; }
 });
 
-function openContractDialog() {
+async function openContractDialog() {
   Object.assign(contractForm, {
     extraTerms: '',
     penaltyMonths: '',
@@ -364,6 +356,16 @@ function openContractDialog() {
     renewalNoticeDays: '',
   });
   showContractDialog.value = true;
+  // 预填系统默认值(GasCan 2026-09-21反馈:不要"留空使用默认值"的提示,直接带出来)
+  try {
+    const settings = await http.get('/admin/contract-settings') as any;
+    if (settings && settings.id) {
+      contractForm.penaltyMonths = String(settings.defaultPenaltyMonths ?? '');
+      contractForm.overdueToleranceDays = String(settings.defaultOverdueDays ?? '');
+      contractForm.cleaningFee = settings.defaultCleaningFee != null ? String(settings.defaultCleaningFee) : '';
+      contractForm.renewalNoticeDays = String(settings.defaultRenewNoticeDays ?? '');
+    }
+  } catch { /* 拉不到就留空,提交走后端默认 */ }
 }
 
 function getLaunchOverrides() {
