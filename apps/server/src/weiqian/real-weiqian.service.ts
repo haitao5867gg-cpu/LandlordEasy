@@ -100,10 +100,11 @@ export class RealWeiQianService implements IWeiQianService {
       fileName: params.fileName,
       // rType/authType 是字符串,不是数字(同一份demo确认)
       rType: '1',
-      // authType=1(手机验证码)才会真正触发微签短信通道(2026-09-03向微签技术
-      // 支持确认+真实测试验证);authType=2(实名认证)身份核验更强但没有短信,
-      // GasCan已知晓这个法律效力上的取舍,明确选择短信优先(authType=1)
-      authType: '1',
+      // authType=2=实名认证(身份证四要素+人脸活体)。2026-09-22 GasCan拍板
+      // 从短信验证码(authType=1)切换:收押金租金的合同需要"本人签署"的
+      // 硬证据链,人脸认证+微签留存的核验记录在纠纷时才是关键证据。
+      // 注意:authType=2没有短信通知,租客从签署链接/二维码进入走人脸流程。
+      authType: '2',
       // 签署模式:1=多方签署一份文件,官方demo固定用1,我们单文件单接收方的场景符合
       signType: 1,
       receiverDTOS: [
