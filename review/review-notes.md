@@ -580,3 +580,12 @@ GasCan 确认部署后,连服务器发现 `/opt/landlord-easy` 的 git HEAD 停�
 1. **键盘遮挡补充条款(已修复,9038cdb,已上线)**:根因是iOS微信webview键盘弹出时layout viewport不收缩,`position=bottom`的van-popup被键盘整层盖住(Android会压缩视口所以无此问题)。修复:textarea focus时监听visualViewport resize/scroll,把弹窗translateY(-键盘高度)抬起(上限40%屏高),blur还原并解绑;弹窗内容加.contract-popup-body(max-height 88vh-53px,overflow-y auto)兜底可滚;另加350ms后scrollIntoView(center)。textarea顺手加maxlength=500+show-word-limit。验证:vue-tsc+build过、线上LeaseDetail-BYqep2tc.js含修复代码、浏览器实测lease 715详情页渲染正常(注意生产lease id是715不是2,数据重置后自增未归零)。**真机键盘效果待GasCan下次打开弹窗实测**。
 2. **微签TokenNotFound(根因已查明:我方生产env配置错误;20:26初判"非我方问题"是错的,此处如实改写复盘)**:真实根因——生产 .env 把 WEIQIAN_SIGN_BASE_URL 配成了"签署页域名"原文 `https://www.weiqian.com.cn:8887/q/`(带 /q),而代码约定 base 不含 /q,拼出 `/q/q/{shortCode}`;微签网关对这种路径直接返回 HTTP 200 的裸JSON(TokenNotFound/InternalServerError 变体),浏览器把 JSON 当页面显示=GasCan截图现象。dev与代码默认值都不带 /q,所以 dev 一直正常、生产首签即翻车。修复:①prod env 改为 `https://www.weiqian.com.cn:8887`+PM2重启,sign-qrcode接口实测已返回正确链接;②代码加 buildSignUrl() 统一剥尾斜杠和尾部/q,两种env写法都收敛正确。**复盘教训:用户提供"链接打不开"类反馈时,第一件事是让 TA 把实际打开的完整URL发来**——本轮用curl自拼URL排查,拼的是正确链接所以方向全偏,烧了大量排查时间还委托了不必要的分析;GasCan补发真实URL(/q/q/20-QZw)后30秒破案。当初指向"微签登录态"的三条证据(queryAtta响应格式逐字一致等)都是真实现象,但双q路径下微签的错误行为恰好与登录态错误同形,被带偏了。
 3. **部署注意事项(已入checklist心智)**:nginx服务的是/opt/*/dist不是/var/www(deploy.sh的/var/www拷贝是遗留,可考虑后续删掉避免误导);SPA兜底会吞掉不存在的静态资源URL返回index.html(200),"curl到200"不能证明chunk存在,要grep内容。
+
+## Review 18(2026-09-21 22:50,第二轮生产实测反馈——绑定链路体验四项改进,7db5e1f已上线)
+
+GasCan第二轮从头测试(两台手机两个租客),三个反馈的结论与处理:
+
+1. **"两个二维码有什么不一样"——是同一个**。创建成功弹窗的二维码和详情页"生成绑定二维码"按钮调的是同一个接口(POST /leases/:id/bind-qrcode),同一租客同一个场景值,内容完全一样;弹窗只是创建后顺手展示一次,按钮随时重新出同一张(临时二维码30天有效)。改进:详情页现在租客未绑定时**自动**展示二维码,不用点按钮。
+2. **绑定成功改发图文卡片**(原来是一段纯文字):客服消息新增sendNewsMessage(news类型),标题"绑定成功/点击查看您的租约和账单"+卡片底图(640x320,uploads/bind-success-card.png)+链接直达租客端;发送失败自动回退纯文字。注意:data/uploads目录在上一轮清数据时被误删,本轮已重建(nginx alias指向它)。
+3. **"扫码绑定了却说未绑定账号/未绑定租约"——数据上没有bug,是两个体验问题**:库里租客716(18918690456)确实已绑定,租客717(18918690486)从未扫过自己那份码(每份租约=独立租客=要各自扫码绑定),他以为扫一次全覆盖。体验修复:①菜单"租客端"URL从/tenant/login统一为/tenant/(与消息文字一致,经menu/create更新,errcode 0);②租客端在微信内**免点按钮**直接静默授权(snsapi_base无感,非微信浏览器保留按钮);③登录接口对未绑定openid**不再发token**——之前会存下"无租客"的token导致后续接口报"未绑定租约"的迷惑toast,现在未绑定就停在登录页显示引导文案。
+4. **运维杂记**:微信secret的env变量名是WECHAT_SECRET(不是WECHAT_APP_SECRET,排查时瞎猜了一次差点误判"secret被重置");调微信API的secret必须encodeURIComponent(含+/=);get_current_selfmenu已404,改用menu/get。
