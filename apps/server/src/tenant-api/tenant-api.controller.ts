@@ -8,7 +8,7 @@ import {
   ParseIntPipe,
   Req,
   Res,
-  BadRequestException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { LeasesService } from '../leases/leases.service';
@@ -42,7 +42,7 @@ export class TenantApiController {
   @UseGuards(TenantGuard)
   async getMyBills(@Req() req: Request) {
     const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
-    if (!user.tenantId) throw new BadRequestException('未绑定租约');
+    if (!user.tenantId) throw new UnauthorizedException('请重新授权');
     return this.tenantApiService.getMyBills(user.tenantId);
   }
 
@@ -50,7 +50,7 @@ export class TenantApiController {
   @UseGuards(TenantGuard)
   async getMyLeases(@Req() req: Request) {
     const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
-    if (!user.tenantId) throw new BadRequestException('未绑定租约');
+    if (!user.tenantId) throw new UnauthorizedException('请重新授权');
     return this.tenantApiService.getMyLeases(user.tenantId);
   }
 
@@ -63,7 +63,7 @@ export class TenantApiController {
 
   private getTenantId(req: Request): number {
     const user = (req as unknown as Record<string, unknown>)['user'] as JwtPayload;
-    if (!user.tenantId) throw new BadRequestException('未绑定租约');
+    if (!user.tenantId) throw new UnauthorizedException('请重新授权');
     return user.tenantId;
   }
 

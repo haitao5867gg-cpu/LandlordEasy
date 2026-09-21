@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
@@ -35,6 +35,7 @@ export class TenantApiService {
 
   /** 获取租客的所有账单(按租约状态驱动) */
   async getMyBills(tenantId: number) {
+    await this.ensureTenantExists(tenantId);
     const leases = await this.prisma.lease.findMany({
       where: { tenantId },
       include: {
@@ -66,11 +67,23 @@ export class TenantApiService {
 
   /** 获取租客的租约列表 */
   async getMyLeases(tenantId: number) {
+    await this.ensureTenantExists(tenantId);
     return this.prisma.lease.findMany({
       where: { tenantId },
       include: { room: { include: { building: true } } },
       orderBy: { startDate: 'desc' },
     });
+  }
+
+  // token指向的租客已不存在(典型场景:循环测试中租约被清理重测,手机里
+  // 还存着指向已删租客的登录凭证)→ 返回401让租客端自动登出并重新微信
+  // 授权;返回400只会弹一句报错,旧凭证永远清不掉。
+  private async ensureTenantExists(tenantId: number) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true },
+    });
+    if (!tenant) throw new UnauthorizedException('请重新授权');
   }
 
   createRepairRequest(leaseId: number, tenantId: number, dto: CreateRepairRequestDto) {
