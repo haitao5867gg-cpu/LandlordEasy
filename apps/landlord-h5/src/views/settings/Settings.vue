@@ -6,7 +6,7 @@
       <van-field v-model.number="settings.reminderOverdueInterval" label="逾期间隔(天)" type="number" />
       <van-button size="small" style="margin:8px 16px" @click="saveSettings">保存</van-button>
     </van-cell-group>
-    <van-cell-group inset title="收款码">
+    <van-cell-group v-if="unverifiedFeatures" inset title="收款码">
       <van-image v-if="settings.qrcodeImageUrl" :src="settings.qrcodeImageUrl" width="150" height="150" />
       <van-uploader :after-read="uploadQrcode" accept="image/*">
         <van-button size="small" style="margin:8px 16px">上传收款码</van-button>
@@ -23,6 +23,7 @@
 </template>
 
 <script setup lang="ts">
+import { UNVERIFIED_FEATURES_ENABLED as unverifiedFeatures } from '../../utils/features';
 import { reactive, onMounted } from 'vue';
 import { showToast } from 'vant';
 import http from '../../utils/http';

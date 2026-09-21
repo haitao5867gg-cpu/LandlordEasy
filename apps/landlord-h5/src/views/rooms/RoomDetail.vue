@@ -37,13 +37,13 @@
             </van-cell>
           </van-cell-group>
         </van-tab>
-        <van-tab title="维修记录">
+        <van-tab v-if="unverifiedFeatures" title="维修记录">
           <van-empty v-if="!room.maintenanceRecords?.length" description="暂无记录" />
           <van-cell-group v-else inset>
             <van-cell v-for="m in room.maintenanceRecords" :key="m.id" :title="m.content" :label="m.date?.split('T')[0]" :value="`¥${m.cost}`" />
           </van-cell-group>
         </van-tab>
-        <van-tab title="支出">
+        <van-tab v-if="unverifiedFeatures" title="支出">
           <van-empty v-if="!room.expenses?.length" description="暂无支出" />
           <van-cell-group v-else inset>
             <van-cell v-for="e in room.expenses" :key="e.id" :title="e.name" :label="e.date?.split('T')[0]" :value="`¥${e.amount}`" />
@@ -66,6 +66,7 @@
 </template>
 
 <script setup lang="ts">
+import { UNVERIFIED_FEATURES_ENABLED as unverifiedFeatures } from '../../utils/features';
 import { ref, onMounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import http from '../../utils/http';

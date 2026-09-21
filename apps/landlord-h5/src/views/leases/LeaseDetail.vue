@@ -163,8 +163,8 @@
       </van-cell-group>
 
       <div v-if="lease.status === 'ACTIVE'" style="padding:16px;display:flex;gap:12px;">
-        <van-button type="danger" block @click="showEndDialog = true">退租</van-button>
-        <van-button type="primary" block @click="showRenewDialog = true">续签</van-button>
+        <van-button v-if="unverifiedFeatures" type="danger" block @click="showEndDialog = true">退租</van-button>
+        <van-button v-if="unverifiedFeatures" type="primary" block @click="showRenewDialog = true">续签</van-button>
       </div>
     </template>
 
@@ -248,6 +248,7 @@
 </template>
 
 <script setup lang="ts">
+import { UNVERIFIED_FEATURES_ENABLED as unverifiedFeatures } from '../../utils/features';
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showToast, showConfirmDialog } from 'vant';

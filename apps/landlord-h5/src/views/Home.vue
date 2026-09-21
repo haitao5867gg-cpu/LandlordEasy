@@ -37,6 +37,7 @@
           <template #icon><van-icon name="gold-coin-o" class="cell-icon" /></template>
         </van-cell>
         <van-cell
+          v-if="unverifiedFeatures"
           title="待处理申请"
           :value="String(applicationCount)"
           is-link
@@ -50,6 +51,7 @@
 </template>
 
 <script setup lang="ts">
+import { UNVERIFIED_FEATURES_ENABLED as unverifiedFeatures } from '../utils/features';
 import { ref, onMounted, watch } from 'vue';
 import http from '../utils/http';
 import { usePropertyStore } from '../stores/property';

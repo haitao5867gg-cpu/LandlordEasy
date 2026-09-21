@@ -27,7 +27,7 @@
 
       <div v-if="bill.status === 'OVERDUE'" style="padding:16px;display:flex;gap:12px;">
         <van-button block @click="showAddItem = true">追加费用项</van-button>
-        <van-button type="warning" block @click="handleLateFee">追加滞纳金</van-button>
+        <van-button v-if="unverifiedFeatures" type="warning" block @click="handleLateFee">追加滞纳金</van-button>
       </div>
       <div v-else-if="['PENDING','OVERDUE'].includes(bill.status)" style="padding:16px;">
         <van-button block @click="showAddItem = true">追加费用项</van-button>
@@ -59,6 +59,7 @@
 </template>
 
 <script setup lang="ts">
+import { UNVERIFIED_FEATURES_ENABLED as unverifiedFeatures } from '../../utils/features';
 import { ref, reactive, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { showToast } from 'vant';
