@@ -574,3 +574,9 @@ GasCan 确认部署后,连服务器发现 `/opt/landlord-easy` 的 git HEAD 停�
 7. **PDF固定清单行(CHECKLIST_ROWS)与ContractSettings.defaultItemChecklist联动**——两份清单名需手动一致,改名会落入"其他"栏(有兜底非bug)
 8. **前端any类型治理**——新页面沿用ref<any[]>风格,新代码起应定义响应interface
 9. **schema历史列清理**——gasFeeRule/gasMeterReading/waterFeeRule/electricityFeeRule/facilities/水表电表底数等已无读取方的列(上线稳定后一次迁移)
+
+## Review 17(2026-09-21 20:26,GasCan生产实测两反馈的处理)
+
+1. **键盘遮挡补充条款(已修复,9038cdb,已上线)**:根因是iOS微信webview键盘弹出时layout viewport不收缩,`position=bottom`的van-popup被键盘整层盖住(Android会压缩视口所以无此问题)。修复:textarea focus时监听visualViewport resize/scroll,把弹窗translateY(-键盘高度)抬起(上限40%屏高),blur还原并解绑;弹窗内容加.contract-popup-body(max-height 88vh-53px,overflow-y auto)兜底可滚;另加350ms后scrollIntoView(center)。textarea顺手加maxlength=500+show-word-limit。验证:vue-tsc+build过、线上LeaseDetail-BYqep2tc.js含修复代码、浏览器实测lease 715详情页渲染正常(注意生产lease id是715不是2,数据重置后自增未归零)。**真机键盘效果待GasCan下次打开弹窗实测**。
+2. **微签TokenNotFound(非我方问题,已写支持清单)**:诊断结论——微签H5接收方流程内部"未登录"错误(其config.js明确nologin:'TokenNotFound')。我方逐环curl复现:短链302正常/任务数据完整/queryAtta无token时响应与截图逐字一致/伪造Cookie与Authorization均不影响no/接口。疑似残留旧登录态所致,真实复签用户可能都会遇到,需微签官方确认。详见docs/微签技术支持问题清单.md第1条。
+3. **部署注意事项(已入checklist心智)**:nginx服务的是/opt/*/dist不是/var/www(deploy.sh的/var/www拷贝是遗留,可考虑后续删掉避免误导);SPA兜底会吞掉不存在的静态资源URL返回index.html(200),"curl到200"不能证明chunk存在,要grep内容。
