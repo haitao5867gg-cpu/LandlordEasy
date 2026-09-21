@@ -34,8 +34,15 @@ import { ref, onMounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../utils/http';
-import { createWechatRedirectUri } from '../utils/wechat-oauth';
-import { useAuthStore } from '../stores/auth';
+import { useAuthStore, markAuthJustDone } from '../stores/auth';
+import { redirectToWechatAuth, isInWechatBrowser } from '../utils/wechat-oauth';
+
+// 授权回来后要回到的目标页面(支付前无感重授权时由PayBill写入)
+const AFTER_LOGIN_KEY = 'tenant_after_login';
+
+function redirectToWechat() {
+  redirectToWechatAuth();
+}
 
 const router = useRouter();
 const route = useRoute();
@@ -89,17 +96,6 @@ async function handleLogin() {
   } finally { loginLoading.value = false; }
 }
 
-function redirectToWechat() {
-  const appId = import.meta.env.VITE_WECHAT_APPID || '';
-  const redirectUri = createWechatRedirectUri(
-    window.location.origin,
-    import.meta.env.BASE_URL,
-  );
-  const scope = 'snsapi_base';
-  const url = `https://open.weixin.qq.com/connect/oauth2/authorize?appid=${appId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=tenant#wechat_redirect`;
-  window.location.href = url;
-}
-
 async function handleWechatCallback(code: string) {
   loginLoading.value = true;
   try {
@@ -118,7 +114,15 @@ function applyLoginResult(res: { token: string; bound: boolean }) {
     authStore.setToken(res.token);
     authStore.setBound(true);
     loggedIn.value = true;
-    router.push('/');
+    markAuthJustDone();
+    // 支付前无感重授权的场景:回到支付页继续,而不是默认首页
+    const afterLogin = sessionStorage.getItem(AFTER_LOGIN_KEY);
+    if (afterLogin) {
+      sessionStorage.removeItem(AFTER_LOGIN_KEY);
+      router.push(afterLogin);
+    } else {
+      router.push('/');
+    }
     return;
   }
   authStore.logout();

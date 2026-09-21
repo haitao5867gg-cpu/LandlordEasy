@@ -87,6 +87,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { showToast } from 'vant';
 import http from '../utils/http';
+import { getAuthAt, PAY_AUTH_STALE_MS } from '../stores/auth';
+import { redirectToWechatAuth, isInWechatBrowser } from '../utils/wechat-oauth';
 
 type PaymentMethod = 'wechat';
 type PaymentMode = 'mock' | 'real';
@@ -313,6 +315,16 @@ function invokeWechatPay(params: WechatParams) {
 async function handleWechatPay() {
   if (!bill.value || activeMethod.value) return;
 
+  // 微信JSAPI支付能力与"最近一次网页授权"绑定,授权闲置数分钟后调起会
+  // 报-1(2026-09-21两台手机8次实测)。授权超过3分钟就先无感重走一次
+  // OAuth(用户无感知,约1秒),回来后继续支付。
+  if (isInWechatBrowser() && !route.query.code && Date.now() - getAuthAt() > PAY_AUTH_STALE_MS) {
+    sessionStorage.setItem('tenant_after_login', route.fullPath);
+    sessionStorage.setItem('tenant_resume_pay', '1');
+    redirectToWechatAuth();
+    return;
+  }
+
   activeMethod.value = 'wechat';
   creatingMethod.value = 'wechat';
   try {
@@ -350,6 +362,13 @@ onMounted(async () => {
     await refreshBill();
   } finally {
     loading.value = false;
+  }
+  // 支付前无感重授权回来后自动继续支付,用户只感觉到页面闪了一下
+  if (sessionStorage.getItem('tenant_resume_pay') === '1') {
+    sessionStorage.removeItem('tenant_resume_pay');
+    if (bill.value && bill.value.status !== 'PAID' && isInWechatBrowser()) {
+      handleWechatPay();
+    }
   }
 });
 
