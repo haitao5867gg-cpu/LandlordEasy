@@ -183,31 +183,36 @@
     </van-dialog>
 
     <!-- 生成电子签约弹窗 -->
-    <van-popup v-model:show="showContractDialog" position="bottom" round class="contract-popup">
+    <van-popup v-model:show="showContractDialog" position="bottom" round class="contract-popup" :style="contractPopupStyle">
       <div class="contract-popup-header">生成电子签约</div>
-      <van-form @submit="handleGenerateContract">
-
-
-        <van-cell-group title="补充条款">
-          <van-field
-            v-model="contractForm.extraTerms"
-            type="textarea"
-            rows="2"
-            autosize
-            placeholder="可选,请输入补充条款"
-          />
-        </van-cell-group>
-        <van-cell-group title="合同条款(预填系统默认值,可改)">
-          <van-field v-model="contractForm.penaltyMonths" label="违约金月数" type="number" />
-          <van-field v-model="contractForm.overdueToleranceDays" label="逾期容忍天数" type="number" />
-          <van-field v-model="contractForm.cleaningFee" label="清洁费" type="number" />
-          <van-field v-model="contractForm.renewalNoticeDays" label="续租提前通知" type="number" />
-        </van-cell-group>
-        <div class="contract-popup-actions">
-          <van-button block plain type="default" @click="showContractDialog = false">取消</van-button>
-          <van-button block type="primary" native-type="submit" :loading="generating">生成</van-button>
-        </div>
-      </van-form>
+      <div class="contract-popup-body">
+        <van-form @submit="handleGenerateContract">
+          <van-cell-group title="补充条款">
+            <van-field
+              ref="extraTermsRef"
+              v-model="contractForm.extraTerms"
+              type="textarea"
+              rows="3"
+              autosize
+              maxlength="500"
+              show-word-limit
+              placeholder="可选,请输入补充条款"
+              @focus="onExtraTermsFocus"
+              @blur="onExtraTermsBlur"
+            />
+          </van-cell-group>
+          <van-cell-group title="合同条款(预填系统默认值,可改)">
+            <van-field v-model="contractForm.penaltyMonths" label="违约金月数" type="number" />
+            <van-field v-model="contractForm.overdueToleranceDays" label="逾期容忍天数" type="number" />
+            <van-field v-model="contractForm.cleaningFee" label="清洁费" type="number" />
+            <van-field v-model="contractForm.renewalNoticeDays" label="续租提前通知" type="number" />
+          </van-cell-group>
+          <div class="contract-popup-actions">
+            <van-button block plain type="default" @click="showContractDialog = false">取消</van-button>
+            <van-button block type="primary" native-type="submit" :loading="generating">生成</van-button>
+          </div>
+        </van-form>
+      </div>
     </van-popup>
 
     <!-- 同住人新增/编辑弹窗 -->
@@ -243,7 +248,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showToast, showConfirmDialog } from 'vant';
 import http from '../../utils/http';
@@ -287,6 +292,47 @@ const contractForm = reactive({
   overdueToleranceDays: '',
   cleaningFee: '',
   renewalNoticeDays: '',
+});
+
+// iOS微信里键盘弹出时视口不收缩,底部弹窗会被键盘整个盖住(2026-09-21
+// GasCan生产实测反馈)。用visualViewport把弹窗抬到键盘上方;Android微信
+// 会自动压缩布局视口,高度差为0,不受影响。
+const extraTermsRef = ref();
+const keyboardLift = ref(0);
+const contractPopupStyle = computed(() =>
+  keyboardLift.value > 0 ? { transform: `translateY(-${keyboardLift.value}px)` } : undefined,
+);
+let detachViewportListener: (() => void) | null = null;
+
+function onExtraTermsFocus() {
+  if (typeof window === 'undefined' || !window.visualViewport) return;
+  const vv = window.visualViewport;
+  const apply = () => {
+    const keyboardHeight = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    keyboardLift.value = Math.min(keyboardHeight, window.innerHeight * 0.4);
+  };
+  apply();
+  vv.addEventListener('resize', apply);
+  vv.addEventListener('scroll', apply);
+  detachViewportListener = () => {
+    vv.removeEventListener('resize', apply);
+    vv.removeEventListener('scroll', apply);
+  };
+  // 键盘弹起动画约300ms后再滚一次,保证输入框落在可视区中部
+  setTimeout(() => {
+    extraTermsRef.value?.$el?.querySelector('textarea')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, 350);
+}
+
+function onExtraTermsBlur() {
+  keyboardLift.value = 0;
+  detachViewportListener?.();
+  detachViewportListener = null;
+}
+
+onUnmounted(() => {
+  detachViewportListener?.();
+  detachViewportListener = null;
 });
 const currentSigningTask = computed(() => lease.value?.contractSigningTasks?.[0] ?? null);
 const signQrcode = ref<{ qrcodeImage: string; signUrl: string } | null>(null);
@@ -650,8 +696,9 @@ async function handleRenew() {
 .contract-link { display: inline-block; color: #1989fa; font-size: 14px; }
 .contract-hint { color: #969799; font-size: 12px; margin: 0 0 12px; }
 .contract-manual-actions { display: flex; justify-content: center; gap: 12px; }
-.contract-popup { max-height: 88vh; overflow-y: auto; }
+.contract-popup { max-height: 88vh; transition: transform 0.25s ease-out; }
 .contract-popup-header { padding: 16px; text-align: center; font-size: 17px; font-weight: 600; }
+.contract-popup-body { max-height: calc(88vh - 53px); overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .facility-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 8px; padding: 12px 16px 18px; }
 .contract-popup-actions { display: flex; gap: 12px; padding: 16px; }
 .handover-actions { padding: 8px 16px; }
