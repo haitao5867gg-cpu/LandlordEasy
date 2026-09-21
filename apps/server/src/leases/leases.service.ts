@@ -52,6 +52,20 @@ import { BillEngineService } from '../bills/bill-engine.service';
 import { buildRentReminderMessage } from '../reminders/rent-reminder-message';
 const DEFAULT_WEIQIAN_SIGN_BASE_URL = 'http://forwave.picp.net:8888';
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+// 拼微签接收方签署链接。base约定不含 /q 路径(dev与代码默认值都不含);
+// 2026-09-21生产事故:WEIQIAN_SIGN_BASE_URL按"签署页域名"原文配成了
+// https://www.weiqian.com.cn:8887/q/,拼出 /q/q/{shortCode},租客点开
+// 模板消息看到微签返回的裸JSON错误页。这里同时剥掉尾斜杠和尾部的/q,
+// 让两种写法都收敛到正确链接,同类事故不再依赖env写法。
+function buildSignUrl(shortCode: string): string {
+  const base = (
+    process.env.WEIQIAN_SIGN_BASE_URL || DEFAULT_WEIQIAN_SIGN_BASE_URL
+  )
+    .replace(/\/+$/, '')
+    .replace(/\/q$/i, '');
+  return `${base}/q/${shortCode}`;
+}
 type DbClient = Prisma.TransactionClient | PrismaService;
 type LockTable =
   | 'rooms'
@@ -460,10 +474,7 @@ export class LeasesService {
       createdTask,
       callbackToken,
     );
-    const signBaseUrl = (
-      process.env.WEIQIAN_SIGN_BASE_URL || DEFAULT_WEIQIAN_SIGN_BASE_URL
-    ).replace(/\/+$/, '');
-    const signUrl = `${signBaseUrl}/q/${createdTask.shortCode}`;
+    const signUrl = buildSignUrl(createdTask.shortCode);
     const roomLabel = this.formatRoomLabel(task.lease.room);
     try {
       await this.wechatCustomerService.sendTextMessage(
@@ -753,10 +764,7 @@ ${signUrl}
     if (!task.weiqianShortCode) {
       throw new BadRequestException('该任务没有签署短链,无法生成二维码');
     }
-    const signBaseUrl = (
-      process.env.WEIQIAN_SIGN_BASE_URL || DEFAULT_WEIQIAN_SIGN_BASE_URL
-    ).replace(/\/+$/, '');
-    const signUrl = `${signBaseUrl}/q/${task.weiqianShortCode}`;
+    const signUrl = buildSignUrl(task.weiqianShortCode);
     const qrcodeImage = await QRCode.toDataURL(signUrl, { width: 440, margin: 2 });
     return { qrcodeImage, signUrl };
   }
