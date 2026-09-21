@@ -250,7 +250,7 @@ describe('WechatController contract signing events', () => {
         templateId: 'tpl-bind-test',
         url: 'https://dev.landlordeasy.cn/tenant/',
         data: {
-          time3: { value: '2026-09-21至2027-09-20' },
+          time3: { value: '2026-09-21' },
           thing2: { value: 'R栋101' },
         },
       }),

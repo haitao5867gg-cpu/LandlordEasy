@@ -255,12 +255,15 @@ export class WechatController {
         const d = (x: Date) =>
           `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
         const roomLabel = `${lease.room.building.name}${lease.room.roomNo}`;
+        // time3只发单个起租日期:微信time类字段拒绝任何"起至止"区间写法
+        // (2026-09-21真实API实测,"A至B"/"A 至 B"/中文日期区间全部47003
+        // data.time3.value invalid,只有单日期通过);到期日在租约详情里看。
         const sent = await this.wechatNotify.sendTemplateMessage({
           openid,
           templateId,
           url: tenantUrl,
           data: {
-            time3: { value: `${d(lease.startDate)}至${d(lease.endDate)}` },
+            time3: { value: d(lease.startDate) },
             thing2: { value: roomLabel.slice(0, 20) },
           },
         });
