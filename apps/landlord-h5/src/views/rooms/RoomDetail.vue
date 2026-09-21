@@ -52,7 +52,12 @@
         <van-tab title="操作日志">
           <van-empty v-if="!room.auditLogs?.length" description="暂无日志" />
           <van-cell-group v-else inset>
-            <van-cell v-for="log in room.auditLogs" :key="log.id" :title="log.action" :label="log.createdAt?.replace('T',' ').slice(0,19)" />
+            <van-cell
+              v-for="log in room.auditLogs"
+              :key="log.id"
+              :title="auditActionText(log.action)"
+              :label="`${log.operatorName || '系统'} · ${log.createdAt?.replace('T',' ').slice(0,19)}`"
+            />
           </van-cell-group>
         </van-tab>
       </van-tabs>
@@ -65,6 +70,32 @@ import { ref, onMounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import http from '../../utils/http';
 import { roomStatusMap } from '../../utils/status';
+
+// 操作日志从接口原文翻译成人话(2026-09-21 GasCan反馈"都是接口日志看不懂")。
+// 只覆盖已知的路由模式,没匹配到的原样展示,新增接口时在这里补一行即可。
+const AUDIT_ACTION_PATTERNS: Array<[RegExp, string]> = [
+  [/^POST \/api\/v1\/properties$/, '创建公寓'],
+  [/^PUT \/api\/v1\/properties\/\d+$/, '修改公寓信息'],
+  [/^POST \/api\/v1\/buildings$/, '创建楼栋'],
+  [/^POST \/api\/v1\/rooms\/batch$/, '批量创建房间'],
+  [/^PUT \/api\/v1\/rooms\/\d+$/, '修改房间信息'],
+  [/^POST \/api\/v1\/leases$/, '新签租约'],
+  [/^PUT \/api\/v1\/leases\/\d+$/, '修改租约'],
+  [/^POST \/api\/v1\/leases\/\d+\/co-occupants$/, '登记共同居住人'],
+  [/^POST \/api\/v1\/leases\/\d+\/bind-qrcode$/, '生成租客绑定二维码'],
+  [/^POST \/api\/v1\/leases\/\d+\/contract-signing-tasks$/, '发起电子签约'],
+  [/^POST \/api\/v1\/leases\/contract-signing-tasks\/\d+\/launch$/, '发起微签签署'],
+  [/^POST \/api\/v1\/handover$/, '登记房屋交接'],
+  [/^POST \/api\/v1\/bills\/\d+\/remind$/, '发送账单催缴提醒'],
+  [/^POST \/api\/v1\/bills\/generate$/, '手动生成账单'],
+];
+
+function auditActionText(action: string): string {
+  for (const [pattern, text] of AUDIT_ACTION_PATTERNS) {
+    if (pattern.test(action)) return text;
+  }
+  return action;
+}
 
 const route = useRoute();
 const room = ref<any>(null);

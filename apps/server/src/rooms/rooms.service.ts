@@ -58,9 +58,13 @@ export class RoomsService {
         },
         orderBy: { createdAt: 'desc' },
         take: 50,
+        include: { operator: { select: { name: true } } },
       })
     ).map((log) => ({
       ...log,
+      // 操作人名字一并带回,前端展示"谁在什么时间做了什么"(2026-09-21
+      // GasCan反馈操作日志是接口原文,人看不懂)
+      operatorName: log.operator?.name,
       detail: log.detail === null ? null : (maskPii(log.detail) as object),
     }));
 

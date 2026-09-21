@@ -7,7 +7,7 @@ const router = createRouter({
     { path: '/login', name: 'login', component: () => import('../views/Login.vue') },
     { path: '/', name: 'home', component: () => import('../views/MyBills.vue') },
     { path: '/leases', name: 'leases', component: () => import('../views/MyLeases.vue') },
-    { path: '/leases/:id/services', name: 'leaseServices', component: () => import('../views/LeaseServices.vue') },
+    { path: '/leases/:id/services', name: 'leaseServices', component: () => import('../views/LeaseServices.vue'), meta: { requiresLeaseServices: true } },
     { path: '/bills/:id/pay', name: 'pay', component: () => import('../views/PayBill.vue') },
   ],
 });
@@ -25,6 +25,10 @@ router.beforeEach((to) => {
   }
   if (to.path !== '/login' && !authStore.token) {
     return { path: '/login', query: to.query };
+  }
+  // 生产未开放的在线服务页:入口已隐藏,直接访问也拦回我的租约
+  if (to.meta?.requiresLeaseServices && import.meta.env.VITE_TENANT_LEASE_SERVICES !== '1') {
+    return { path: '/leases' };
   }
 });
 

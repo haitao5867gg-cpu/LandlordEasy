@@ -49,6 +49,7 @@ describe('RoomsService', () => {
         },
         orderBy: { createdAt: 'desc' },
         take: 50,
+        include: { operator: { select: { name: true } } },
       });
       expect(result.auditLogs.map((log) => log.id)).toEqual([2, 1]);
     });

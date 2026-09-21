@@ -9,8 +9,8 @@
         :key="l.id"
         :title="`${l.room?.building?.name} ${l.room?.roomNo}`"
         :label="`${l.startDate?.split('T')[0]} ~ ${l.endDate?.split('T')[0]}`"
-        :is-link="l.status === 'ACTIVE'"
-        @click="l.status === 'ACTIVE' && $router.push(`/leases/${l.id}/services`)"
+        :is-link="l.status === 'ACTIVE' && leaseServicesEnabled"
+        @click="l.status === 'ACTIVE' && leaseServicesEnabled && $router.push(`/leases/${l.id}/services`)"
       >
         <template #value>
           <van-tag :type="l.status === 'ACTIVE' ? 'success' : 'default'">{{ l.status === 'ACTIVE' ? '在租' : '已退租' }}</van-tag>
@@ -34,6 +34,11 @@
 </template>
 
 <script setup lang="ts">
+// 在线服务(报修/退租/换租)功能开关:生产环境未端到端验收前隐藏。
+// 用 VITE_TENANT_LEASE_SERVICES 控制(2026-09-21 GasCan拍板:没在dev走通
+// 的功能不上生产)。默认关闭,dev的.env显式打开。
+const leaseServicesEnabled = import.meta.env.VITE_TENANT_LEASE_SERVICES === '1';
+
 import { ref, onMounted } from 'vue';
 import http from '../utils/http';
 import { downloadContract } from '../utils/contracts';
