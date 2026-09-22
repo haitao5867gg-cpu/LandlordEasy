@@ -59,6 +59,13 @@ const isMockMode = ref(
 );
 
 onMounted(() => {
+  // 已登录的房东直接进首页——公众号菜单/历史入口常直链/login,不能让
+  // 已登录用户每次都停在按钮页(2026-09-22 GasCan反馈"每次都要点一下")
+  if (authStore.token && !route.query.code) {
+    router.replace('/');
+    return;
+  }
+
   void fetchReviewMode();
 
   // 从 URL 获取 mock_openid(开发模式)
@@ -75,6 +82,17 @@ onMounted(() => {
     // 微信 code 只能使用一次；先从地址栏移除，避免刷新后重复提交失效 code。
     window.history.replaceState({}, '', '/login');
     handleWechatCallback(code);
+    return;
+  }
+
+  // 微信内未登录:免点按钮直接静默授权(snsapi_base无感)。30秒防循环:
+  // 授权回来若登录仍失败(如未加白名单),停回按钮页展示错误,不再无限跳。
+  if (!isMockMode.value && /MicroMessenger/i.test(navigator.userAgent)) {
+    const triedAt = Number(sessionStorage.getItem('landlord_oauth_ts')) || 0;
+    if (Date.now() - triedAt > 30_000) {
+      sessionStorage.setItem('landlord_oauth_ts', String(Date.now()));
+      redirectToWechat();
+    }
   }
 });
 
