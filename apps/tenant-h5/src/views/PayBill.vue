@@ -85,7 +85,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
-import { showToast } from 'vant';
+import { showToast, showConfirmDialog } from 'vant';
 import http from '../utils/http';
 import { getAuthAt, PAY_AUTH_STALE_MS } from '../stores/auth';
 import { redirectToWechatAuth, isInWechatBrowser } from '../utils/wechat-oauth';
@@ -286,20 +286,26 @@ function invokeWechatPay(params: WechatParams) {
       package: params.package,
       signType: params.signType,
       paySign: params.paySign,
-    }, (result) => {
+    }, async (result) => {
       // 调起结果原样上报服务器落日志——失败的真实原因只在err_msg/err_desc里
       reportInvokeResult(result);
-      if (result.err_msg === 'get_brand_wcpay_request:cancel') {
-        showToast('已取消微信支付');
-      } else if (result.err_msg && result.err_msg !== 'get_brand_wcpay_request:ok') {
-        // 把微信返回的完整错误透出来——JSAPI调起失败的原因(签名/绑定/目录)
-        // 只存在于err_msg/err_desc里,吞掉它就只能瞎猜(2026-09-21首次真实
-        // 调起失败排查时加)
-        showToast({
-          message: `支付调起失败: ${result.err_msg}${result.err_desc ? `(${result.err_desc})` : ''}`,
-          duration: 5000,
+      if (!result.err_msg || result.err_msg === 'get_brand_wcpay_request:ok') return;
+      // 微信内调起失败(含安卓上失败弹窗被点掉后回调只剩cancel的情况):
+      // 弹一次明确的重试确认,重新下单再调。2026-09-22安卓机实测授权保鲜
+      // 生效(页面闪=重授权)但调起仍3连败,真因被弹窗吞掉——给用户重试
+      // 出口,同时每次尝试都自动上报。
+      stopPolling();
+      activeMethod.value = null;
+      outTradeNo.value = '';
+      try {
+        await showConfirmDialog({
+          title: '微信支付未完成',
+          message: result.err_desc ? `${result.err_desc}` : '要重新发起支付吗?',
+          confirmButtonText: '重新支付',
+          cancelButtonText: '暂不支付',
         });
-      }
+        handleWechatPay();
+      } catch { /* 用户选择暂不支付 */ }
     });
   };
 
