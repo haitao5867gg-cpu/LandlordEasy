@@ -239,4 +239,14 @@ const doc = new Document({
   }],
 });
 
-Packer.toBuffer(doc).then((b) => fs.writeFileSync(process.argv[2] || 'v4-template.docx', b));
+// docx 库输出段落边框顺序为 上/下/左/右，OOXML 规范要求 上/左/下/右，生成后调整顺序
+const JSZip = require('jszip');
+Packer.toBuffer(doc).then(async (b) => {
+  const zip = await JSZip.loadAsync(b);
+  const xml = (await zip.file('word/document.xml').async('string')).replace(
+    /<w:pBdr>(<w:top [^>]*\/>)?(<w:bottom [^>]*\/>)?(<w:left [^>]*\/>)?(<w:right [^>]*\/>)?<\/w:pBdr>/g,
+    (_m, t = '', bo = '', l = '', r = '') => `<w:pBdr>${t}${l}${bo}${r}</w:pBdr>`,
+  );
+  zip.file('word/document.xml', xml);
+  fs.writeFileSync(process.argv[2] || 'v4-template.docx', await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+});
