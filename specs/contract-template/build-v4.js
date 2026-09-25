@@ -2,7 +2,7 @@
 const fs = require('fs');
 const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, AlignmentType,
-  BorderStyle, Footer, PageNumber, ShadingType, PageBreak, Tab, TabStopType, VerticalAlign,
+  BorderStyle, Footer, PageNumber, ShadingType, VerticalAlign, TableLayoutType, LevelFormat,
 } = require('docx');
 
 const SONG = { ascii: 'SimSun', eastAsia: 'SimSun', hAnsi: 'SimSun' };
@@ -34,43 +34,48 @@ const section = (text) => new Paragraph({
   keepNext: true,
 });
 // 条标题：黑体 + 下方细线
-const art = (text) => new Paragraph({
+const art = (text) => (artNo += 1, new Paragraph({
   children: [new TextRun({ text, font: HEI, size: 24, bold: true })],
   spacing: { before: 300, after: 120 },
   border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: RULE, space: 2 } },
   keepNext: true,
-});
-// 款：序号悬挂缩进，换行后与正文对齐
-const HANG = 400;
-const item = (no, text, o = {}) => new Paragraph({
-  children: [new TextRun({ text: no, font: SONG, size: SZ }), new TextRun({ children: [new Tab()] }), ...runs(text)],
-  tabStops: [{ type: TabStopType.LEFT, position: HANG + (o.level ? HANG : 0) }],
-  indent: { left: HANG + (o.level ? HANG : 0), hanging: HANG },
+}));
+// 款：用 Word 原生编号实现悬挂缩进（手机预览不认制表位，手写"1.+Tab"会错位），每条从1重新编号
+let artNo = 0;
+const numbering = {
+  config: [
+    { reference: 'item', levels: [{ level: 0, format: LevelFormat.DECIMAL, text: '%1.', alignment: AlignmentType.LEFT,
+      style: { paragraph: { indent: { left: 420, hanging: 420 } }, run: { font: SONG, size: SZ } } }] },
+    { reference: 'sub', levels: [{ level: 0, format: LevelFormat.DECIMAL, text: '（%1）', alignment: AlignmentType.LEFT,
+      style: { paragraph: { indent: { left: 1080, hanging: 660 } }, run: { font: SONG, size: SZ } } }] },
+  ],
+};
+const item = (_no, text, o = {}) => new Paragraph({
+  children: runs(text),
+  numbering: { reference: 'item', level: 0, instance: artNo },
   alignment: AlignmentType.JUSTIFIED,
   spacing: { line: LINE, after: o.after ?? 100 },
 });
-const sub = (no, text) => new Paragraph({
-  children: [new TextRun({ text: no, font: SONG, size: SZ }), new TextRun({ children: [new Tab()] }), ...runs(text)],
-  tabStops: [{ type: TabStopType.LEFT, position: HANG + 600 }],
-  indent: { left: HANG + 600, hanging: 600 },
+const sub = (_no, text) => new Paragraph({
+  children: runs(text),
+  numbering: { reference: 'sub', level: 0, instance: artNo },
   spacing: { line: LINE, after: 40 },
 });
 
 // 表格
-const line = { style: BorderStyle.SINGLE, size: 4, color: '808080' };
-const none = { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' };
+const line = { style: BorderStyle.SINGLE, size: 4, color: 'BFBFBF' };
 const cell = (text, width, o = {}) => new TableCell({
   width: { size: width, type: WidthType.DXA },
   columnSpan: o.span,
   verticalAlign: VerticalAlign.CENTER,
-  borders: o.noBorder ? { top: none, bottom: none, left: none, right: none } : { top: line, bottom: line, left: line, right: line },
+  borders: { top: line, bottom: line, left: line, right: line },
   shading: o.shade ? { type: ShadingType.CLEAR, fill: o.shade, color: 'auto' } : undefined,
   margins: { top: o.pad ?? 90, bottom: o.pad ?? 90, left: 140, right: 140 },
   children: (Array.isArray(text) ? text : [text]).map((t) => para(t, {
     font: o.hei ? HEI : SONG, align: o.center ? AlignmentType.CENTER : AlignmentType.LEFT, after: 0, line: 300,
   })),
 });
-const table = (cols, rows) => new Table({ width: { size: W, type: WidthType.DXA }, columnWidths: cols, rows });
+const table = (cols, rows) => new Table({ width: { size: W, type: WidthType.DXA }, columnWidths: cols, layout: TableLayoutType.FIXED, rows });
 const L = (t, w, span) => cell(t, w, { shade: GRAY, hei: true, span });
 
 // ---------- 一、基本信息 ----------
@@ -155,27 +160,28 @@ const clauses = [
 ];
 
 // ---------- 三、签署 ----------
-const notice = table([W], [new TableRow({ children: [cell(
-  '重要提示：本合同中加粗的内容涉及税费、押金扣除、维修付款、违约金、合同解除及物品处置，甲方已提示乙方重点阅读。乙方确认已阅读并理解全部条款。',
-  W, { shade: GRAY, pad: 140 },
-)] })]);
-
-const signCol = (who) => [
-  para(who, { font: HEI, after: 200 }),
-  new Paragraph({ spacing: { after: 360, line: LINE }, children: [new TextRun({ text: '签名：', font: SONG, size: SZ }), new TextRun({ text: '　'.repeat(12), underline: {}, size: SZ })] }),
-  para('日期：以电子签名记录为准', { after: 0 }),
+// 提示框和签名区不用表格：手机预览会把"无边框"表格画出黑框、并按内容缩窄
+const box = { style: BorderStyle.SINGLE, size: 6, color: 'BFBFBF', space: 6 };
+const notice = new Paragraph({
+  children: runs('重要提示：本合同中加粗的内容涉及税费、押金扣除、维修付款、违约金、合同解除及物品处置，甲方已提示乙方重点阅读。乙方确认已阅读并理解全部条款。', { size: 20 }),
+  shading: { type: ShadingType.CLEAR, fill: GRAY, color: 'auto' },
+  border: { top: box, bottom: box, left: box, right: box },
+  spacing: { line: 320, after: 360 },
+});
+const signLine = (who) => [
+  new Paragraph({
+    spacing: { line: LINE, before: 240, after: 80 },
+    children: [
+      new TextRun({ text: `${who}签名：`, font: HEI, size: SZ }),
+      new TextRun({ text: '_'.repeat(28), size: SZ, color: '808080' }),
+    ],
+  }),
+  para('签署日期：以电子签名记录为准', { size: 20, color: '595959', after: 120 }),
 ];
-const signs = table([W / 2, W / 2], [new TableRow({
-  children: ['甲方（出租人）', '乙方（承租人）'].map((w) => new TableCell({
-    width: { size: W / 2, type: WidthType.DXA },
-    borders: { top: none, bottom: none, left: none, right: none },
-    margins: { top: 200, left: 140, right: 140 },
-    children: signCol(w),
-  })),
-})]);
+const signs = [...signLine('甲方（出租人）'), ...signLine('乙方（承租人）')];
 
 // ---------- 附件 ----------
-const a = [2600, 1400, W - 4000];
+const a = [3400, 1500, W - 4900];
 const handover = table(a, [
   new TableRow({ tableHeader: true, children: [L('物品名称', a[0]), L('数量', a[1]), L('状况／备注', a[2])] }),
   ...['空调', '冰箱', '洗衣机', '热水器', '电磁炉', '油烟机', '电视', '床及床垫', '桌椅', '沙发', '钥匙／门禁卡', '其他']
@@ -197,14 +203,13 @@ const body = [
 
   section('三、签署'),
   notice,
-  signs,
+  ...signs,
 
-  new Paragraph({ children: [new PageBreak()] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 240 }, children: [new TextRun({ text: '附件　房屋交接清单', font: HEI, size: 30, bold: true })] }),
-  table([1500, W - 1500], [
-    new TableRow({ children: [L('房屋地址', 1500), cell('【房屋坐落】', W - 1500)] }),
-    new TableRow({ children: [L('交付日期', 1500), cell('【交付时间】', W - 1500)] }),
-    new TableRow({ children: [L('水电', 1500), cell('预付充值、即充即用，按各户独立账户余额计费，入住时无需抄表。', W - 1500)] }),
+  new Paragraph({ pageBreakBefore: true, alignment: AlignmentType.CENTER, spacing: { after: 240 }, children: [new TextRun({ text: '附件　房屋交接清单', font: HEI, size: 30, bold: true })] }),
+  table([1950, W - 1950], [
+    new TableRow({ children: [L('房屋地址', 1950), cell('【房屋坐落】', W - 1950)] }),
+    new TableRow({ children: [L('交付日期', 1950), cell('【交付时间】', W - 1950)] }),
+    new TableRow({ children: [L('水电', 1950), cell('预付充值、即充即用，按各户独立账户余额计费，入住时无需抄表。', W - 1950)] }),
   ]),
   para('', { after: 160 }),
   handover,
@@ -215,6 +220,7 @@ const body = [
 const doc = new Document({
   creator: 'LandlordEasy',
   title: '住房租赁合同（V4）',
+  numbering,
   styles: { default: { document: { run: { font: 'SimSun', size: SZ } } } },
   sections: [{
     properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 1300, bottom: 1300, left: 1418, right: 1418, footer: 600 } } },
@@ -223,11 +229,8 @@ const doc = new Document({
         children: [new Paragraph({
           alignment: AlignmentType.CENTER,
           children: [
-            new TextRun({ text: '住房租赁合同（模板V4·2026年9月）　　第 ', size: 16, font: SONG, color: '808080' }),
+            new TextRun({ text: '住房租赁合同（模板V4）　', size: 16, font: SONG, color: '808080' }),
             new TextRun({ children: [PageNumber.CURRENT], size: 16, font: SONG, color: '808080' }),
-            new TextRun({ text: ' 页／共 ', size: 16, font: SONG, color: '808080' }),
-            new TextRun({ children: [PageNumber.TOTAL_PAGES], size: 16, font: SONG, color: '808080' }),
-            new TextRun({ text: ' 页', size: 16, font: SONG, color: '808080' }),
           ],
         })],
       }),
