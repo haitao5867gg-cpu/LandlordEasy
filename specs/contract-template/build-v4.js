@@ -165,7 +165,7 @@ const box = { style: BorderStyle.SINGLE, size: 6, color: 'BFBFBF', space: 6 };
 const notice = new Paragraph({
   children: runs('重要提示：本合同中加粗的内容涉及税费、押金扣除、维修付款、违约金、合同解除及物品处置，甲方已提示乙方重点阅读。乙方确认已阅读并理解全部条款。', { size: 20 }),
   shading: { type: ShadingType.CLEAR, fill: GRAY, color: 'auto' },
-  border: { top: box, bottom: box, left: box, right: box },
+  border: { top: box, left: box, bottom: box, right: box },
   spacing: { line: 320, after: 360 },
 });
 const signLine = (who) => [
